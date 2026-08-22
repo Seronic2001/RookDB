@@ -318,8 +318,156 @@ fn test_column_schema_find() {
 
 // ── INFORMATION_SCHEMA tests ──────────────────────────────────────────────────
 
-// NOTE: INFORMATION_SCHEMA planning tests arrive with the system-table
-// stage, when `information_schema.*` routing becomes executable.
+#[test]
+fn test_info_schema_tables_plan() {
+    let catalog = make_test_catalog();
+    let select = SelectPlan {
+        projections: vec![SelectExpr::Wildcard],
+        from: vec![TableRef { name: "information_schema.tables".to_string(), alias: None }],
+        joins: vec![], selection: None, group_by: vec![], having: None,
+        order_by: vec![], limit: None, distinct: false, ctes: vec![],
+    };
+    let plan = plan_select(&select, &catalog, "test_db").expect("info_schema plan should succeed");
+    assert_eq!(collect_labels(&plan), vec!["Project", "TableScan"]);
+    match plan {
+        LogicalPlan::Project(p) => {
+            let col_names: Vec<&str> = p.expressions.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(col_names, vec!["table_catalog", "table_schema", "table_name", "table_type"]);
+            match &*p.child {
+                LogicalPlan::TableScan(t) => {
+                    assert_eq!(t.table, "tables");
+                    assert_eq!(t.system_table_name, Some("tables".to_string()));
+                    assert_eq!(t.schema.columns.len(), 4);
+                }
+                _ => panic!("Expected TableScan child"),
+            }
+        }
+        _ => panic!("Expected Project root"),
+    }
+}
+
+#[test]
+fn test_info_schema_columns_plan() {
+    let catalog = make_test_catalog();
+    let select = SelectPlan {
+        projections: vec![SelectExpr::Wildcard],
+        from: vec![TableRef { name: "information_schema.columns".to_string(), alias: None }],
+        joins: vec![], selection: None, group_by: vec![], having: None,
+        order_by: vec![], limit: None, distinct: false, ctes: vec![],
+    };
+    let plan = plan_select(&select, &catalog, "test_db").expect("plan should succeed");
+    assert_eq!(collect_labels(&plan), vec!["Project", "TableScan"]);
+    match plan {
+        LogicalPlan::Project(p) => {
+            assert_eq!(p.expressions.len(), 8);
+            match &*p.child {
+                LogicalPlan::TableScan(t) => {
+                    assert_eq!(t.system_table_name, Some("columns".to_string()));
+                    assert_eq!(t.schema.columns[0].name, "table_catalog");
+                    assert_eq!(t.schema.columns[3].name, "column_name");
+                }
+                _ => panic!("Expected TableScan child"),
+            }
+        }
+        _ => panic!("Expected Project root"),
+    }
+}
+
+#[test]
+fn test_info_schema_schemata_plan() {
+    let catalog = make_test_catalog();
+    let select = SelectPlan {
+        projections: vec![SelectExpr::Wildcard],
+        from: vec![TableRef { name: "information_schema.schemata".to_string(), alias: None }],
+        joins: vec![], selection: None, group_by: vec![], having: None,
+        order_by: vec![], limit: None, distinct: false, ctes: vec![],
+    };
+    let plan = plan_select(&select, &catalog, "test_db").expect("plan should succeed");
+    match plan {
+        LogicalPlan::Project(p) => {
+            assert_eq!(p.expressions.len(), 2);
+            match &*p.child {
+                LogicalPlan::TableScan(t) => {
+                    assert_eq!(t.system_table_name, Some("databases".to_string()));
+                    assert_eq!(t.schema.columns[0].name, "catalog_name");
+                    assert_eq!(t.schema.columns[1].name, "schema_name");
+                }
+                _ => panic!("Expected TableScan child"),
+            }
+        }
+        _ => panic!("Expected Project root"),
+    }
+}
+
+#[test]
+fn test_info_schema_indexes_plan() {
+    let catalog = make_test_catalog();
+    let select = SelectPlan {
+        projections: vec![SelectExpr::Wildcard],
+        from: vec![TableRef { name: "information_schema.indexes".to_string(), alias: None }],
+        joins: vec![], selection: None, group_by: vec![], having: None,
+        order_by: vec![], limit: None, distinct: false, ctes: vec![],
+    };
+    let plan = plan_select(&select, &catalog, "test_db").expect("plan should succeed");
+    match plan {
+        LogicalPlan::Project(p) => {
+            assert_eq!(p.expressions.len(), 6);
+            match &*p.child {
+                LogicalPlan::TableScan(t) => assert_eq!(t.system_table_name, Some("indexes".to_string())),
+                _ => panic!("Expected TableScan child"),
+            }
+        }
+        _ => panic!("Expected Project root"),
+    }
+}
+
+#[test]
+fn test_info_schema_table_constraints_plan() {
+    let catalog = make_test_catalog();
+    let select = SelectPlan {
+        projections: vec![SelectExpr::Wildcard],
+        from: vec![TableRef { name: "information_schema.table_constraints".to_string(), alias: None }],
+        joins: vec![], selection: None, group_by: vec![], having: None,
+        order_by: vec![], limit: None, distinct: false, ctes: vec![],
+    };
+    let plan = plan_select(&select, &catalog, "test_db").expect("plan should succeed");
+    match plan {
+        LogicalPlan::Project(p) => {
+            assert_eq!(p.expressions.len(), 6);
+            match &*p.child {
+                LogicalPlan::TableScan(t) => assert_eq!(t.system_table_name, Some("constraints".to_string())),
+                _ => panic!("Expected TableScan child"),
+            }
+        }
+        _ => panic!("Expected Project root"),
+    }
+}
+
+#[test]
+fn test_info_schema_views_plan() {
+    let catalog = make_test_catalog();
+    let select = SelectPlan {
+        projections: vec![SelectExpr::Wildcard],
+        from: vec![TableRef { name: "information_schema.views".to_string(), alias: None }],
+        joins: vec![], selection: None, group_by: vec![], having: None,
+        order_by: vec![], limit: None, distinct: false, ctes: vec![],
+    };
+    let plan = plan_select(&select, &catalog, "test_db").expect("plan should succeed");
+    match plan {
+        LogicalPlan::Project(p) => {
+            assert_eq!(p.expressions.len(), 4);
+            match &*p.child {
+                LogicalPlan::TableScan(t) => {
+                    assert_eq!(t.system_table_name, Some("views".to_string()));
+                    assert_eq!(t.schema.columns[2].name, "view_name");
+                    assert_eq!(t.schema.columns[3].name, "view_definition");
+                }
+                _ => panic!("Expected TableScan child"),
+            }
+        }
+        _ => panic!("Expected Project root"),
+    }
+}
 
 #[test]
 fn test_catalog_columns_to_schema() {

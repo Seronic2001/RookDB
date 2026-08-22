@@ -60,15 +60,24 @@ pub fn build_table_or_cte_scan(
             name: cte_name.to_string(),
             schema: schema.clone(),
         }))
-    } else if tref.name.starts_with("information_schema.") {
-        // INFORMATION_SCHEMA routing arrives with the system-table stage;
-        // until then the metadata views are planned as unknown tables.
-        return Err(PlanError {
-            message: format!(
-                "INFORMATION_SCHEMA views are not available yet (planned for the metadata stage): '{}'",
-                tref.name
-            ),
-        });
+    } else if let Some(sys_name) = tref.name.strip_prefix("information_schema.") {
+        let sys_lower = sys_name.to_ascii_lowercase();
+        let sys_table_name = match sys_lower.as_str() {
+            "schemata" => "databases",
+            "tables" => "tables",
+            "columns" => "columns",
+            "table_constraints" => "constraints",
+            "statistics" | "indexes" => "indexes",
+            "key_column_usage" => "columns",
+            other => other,
+        };
+        let column_schema = crate::backend::system_table::info_schema_column_schema(&sys_lower);
+        Ok(LogicalPlan::TableScan(LogicalTableScan {
+            table: sys_name.to_string(),
+            alias: tref.alias.clone(),
+            schema: column_schema,
+            system_table_name: Some(sys_table_name.to_string()),
+        }))
     } else {
         let (resolved_name, alias) = resolve_table_ref(tref, db)?;
         let table_schema = db.tables.get(&resolved_name).ok_or_else(|| PlanError {

@@ -350,17 +350,40 @@ impl PhysicalPlanner {
     /// B+Tree stage).
     pub(crate) fn plan_table_scan(&self, ts: &LogicalTableScan) -> Result<Box<dyn PhysicalOperator>, String> {
         // ── System table path ─────────────────────────────────────────────
+        //
+        // INFORMATION_SCHEMA views read their backing system table from
+        // database/system/{name}.dat, deserialising with the physical schema
+        // while exposing the standard SQL view column names via a mapping.
         if let Some(sys_name) = &ts.system_table_name {
             // Virtual single-row table: no heap file needed
             if sys_name == "__singlerow__" {
                 return Ok(Box::new(SingleRowOperator::new()));
             }
-            // Real system tables (INFORMATION_SCHEMA backing stores) are
-            // introduced by the metadata stage.
-            return Err(format!(
-                "System table '{}' requires the metadata stage (system tables).",
-                sys_name
-            ));
+
+            let heap_path = PathBuf::from(format!("database/system/{}.dat", sys_name));
+            if !heap_path.exists() {
+                return Err(format!("System table heap file not found: {:?}", heap_path));
+            }
+
+            let info_schema = &ts.schema;
+            let sys_schema =
+                crate::backend::system_table::system_table_schema(sys_name);
+            let (mut column_info, column_mapping) =
+                self.map_info_schema_columns(sys_name, info_schema, &sys_schema);
+            // Set the table name so qualified refs resolve against the view.
+            let sys_table_name = sys_name.to_string();
+            for ci in column_info.iter_mut() {
+                ci.table = Some(sys_table_name.clone());
+            }
+            let schema_types: Vec<DataType> = sys_schema.to_vec();
+            let heap_manager = HeapManager::open(heap_path)
+                .map_err(|e| format!("Failed to open system table '{}': {}", sys_name, e))?;
+            return Ok(Box::new(SeqScanOperator::new_with_mapping(
+                heap_manager,
+                schema_types,
+                column_info,
+                column_mapping,
+            )));
         }
 
 
