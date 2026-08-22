@@ -1,0 +1,20 @@
+pub mod buffer_manager;
+pub mod catalog;
+pub mod disk;
+pub mod error_handler;
+pub mod executor;
+pub mod fsm;
+pub mod heap;
+pub mod instrumentation;
+pub mod layout;
+pub mod log;
+pub mod page;
+pub mod query;
+pub mod page_api;
+pub mod statistics;
+pub mod table;
+pub mod types;
+pub mod visibility_map;
+
+pub use log::operation_log;
+pub use visibility_map::{vm_set_page, vm_clear_page, vm_is_visible, vm_visible_count, vm_evict};
