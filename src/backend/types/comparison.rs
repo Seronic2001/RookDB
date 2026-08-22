@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, OrderedF64};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -105,6 +105,132 @@ impl Comparable for DataValue {
             (DataValue::Real(a), DataValue::Real(b)) => Ok(a.cmp(b)),
             (DataValue::DoublePrecision(a), DataValue::DoublePrecision(b)) => Ok(a.cmp(b)),
 
+            // Cross-type integer ↔ REAL comparisons (widen to f64 via OrderedF64)
+            (DataValue::SmallInt(a), DataValue::Real(b)) => {
+                let af = OrderedF64(*a as f64);
+                let bf = OrderedF64(b.0 as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::Real(a), DataValue::SmallInt(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                let bf = OrderedF64(*b as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::Int(a), DataValue::Real(b)) => {
+                let af = OrderedF64(*a as f64);
+                let bf = OrderedF64(b.0 as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::Real(a), DataValue::Int(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                let bf = OrderedF64(*b as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::BigInt(a), DataValue::Real(b)) => {
+                let af = OrderedF64(*a as f64);
+                let bf = OrderedF64(b.0 as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::Real(a), DataValue::BigInt(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                let bf = OrderedF64(*b as f64);
+                Ok(af.cmp(&bf))
+            }
+
+            // Cross-type REAL ↔ DOUBLE PRECISION promotion (widen Real to Double)
+            (DataValue::Real(a), DataValue::DoublePrecision(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                Ok(af.cmp(b))
+            }
+            (DataValue::DoublePrecision(a), DataValue::Real(b)) => {
+                let bf = OrderedF64(b.0 as f64);
+                Ok(a.cmp(&bf))
+            }
+
+            // Cross-type integer ↔ DOUBLE PRECISION comparisons
+            (DataValue::SmallInt(a), DataValue::DoublePrecision(b)) => {
+                let af = OrderedF64(*a as f64);
+                let bf = OrderedF64(b.0 as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::DoublePrecision(a), DataValue::SmallInt(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                let bf = OrderedF64(*b as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::Int(a), DataValue::DoublePrecision(b)) => {
+                let af = OrderedF64(*a as f64);
+                let bf = OrderedF64(b.0 as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::DoublePrecision(a), DataValue::Int(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                let bf = OrderedF64(*b as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::BigInt(a), DataValue::DoublePrecision(b)) => {
+                let af = OrderedF64(*a as f64);
+                let bf = OrderedF64(b.0 as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::DoublePrecision(a), DataValue::BigInt(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                let bf = OrderedF64(*b as f64);
+                Ok(af.cmp(&bf))
+            }
+
+            // Cross-type NUMERIC ↔ INTEGER: widen integer to NumericValue at the same scale, then compare exactly
+            (DataValue::Numeric(a), DataValue::SmallInt(b)) => {
+                let factor = 10_i128.pow(a.scale as u32);
+                let b_scaled = (*b as i128) * factor;
+                Ok(a.unscaled.cmp(&b_scaled))
+            }
+            (DataValue::SmallInt(a), DataValue::Numeric(b)) => {
+                let factor = 10_i128.pow(b.scale as u32);
+                let a_scaled = (*a as i128) * factor;
+                Ok(a_scaled.cmp(&b.unscaled))
+            }
+            (DataValue::Numeric(a), DataValue::Int(b)) => {
+                let factor = 10_i128.pow(a.scale as u32);
+                let b_scaled = (*b as i128) * factor;
+                Ok(a.unscaled.cmp(&b_scaled))
+            }
+            (DataValue::Int(a), DataValue::Numeric(b)) => {
+                let factor = 10_i128.pow(b.scale as u32);
+                let a_scaled = (*a as i128) * factor;
+                Ok(a_scaled.cmp(&b.unscaled))
+            }
+            (DataValue::Numeric(a), DataValue::BigInt(b)) => {
+                let factor = 10_i128.pow(a.scale as u32);
+                let b_scaled = (*b as i128) * factor;
+                Ok(a.unscaled.cmp(&b_scaled))
+            }
+            (DataValue::BigInt(a), DataValue::Numeric(b)) => {
+                let factor = 10_i128.pow(b.scale as u32);
+                let a_scaled = (*a as i128) * factor;
+                Ok(a_scaled.cmp(&b.unscaled))
+            }
+
+            // Cross-type NUMERIC ↔ FLOAT: convert NUMERIC to f64, compare via OrderedF64
+            (DataValue::Numeric(a), DataValue::Real(b)) => {
+                let af = OrderedF64(a.unscaled as f64 / 10_f64.powi(a.scale as i32));
+                let bf = OrderedF64(b.0 as f64);
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::Real(a), DataValue::Numeric(b)) => {
+                let af = OrderedF64(a.0 as f64);
+                let bf = OrderedF64(b.unscaled as f64 / 10_f64.powi(b.scale as i32));
+                Ok(af.cmp(&bf))
+            }
+            (DataValue::Numeric(a), DataValue::DoublePrecision(b)) => {
+                let af = OrderedF64(a.unscaled as f64 / 10_f64.powi(a.scale as i32));
+                Ok(af.cmp(b))
+            }
+            (DataValue::DoublePrecision(a), DataValue::Numeric(b)) => {
+                let bf = OrderedF64(b.unscaled as f64 / 10_f64.powi(b.scale as i32));
+                Ok(a.cmp(&bf))
+            }
+
             // Exact decimal — normalise scales before comparing unscaled values
             (DataValue::Numeric(a), DataValue::Numeric(b)) => {
                 let ordering = if a.scale == b.scale {
@@ -131,10 +257,36 @@ impl Comparable for DataValue {
             // VARCHAR: exact byte-wise lexicographic comparison
             (DataValue::Varchar(a), DataValue::Varchar(b)) => Ok(a.cmp(b)),
 
+            // Cross-type CHAR ↔ VARCHAR: trim CHAR trailing spaces, compare as strings
+            (DataValue::Char(a), DataValue::Varchar(b)) => Ok(a.trim_end().cmp(b.as_str())),
+            (DataValue::Varchar(a), DataValue::Char(b)) => Ok(a.as_str().cmp(b.trim_end())),
+
             // Temporal types: chronological ordering
             (DataValue::Date(a), DataValue::Date(b)) => Ok(a.cmp(b)),
             (DataValue::Time(a), DataValue::Time(b)) => Ok(a.cmp(b)),
             (DataValue::Timestamp(a), DataValue::Timestamp(b)) => Ok(a.cmp(b)),
+
+            // Cross-type temporal: DATE ↔ TIMESTAMP (promote Date to midnight Timestamp)
+            (DataValue::Date(a), DataValue::Timestamp(b)) => {
+                let midnight = a.and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| ComparisonError::TypeMismatch {
+                        left: "DATE".to_string(),
+                        right: "TIMESTAMP".to_string(),
+                    })?;
+                Ok(midnight.cmp(b))
+            }
+            (DataValue::Timestamp(a), DataValue::Date(b)) => {
+                let midnight = b.and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| ComparisonError::TypeMismatch {
+                        left: "TIMESTAMP".to_string(),
+                        right: "DATE".to_string(),
+                    })?;
+                Ok(a.cmp(&midnight))
+            }
+
+            // Cross-type temporal: TIME ↔ TIMESTAMP (extract time component from Timestamp)
+            (DataValue::Time(a), DataValue::Timestamp(b)) => Ok(a.cmp(&b.time())),
+            (DataValue::Timestamp(a), DataValue::Time(b)) => Ok(a.time().cmp(b)),
 
             // BIT: lexicographic over the '0'/'1' string representation
             (DataValue::Bit(a), DataValue::Bit(b)) => Ok(a.cmp(b)),

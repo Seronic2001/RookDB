@@ -341,6 +341,7 @@ fn infer_expr_type(expr: &Expr, schema: &Table) -> Result<SqlDataType, String> {
 ///   instructions only hold a `usize` index so every variant stays ≤ 16 bytes.
 /// - Lazy column extraction: only the columns the bytecode actually touches get decoded.
 /// - Short-circuit AND/OR via `JumpIfFalse`/`JumpIfTrue`.
+#[allow(dead_code)]
 pub struct SelectionExecutor {
     schema: Table,
     column_types: Vec<SqlDataType>,
@@ -1426,6 +1427,12 @@ fn compute_arithmetic(
         }
 
         // Cross-type widening — promote the narrower type before re-dispatching
+        (DataValue::Real(a), DataValue::DoublePrecision(_)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.0 as f64))), Some(r.clone()))
+        }
+        (DataValue::DoublePrecision(_), DataValue::Real(b)) => {
+            compute_arithmetic(op, Some(l.clone()), Some(DataValue::DoublePrecision(OrderedF64(b.0 as f64))))
+        }
         (DataValue::Int(a), DataValue::DoublePrecision(_)) => {
             compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(*a as f64))), Some(r.clone()))
         }
@@ -1461,6 +1468,56 @@ fn compute_arithmetic(
         }
         (DataValue::DoublePrecision(_), DataValue::SmallInt(b)) => {
             compute_arithmetic(op, Some(l.clone()), Some(DataValue::DoublePrecision(OrderedF64(*b as f64))))
+        }
+        // Cross-type REAL ↔ INTEGER arithmetic (widen both to DoublePrecision)
+        (DataValue::Real(a), DataValue::Int(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.0 as f64))), Some(DataValue::DoublePrecision(OrderedF64(*b as f64))))
+        }
+        (DataValue::Int(a), DataValue::Real(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(*a as f64))), Some(DataValue::DoublePrecision(OrderedF64(b.0 as f64))))
+        }
+        (DataValue::Real(a), DataValue::SmallInt(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.0 as f64))), Some(DataValue::DoublePrecision(OrderedF64(*b as f64))))
+        }
+        (DataValue::SmallInt(a), DataValue::Real(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(*a as f64))), Some(DataValue::DoublePrecision(OrderedF64(b.0 as f64))))
+        }
+        (DataValue::Real(a), DataValue::BigInt(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.0 as f64))), Some(DataValue::DoublePrecision(OrderedF64(*b as f64))))
+        }
+        (DataValue::BigInt(a), DataValue::Real(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(*a as f64))), Some(DataValue::DoublePrecision(OrderedF64(b.0 as f64))))
+        }
+        // Cross-type NUMERIC ↔ INTEGER/FLOAT: convert both to DoublePrecision and recurse
+        (DataValue::Numeric(a), DataValue::SmallInt(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.unscaled as f64 / 10_f64.powi(a.scale as i32)))), Some(DataValue::DoublePrecision(OrderedF64(*b as f64))))
+        }
+        (DataValue::SmallInt(a), DataValue::Numeric(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(*a as f64))), Some(DataValue::DoublePrecision(OrderedF64(b.unscaled as f64 / 10_f64.powi(b.scale as i32)))))
+        }
+        (DataValue::Numeric(a), DataValue::Int(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.unscaled as f64 / 10_f64.powi(a.scale as i32)))), Some(DataValue::DoublePrecision(OrderedF64(*b as f64))))
+        }
+        (DataValue::Int(a), DataValue::Numeric(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(*a as f64))), Some(DataValue::DoublePrecision(OrderedF64(b.unscaled as f64 / 10_f64.powi(b.scale as i32)))))
+        }
+        (DataValue::Numeric(a), DataValue::BigInt(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.unscaled as f64 / 10_f64.powi(a.scale as i32)))), Some(DataValue::DoublePrecision(OrderedF64(*b as f64))))
+        }
+        (DataValue::BigInt(a), DataValue::Numeric(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(*a as f64))), Some(DataValue::DoublePrecision(OrderedF64(b.unscaled as f64 / 10_f64.powi(b.scale as i32)))))
+        }
+        (DataValue::Numeric(a), DataValue::Real(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.unscaled as f64 / 10_f64.powi(a.scale as i32)))), Some(DataValue::DoublePrecision(OrderedF64(b.0 as f64))))
+        }
+        (DataValue::Real(a), DataValue::Numeric(b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.0 as f64))), Some(DataValue::DoublePrecision(OrderedF64(b.unscaled as f64 / 10_f64.powi(b.scale as i32)))))
+        }
+        (DataValue::Numeric(a), DataValue::DoublePrecision(_b)) => {
+            compute_arithmetic(op, Some(DataValue::DoublePrecision(OrderedF64(a.unscaled as f64 / 10_f64.powi(a.scale as i32)))), Some(r.clone()))
+        }
+        (DataValue::DoublePrecision(_a), DataValue::Numeric(b)) => {
+            compute_arithmetic(op, Some(l.clone()), Some(DataValue::DoublePrecision(OrderedF64(b.unscaled as f64 / 10_f64.powi(b.scale as i32)))))
         }
 
         _ => Err(format!("Unsupported types for arithmetic: {:?} and {:?}", l, r)),
