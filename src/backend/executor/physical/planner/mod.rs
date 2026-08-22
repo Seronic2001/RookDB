@@ -34,7 +34,6 @@ use crate::backend::catalog::types::Catalog;
 use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
 use self::helpers::infer_expr_type_from_ast;
-use crate::types::DataValue;
 
 pub mod helpers;
 pub mod subqueries;

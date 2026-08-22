@@ -12,6 +12,38 @@
 ///
 /// Bit layout: bit `i` of the bitmap → logical column `i` (LSB-first within
 /// each byte). A `1` means NULL; a `0` means non-NULL.
+
+/// Quickly check whether a specific column is NULL from raw row bytes,
+/// without performing a full deserialisation.
+///
+/// Row layout: [4B header][null_bitmap][var-len offset table][fixed data][var-len data]
+/// - Header: u16 num_cols, u16 num_varlen
+/// - Null bitmap: ceil(num_cols / 8) bytes, starting at offset 4
+///
+/// Returns `Ok(true)` if the column is NULL, `Ok(false)` if non-NULL,
+/// or `Err` if the row is too short to contain the bitmap.
+pub fn is_column_null_in_row(row_bytes: &[u8], column_index: usize) -> Result<bool, String> {
+    if row_bytes.len() < 4 {
+        return Err("Row too short to contain header".to_string());
+    }
+    let num_cols = u16::from_le_bytes([row_bytes[0], row_bytes[1]]) as usize;
+    if column_index >= num_cols {
+        return Err(format!(
+            "Column index {} out of bounds (num_cols={})", column_index, num_cols
+        ));
+    }
+    let bm_size = num_cols.div_ceil(8);
+    if row_bytes.len() < 4 + bm_size {
+        return Err(format!(
+            "Row too short to contain null bitmap: need {} bytes, got {}",
+            4 + bm_size, row_bytes.len()
+        ));
+    }
+    let byte_idx = column_index / 8;
+    let bit_idx = column_index % 8;
+    Ok((row_bytes[4 + byte_idx] & (1 << bit_idx)) != 0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NullBitmap {
     /// Total number of logical columns this bitmap covers.
