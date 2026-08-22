@@ -48,96 +48,63 @@ pub fn init_catalog() {
             Err(e) => {
                 log::error!("Failed to create base data directory: {}", e);
                 log::error!("Please check directory permissions and disk space.");
-                return;
             }
         }
     }
 
-    // Create an empty catalog file if missing
-    if !catalog_path.exists() {
-        let empty_catalog = Catalog {
-            databases: HashMap::new(),
-        };
-        let json = match serde_json::to_string_pretty(&empty_catalog) {
-            Ok(j) => j,
-            Err(e) => {
-                log::error!("Failed to serialize empty catalog: {}", e);
-                return;
-            }
-        };
-
-        match fs::write(catalog_path, json) {
-            Ok(_) => {
-                debug_print_catalog(&format!(
-                    "Created new catalog file: {}",
-                    catalog_path.display()
-                ));
-                log::info!(" Catalog file created at {}", catalog_path.display());
-            }
-            Err(e) => {
-                log::error!("Failed to write catalog file: {}", e);
-                log::error!("Please check disk space and file permissions.");
-            }
+    // Create system directory if not exist
+    let system_dir = Path::new(SYSTEM_DIR);
+    if !system_dir.exists() {
+        if let Err(e) = fs::create_dir_all(system_dir) {
+            log::error!("Failed to create system directory: {}", e);
         }
-    } else {
-        debug_print_catalog(&format!(
-            "Catalog file already exists: {}",
-            catalog_path.display()
-        ));
-        log::info!("Catalog file already exists at {}", catalog_path.display());
     }
+
+    // Bootstrap: migrate catalog.json → system tables if needed
+    let migrated = crate::backend::system_table::bootstrap_system_catalog();
+    if migrated {
+        debug_print_catalog("Catalog migrated from JSON to system tables.");
+    }
+
+    // Ensure all system table files exist (e.g. sys_views may be missing if
+    // this is an existing system catalog that predates the views feature).
+    crate::backend::system_table::ensure_system_tables();
+
+    // NOTE: catalog.json is no longer created or maintained.
+    // The system table heap files under database/system/ are the single
+    // source of truth for catalog metadata. The bootstrap migration in
+    // bootstrap_system_catalog() handles migrating existing catalog.json
+    // into the system tables.
 }
 
 /// Loads the catalog from disk into memory.
 /// Returns an empty catalog if the file is missing or invalid.
 pub fn load_catalog() -> Catalog {
+    // Always load from system tables (the single source of truth).
+    if crate::backend::system_table::system_tables_exist() {
+        debug_print_catalog("Loading catalog from system tables.");
+        return crate::backend::system_table::load_catalog_from_system();
+    }
+
+    // Fallback: if system tables do not exist, attempt JSON load for backward
+    // compatibility during migration. This path is exercised during the first
+    // call before bootstrap_system_catalog() has created the heap files.
     let catalog_path = Path::new(CATALOG_FILE);
-
-    debug_print_catalog(&format!("Loading catalog from: {}", catalog_path.display()));
-
-    // Check if catalog file exists
     if !catalog_path.exists() {
-        debug_print_catalog("Catalog file does not exist. Returning empty catalog.");
-        log::error!("Catalog file does not exist at {}.", catalog_path.display());
+        debug_print_catalog("No catalog.json or system tables found. Returning empty catalog.");
         return Catalog {
             databases: HashMap::new(),
         };
     }
 
-    // Read the catalog file
-    let data = match fs::read_to_string(catalog_path) {
-        Ok(content) => {
-            debug_print_catalog(&format!("Read catalog file ({} bytes)", content.len()));
-            content
-        }
-        Err(err) => {
-            debug_print_catalog(&format!("Error reading catalog file: {}", err));
-            log::error!("Failed to read catalog file: {}", err);
-            log::error!("Please check file permissions and disk space.");
-            return Catalog {
-                databases: HashMap::new(),
-            };
-        }
-    };
-
-    // Deserialize JSON into Catalog struct
-    match serde_json::from_str::<Catalog>(&data) {
-        Ok(catalog) => {
-            debug_print_catalog(&format!(
-                "Parsed catalog successfully ({} databases)",
-                catalog.databases.len()
-            ));
-            catalog
-        }
-        Err(err) => {
-            debug_print_catalog(&format!("✗ Error parsing catalog JSON: {}", err));
-            log::error!("Failed to parse catalog JSON: {}", err);
-            log::error!(
-                "The catalog file may be corrupted. Please back it up and delete it to create a new one."
-            );
-            Catalog {
-                databases: HashMap::new(),
-            }
+    match fs::read_to_string(catalog_path) {
+        Ok(data) => serde_json::from_str::<Catalog>(&data).unwrap_or_else(|e| {
+            log::error!("Failed to parse catalog JSON: {}", e);
+            Catalog { databases: HashMap::new() }
+        }),
+        Err(e) => {
+            log::error!("Failed to read catalog.json: {}", e);
+            Catalog { databases: HashMap::new() }
         }
     }
 }
@@ -145,42 +112,19 @@ pub fn load_catalog() -> Catalog {
 /// Persists the in-memory catalog state to disk.
 /// Returns Ok(()) on success, or an error with a detailed message if something goes wrong.
 pub fn save_catalog(catalog: &Catalog) -> std::io::Result<()> {
-    let catalog_path = Path::new(CATALOG_FILE);
-
-    debug_print_catalog(&format!("Saving catalog to: {}", catalog_path.display()));
-
-    // Convert catalog to formatted JSON
-    let json = match serde_json::to_string_pretty(catalog) {
-        Ok(j) => {
-            debug_print_catalog(&format!("Serialized catalog ({} bytes)", j.len()));
-            j
-        }
-        Err(e) => {
-            let msg = format!("Failed to serialize catalog to JSON: {}", e);
-            debug_print_catalog(&format!("{}", msg));
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, msg));
-        }
-    };
-
-    // Write catalog to disk
-    match fs::write(catalog_path, json) {
-        Ok(_) => {
-            debug_print_catalog(&format!(
-                "Catalog saved successfully to: {}",
-                catalog_path.display()
-            ));
-            log::info!(
-                "Catalog File updated with In Memory Data at {}",
-                catalog_path.display()
-            );
-            Ok(())
-        }
-        Err(e) => {
-            let msg = format!("Failed to write catalog file to disk: {}", e);
-            debug_print_catalog(&format!("{}", msg));
-            Err(e)
-        }
+    // Always save to system tables (the single source of truth).
+    if crate::backend::system_table::system_tables_exist() {
+        debug_print_catalog("Saving catalog to system tables.");
+        return crate::backend::system_table::save_catalog_to_system(catalog);
     }
+
+    // Fallback: save as JSON if system tables don't exist yet
+    // (during initial bootstrap before migration completes).
+    let catalog_path = Path::new(CATALOG_FILE);
+    debug_print_catalog(&format!("Saving catalog to: {}", catalog_path.display()));
+    let json = serde_json::to_string_pretty(catalog)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    fs::write(catalog_path, json)
 }
 
 /// Print debug information for catalog operations
@@ -241,19 +185,10 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         db_name
     ));
 
-    // Persist updated catalog
-    let json = match serde_json::to_string_pretty(&catalog) {
-        Ok(j) => j,
-        Err(e) => {
-            log::info!("Failed to serialize catalog: {}", e);
-            debug_print_catalog(&format!("Serialization error: {}", e));
-            return false;
-        }
-    };
-
-    if let Err(e) = fs::write(CATALOG_FILE, json) {
-        log::info!("Failed to write catalog file: {}", e);
-        debug_print_catalog(&format!("Write error: {}", e));
+    // Persist updated catalog (routes to system tables if migrated)
+    if let Err(e) = save_catalog(catalog) {
+        log::info!("Failed to persist catalog: {}", e);
+        debug_print_catalog(&format!("Persist error: {}", e));
         return false;
     }
 

@@ -1,35 +1,27 @@
-use std::fs;
 use std::path::Path;
 
 use storage_manager::catalog::init_catalog;
+use storage_manager::layout::{SYS_DATABASES_FILE, SYS_TABLES_FILE};
 
-use storage_manager::layout::CATALOG_FILE;
-
+/// `init_catalog()` bootstraps the heap-file system catalog: since the
+/// system-catalog stage it creates `database/system/*.dat` instead of the
+/// legacy `catalog.json` (which is migrated once, then retired).
 #[test]
 fn test_init_catalog() {
-    // Step 1: Ensure catalog.json doesn’t exist before test
-    if Path::new(CATALOG_FILE).exists() {
-        fs::remove_file(CATALOG_FILE).expect("Failed to remove existing catalog file");
-    }
+    // Step 1: start from a clean slate
+    let _ = std::fs::remove_file("database/global/catalog.json");
+    let _ = std::fs::remove_dir_all("database/system");
 
     // Step 2: Run init_catalog()
     init_catalog();
 
-    // Step 3: Verify the file now exists
+    // Step 3: the core system tables must now exist as heap files
     assert!(
-        Path::new(CATALOG_FILE).exists(),
-        "catalog.json was not created"
+        Path::new(SYS_DATABASES_FILE).exists(),
+        "sys_databases was not created"
     );
-
-    // Step 4: Read file content and check it’s valid JSON
-    let content = fs::read_to_string(CATALOG_FILE).expect("Failed to read catalog.json");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&content).expect("catalog.json contains invalid JSON");
-
-    // Step 5: Verify structure is { "databases": {} }
     assert!(
-        parsed.get("databases").is_some(),
-        "catalog.json does not contain 'databases' field"
+        Path::new(SYS_TABLES_FILE).exists(),
+        "sys_tables was not created"
     );
-
 }

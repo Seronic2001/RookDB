@@ -15,6 +15,7 @@ pub mod statistics;
 pub mod table;
 pub mod types;
 pub mod planner;
+pub mod system_table;
 pub mod visibility_map;
 
 pub use log::operation_log;

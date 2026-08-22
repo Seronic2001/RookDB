@@ -21,6 +21,9 @@ fn setup_clean_env() {
         let _ = fs::remove_file(CATALOG_FILE);
     }
 
+    // The catalog lives in the system-table heap files since the
+    // system-catalog stage; clear them alongside the base data.
+    let _ = fs::remove_dir_all("database/system");
     let _ = fs::remove_dir_all("database/base/test_db");
 }
 

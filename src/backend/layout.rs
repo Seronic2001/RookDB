@@ -17,3 +17,13 @@ pub const TABLE_DIR_TEMPLATE: &str = "database/base/{database}";
 
 // File path for specific table
 pub const TABLE_FILE_TEMPLATE: &str = "database/base/{database}/{table}.dat";
+
+/// Directory for system catalog heap tables
+pub const SYSTEM_DIR: &str = "database/system";
+
+/// System table file names
+pub const SYS_DATABASES_FILE: &str = "database/system/databases.dat";
+pub const SYS_TABLES_FILE: &str = "database/system/tables.dat";
+pub const SYS_COLUMNS_FILE: &str = "database/system/columns.dat";
+pub const SYS_CONSTRAINTS_FILE: &str = "database/system/constraints.dat";
+pub const SYS_INDEXES_FILE: &str = "database/system/indexes.dat";
