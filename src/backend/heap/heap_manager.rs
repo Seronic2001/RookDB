@@ -113,10 +113,18 @@ impl Iterator for HeapScanIterator {
                 return None;
             }
 
-            // Load page if not cached or if we moved to a new page
+            // Load page if not cached or if we moved to a new page.
+            //
+            // If a page cannot be read (truncated file, garbage header, ...),
+            // report the error ONCE and advance to the next page. Returning
+            // without advancing would re-enter this branch forever, hanging
+            // any consumer that skips errors (e.g. `filter_map(|r| r.ok())`).
             if self.cached_page.is_none() || self.cached_page.as_ref().unwrap().0 != self.current_page
             {
                 if let Err(e) = self.load_page(self.current_page) {
+                    self.current_page += 1;
+                    self.current_slot = 0;
+                    self.cached_page = None;
                     return Some(Err(e));
                 }
             }
@@ -126,7 +134,13 @@ impl Iterator for HeapScanIterator {
             // Get tuple count for current page
             let tuple_count = match get_tuple_count(page) {
                 Ok(count) => count,
-                Err(e) => return Some(Err(e)),
+                Err(e) => {
+                    // Undecodable page header: report once, move on.
+                    self.current_page += 1;
+                    self.current_slot = 0;
+                    self.cached_page = None;
+                    return Some(Err(e));
+                }
             };
 
             // Check if we've exhausted tuples in this page

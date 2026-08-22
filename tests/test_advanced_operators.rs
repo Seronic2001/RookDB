@@ -4,37 +4,18 @@
 //!
 //! Run with: cargo test --test test_advanced_operators -- --test-threads=1
 
-use std::sync::Mutex;
+mod common;
+
 
 use rook_ast::{QueryPlan, SelectPlan};
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::{
-    create_database, create_table, init_catalog, load_catalog, save_catalog, Catalog, Column,
+    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-
-/// Tests mutate the shared `database/` directory — keep them sequential.
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-fn workspace_dir(tag: &str) -> String {
-    format!("database_advops_p{}_{}", std::process::id(), tag)
-}
-
-fn enter_workspace(tag: &str) {
-    let dir = workspace_dir(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(format!("{}/base", dir)).unwrap();
-    std::env::set_current_dir(&dir).unwrap();
-    init_catalog();
-}
-
-fn leave_workspace(tag: &str) {
-    std::env::set_current_dir("..").unwrap();
-    let _ = std::fs::remove_dir_all(workspace_dir(tag));
-}
 
 fn column(name: &str, data_type: DataType) -> Column {
     Column {
@@ -128,8 +109,7 @@ fn run_select(catalog: &Catalog, db: &str, sql: &str) -> Vec<Vec<String>> {
 
 #[test]
 fn inner_join_matches_rows() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("ijoin");
+    let _ws = common::TestWorkspace::new("advops", "ijoin");
     let catalog = setup_tables("join_db");
 
     let out = run_select(
@@ -141,14 +121,11 @@ fn inner_join_matches_rows() {
     assert_eq!(out.len(), 4, "Alice+Cara and Bob+Eve match; Dan's dangling 99 must not");
     assert_eq!(out[0][0], "'Alice'");
     assert_eq!(out[0][1], "'Engineering'");
-
-    leave_workspace("ijoin");
 }
 
 #[test]
 fn left_join_pads_missing_right_side() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("ljoin");
+    let _ws = common::TestWorkspace::new("advops", "ljoin");
     let catalog = setup_tables("join_db");
 
     let out = run_select(
@@ -160,14 +137,11 @@ fn left_join_pads_missing_right_side() {
     assert_eq!(out.len(), 5, "every employee appears exactly once");
     let dan = out.iter().find(|r| r[0] == "'Dan'").unwrap();
     assert_eq!(dan[1], "NULL", "Dan has no matching department");
-
-    leave_workspace("ljoin");
 }
 
 #[test]
 fn cross_join_produces_cartesian_product() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("cjoin");
+    let _ws = common::TestWorkspace::new("advops", "cjoin");
     let catalog = setup_tables("join_db");
 
     let out = run_select(
@@ -176,16 +150,13 @@ fn cross_join_produces_cartesian_product() {
         "SELECT name, dept_name FROM employees CROSS JOIN departments",
     );
     assert_eq!(out.len(), 15, "5 employees x 3 departments");
-
-    leave_workspace("cjoin");
 }
 
 // ── Aggregation ───────────────────────────────────────────────────────────────
 
 #[test]
 fn global_aggregates() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("agg");
+    let _ws = common::TestWorkspace::new("advops", "agg");
     let catalog = setup_tables("agg_db");
 
     let out = run_select(
@@ -198,14 +169,11 @@ fn global_aggregates() {
     assert_eq!(out[0][1], "361000"); // 85000+62000+75000+48000+91000
     assert_eq!(out[0][2], "48000");
     assert_eq!(out[0][3], "91000");
-
-    leave_workspace("agg");
 }
 
 #[test]
 fn group_by_with_having() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("group");
+    let _ws = common::TestWorkspace::new("advops", "group");
     let catalog = setup_tables("agg_db");
 
     let out = run_select(
@@ -218,14 +186,11 @@ fn group_by_with_having() {
     assert_eq!(out.len(), 2);
     assert_eq!(out[0], vec!["10", "2"]);
     assert_eq!(out[1], vec!["20", "2"]);
-
-    leave_workspace("group");
 }
 
 #[test]
 fn count_skips_nulls_in_column_mode() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("countnull");
+    let _ws = common::TestWorkspace::new("advops", "countnull");
     let catalog = setup_tables("cnt_db");
 
     let out = run_select(
@@ -234,16 +199,13 @@ fn count_skips_nulls_in_column_mode() {
         "SELECT COUNT(dept_name) FROM departments",
     );
     assert_eq!(out[0][0], "3");
-
-    leave_workspace("countnull");
 }
 
 // ── Set operations ────────────────────────────────────────────────────────────
 
 #[test]
 fn union_all_keeps_duplicates() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("unionall");
+    let _ws = common::TestWorkspace::new("advops", "unionall");
     let catalog = setup_tables("set_db");
 
     let out = run_query(
@@ -253,14 +215,11 @@ fn union_all_keeps_duplicates() {
          UNION ALL SELECT id FROM departments WHERE id = 10",
     );
     assert_eq!(out.len(), 3, "two matching employees + one department row");
-
-    leave_workspace("unionall");
 }
 
 #[test]
 fn union_deduplicates() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("union");
+    let _ws = common::TestWorkspace::new("advops", "union");
     let catalog = setup_tables("set_db");
 
     let out = run_query(
@@ -270,14 +229,11 @@ fn union_deduplicates() {
          UNION SELECT id FROM departments WHERE id = 10",
     );
     assert_eq!(out.len(), 1, "UNION collapses duplicates to one '10'");
-
-    leave_workspace("union");
 }
 
 #[test]
 fn except_removes_matching_rows() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("except");
+    let _ws = common::TestWorkspace::new("advops", "except");
     let catalog = setup_tables("set_db");
 
     let out = run_query(
@@ -286,16 +242,13 @@ fn except_removes_matching_rows() {
         "SELECT id FROM employees EXCEPT SELECT id FROM departments",
     );
     assert_eq!(out.len(), 5, "employee ids never collide with department ids");
-
-    leave_workspace("except");
 }
 
 // ── Subqueries ────────────────────────────────────────────────────────────────
 
 #[test]
 fn in_subquery_filters() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("insub");
+    let _ws = common::TestWorkspace::new("advops", "insub");
     let catalog = setup_tables("sub_db");
 
     let out = run_select(
@@ -305,14 +258,11 @@ fn in_subquery_filters() {
          WHERE dept_id IN (SELECT id FROM departments WHERE dept_name = 'Engineering')",
     );
     assert_eq!(out.len(), 2, "Alice and Cara work in Engineering");
-
-    leave_workspace("insub");
 }
 
 #[test]
 fn exists_subquery_is_boolean_filter() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("exists");
+    let _ws = common::TestWorkspace::new("advops", "exists");
     let catalog = setup_tables("sub_db");
 
     let out = run_select(
@@ -321,14 +271,11 @@ fn exists_subquery_is_boolean_filter() {
         "SELECT name FROM employees WHERE EXISTS (SELECT 1 FROM departments)",
     );
     assert_eq!(out.len(), 5, "EXISTS over a non-empty table keeps everyone");
-
-    leave_workspace("exists");
 }
 
 #[test]
 fn scalar_subquery_in_projection() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("scalar");
+    let _ws = common::TestWorkspace::new("advops", "scalar");
     let catalog = setup_tables("sub_db");
 
     let out = run_select(
@@ -338,16 +285,13 @@ fn scalar_subquery_in_projection() {
     );
     assert_eq!(out.len(), 1);
     assert_eq!(out[0][1], "72200"); // 361000 / 5
-
-    leave_workspace("scalar");
 }
 
 // ── CTEs ──────────────────────────────────────────────────────────────────────
 
 #[test]
 fn non_recursive_cte_materialises_once() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("cte");
+    let _ws = common::TestWorkspace::new("advops", "cte");
     let catalog = setup_tables("cte_db");
 
     let out = run_query(
@@ -361,16 +305,13 @@ fn non_recursive_cte_materialises_once() {
     let names: Vec<&String> = out.iter().map(|r| &r[0]).collect();
     assert!(names.contains(&&"'Alice'".to_string()));
     assert!(names.contains(&&"'Cara'".to_string()));
-
-    leave_workspace("cte");
 }
 
 // ── INSERT INTO ... SELECT ────────────────────────────────────────────────────
 
 #[test]
 fn insert_into_select_copies_rows() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("iis");
+    let _ws = common::TestWorkspace::new("advops", "iis");
     let mut catalog = setup_tables("iis_db");
 
     create_table(
@@ -401,14 +342,11 @@ fn insert_into_select_copies_rows() {
     assert_eq!(out.len(), 2);
     assert_eq!(out[0][0], "'Alice'");
     assert_eq!(out[1][0], "'Cara'");
-
-    leave_workspace("iis");
 }
 
 #[test]
 fn group_by_with_aliased_aggregates_and_having() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("agialias");
+    let _ws = common::TestWorkspace::new("advops", "agialias");
     let catalog = setup_tables("agg_alias_db");
 
     // Aliased aggregates must be projected by their alias and referenceable
@@ -429,6 +367,4 @@ fn group_by_with_aliased_aggregates_and_having() {
          GROUP BY dept_id HAVING n >= 2 ORDER BY dept_id",
     );
     assert_eq!(out.len(), 2);
-
-    leave_workspace("agialias");
 }

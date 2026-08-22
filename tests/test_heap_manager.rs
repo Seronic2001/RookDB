@@ -13,6 +13,16 @@ use std::path::PathBuf;
 use storage_manager::backend::heap::{HeapManager};
 use storage_manager::backend::disk::read_header_page;
 
+
+/// Removes this test's `heap_test_*.dat` artifacts on drop — success,
+/// failure or panic — so the crate root stays clean after a test run.
+struct HeapCleanup(String);
+impl Drop for HeapCleanup {
+    fn drop(&mut self) {
+        cleanup_test_files(&self.0);
+    }
+}
+
 fn cleanup_test_files(name: &str) {
     let heap_file = PathBuf::from(format!("heap_test_{}.dat", name));
     let fsm_file = PathBuf::from(format!("heap_test_{}.dat.fsm", name));
@@ -24,6 +34,7 @@ fn cleanup_test_files(name: &str) {
 fn test_heap_create() {
     let name = "create";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let manager = HeapManager::create(path.clone());
@@ -35,12 +46,15 @@ fn test_heap_create() {
     assert_eq!(manager.header.total_tuples, 0, "Should have 0 tuples initially");
     
     cleanup_test_files(name);
+    
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_insert_single() {
     let name = "insert_single";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -58,12 +72,15 @@ fn test_heap_insert_single() {
     assert_eq!(manager.header.total_tuples, 1, "Should have 1 tuple");
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_insert_multiple() {
     let name = "insert_multiple";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -87,12 +104,15 @@ fn test_heap_insert_multiple() {
     );
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_get_tuple() {
     let name = "get_tuple";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -116,12 +136,15 @@ fn test_heap_get_tuple() {
     println!("[TEST] Retrieved: {:?}", std::str::from_utf8(&retrieved_data));
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_scan() {
     let name = "scan";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -161,12 +184,15 @@ fn test_heap_scan() {
     assert_eq!(count, 5, "Should have scanned 5 tuples");
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_header_persistence() {
     let name = "header_persistence";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     
@@ -203,12 +229,15 @@ fn test_heap_header_persistence() {
     }
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_large_tuples() {
     let name = "large_tuples";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -237,12 +266,15 @@ fn test_heap_large_tuples() {
     println!("[TEST] Successfully handled 1000-byte tuple");
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_invalid_operations() {
     let name = "invalid_ops";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -253,12 +285,15 @@ fn test_heap_invalid_operations() {
     assert!(result.is_err(), "Should error on invalid page");
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_empty_scan() {
     let name = "empty_scan";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let manager = HeapManager::create(path.clone())
@@ -270,12 +305,15 @@ fn test_heap_empty_scan() {
     assert_eq!(count, 0, "Empty heap should yield no tuples");
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_heap_multiple_pages() {
     let name = "multiple_pages";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -324,6 +362,8 @@ fn test_heap_multiple_pages() {
     );
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 use storage_manager::backend::page::{Page, get_tuple_count, get_slot_entry};
@@ -354,6 +394,7 @@ fn print_table_slots(file_path: &PathBuf, page_id: u32, step_desc: &str) {
 fn test_slot_reuse_delete_first() {
     let name = "slot_reuse_delete_first";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -373,12 +414,15 @@ fn test_slot_reuse_delete_first() {
     print_table_slots(&path, p1, "3. insert 1");
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }
 
 #[test]
 fn test_slot_reuse_delete_second() {
     let name = "slot_reuse_delete_second";
     cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
 
     let path = PathBuf::from(format!("heap_test_{}.dat", name));
     let mut manager = HeapManager::create(path.clone())
@@ -399,4 +443,6 @@ fn test_slot_reuse_delete_second() {
     print_table_slots(&path, p1, "3. insert 1");
 
     cleanup_test_files(name);
+
+    let _cleanup = HeapCleanup(name.to_string());
 }

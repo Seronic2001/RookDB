@@ -5,33 +5,16 @@
 //!
 //! Run with: cargo test --test test_info_schema -- --test-threads=1
 
-use std::sync::Mutex;
+mod common;
+
 
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::catalog::{
-    create_database, create_table, init_catalog, load_catalog, save_catalog,
+    create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::types::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-fn workspace_dir(tag: &str) -> String {
-    format!("database_info_p{}_{}", std::process::id(), tag)
-}
-
-fn enter_workspace(tag: &str) {
-    let dir = workspace_dir(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(format!("{}/base", dir)).unwrap();
-    std::env::set_current_dir(&dir).unwrap();
-    init_catalog();
-}
-
-fn leave_workspace(tag: &str) {
-    std::env::set_current_dir("..").unwrap();
-    let _ = std::fs::remove_dir_all(workspace_dir(tag));
-}
 
 /// One database with one two-column table.
 fn setup() -> storage_manager::catalog::Catalog {
@@ -82,8 +65,7 @@ fn query(catalog: &storage_manager::catalog::Catalog, sql: &str) -> Vec<Vec<Stri
 
 #[test]
 fn schemata_lists_databases() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("schemata");
+    let _ws = common::TestWorkspace::new("info", "schemata");
     let catalog = setup();
 
     let out = query(
@@ -91,26 +73,20 @@ fn schemata_lists_databases() {
         "SELECT schema_name FROM information_schema.schemata",
     );
     assert!(out.iter().any(|r| r[0] == "'meta_db'"), "meta_db listed");
-
-    leave_workspace("schemata");
 }
 
 #[test]
 fn tables_view_reports_user_tables() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("tables");
+    let _ws = common::TestWorkspace::new("info", "tables");
     let catalog = setup();
 
     let out = query(&catalog, "SELECT table_name FROM information_schema.tables");
     assert!(out.iter().any(|r| r[0] == "'widgets'"), "widgets listed");
-
-    leave_workspace("tables");
 }
 
 #[test]
 fn columns_view_exposes_sql99_names() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("columns");
+    let _ws = common::TestWorkspace::new("info", "columns");
     let catalog = setup();
 
     // The COLUMNS view exposes SQL-99 names; its positional mapping makes
@@ -119,14 +95,11 @@ fn columns_view_exposes_sql99_names() {
     let names: Vec<&String> = out.iter().map(|r| &r[0]).collect();
     assert!(names.contains(&&"'id'".to_string()), "id present: {:?}", names);
     assert!(names.contains(&&"'label'".to_string()), "label present: {:?}", names);
-
-    leave_workspace("columns");
 }
 
 #[test]
 fn where_filtering_works_on_views() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("filter");
+    let _ws = common::TestWorkspace::new("info", "filter");
     let catalog = setup();
 
     let out = query(
@@ -134,6 +107,4 @@ fn where_filtering_works_on_views() {
         "SELECT table_name FROM information_schema.tables WHERE table_name = 'widgets'",
     );
     assert_eq!(out.len(), 1);
-
-    leave_workspace("filter");
 }

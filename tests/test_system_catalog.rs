@@ -8,7 +8,8 @@
 //! Run with: cargo test --test test_system_catalog -- --test-threads=1
 
 use std::path::Path;
-use std::sync::Mutex;
+mod common;
+
 
 use storage_manager::catalog::{
     create_database, create_table, init_catalog, load_catalog, save_catalog,
@@ -16,28 +17,10 @@ use storage_manager::catalog::{
 use storage_manager::layout::{CATALOG_FILE, SYSTEM_DIR};
 use storage_manager::types::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-fn workspace_dir(tag: &str) -> String {
-    format!("database_syscat_p{}_{}", std::process::id(), tag)
-}
-
-fn enter_workspace(tag: &str) {
-    let dir = workspace_dir(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(format!("{}/base", dir)).unwrap();
-    std::env::set_current_dir(&dir).unwrap();
-}
-
-fn leave_workspace(tag: &str) {
-    std::env::set_current_dir("..").unwrap();
-    let _ = std::fs::remove_dir_all(workspace_dir(tag));
-}
 
 #[test]
 fn init_bootstraps_system_tables() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("bootstrap");
+    let _ws = common::TestWorkspace::new("syscat", "bootstrap");
 
     init_catalog();
 
@@ -53,14 +36,11 @@ fn init_bootstraps_system_tables() {
         let path = format!("{}/{}", SYSTEM_DIR, file);
         assert!(Path::new(&path).exists(), "{} should exist", path);
     }
-
-    leave_workspace("bootstrap");
 }
 
 #[test]
 fn catalog_round_trips_through_system_tables() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("roundtrip");
+    let _ws = common::TestWorkspace::new("syscat", "roundtrip");
 
     init_catalog();
     let mut catalog = load_catalog();
@@ -95,16 +75,18 @@ fn catalog_round_trips_through_system_tables() {
     assert_eq!(cols.len(), 2);
     assert_eq!(cols[0].name, "id");
     assert!(!cols[0].nullable);
-
-    leave_workspace("roundtrip");
 }
 
 #[test]
 fn legacy_json_catalog_is_migrated_once() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("migrate");
+    let _ws = common::TestWorkspace::new("syscat", "migrate");
 
-    // Simulate a pre-system-tables installation: only a JSON catalog exists.
+    // Simulate a pre-system-tables installation: the guard bootstrapped the
+    // system tables on entry, so wipe them (and any stray JSON) to restore
+    // the "only a catalog.json exists" state this test needs.
+    let _ = std::fs::remove_dir_all("database/system");
+    let _ = std::fs::remove_file(CATALOG_FILE);
+
     std::fs::create_dir_all("database/global").unwrap();
     let json = r#"{
         "databases": {
@@ -137,6 +119,4 @@ fn legacy_json_catalog_is_migrated_once() {
         "migrated databases survive"
     );
     assert!(catalog.databases["old_db"].tables.contains_key("legacy"));
-
-    leave_workspace("migrate");
 }

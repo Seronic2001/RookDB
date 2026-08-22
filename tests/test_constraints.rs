@@ -6,9 +6,10 @@
 //!
 //! Run with: cargo test --test test_constraints -- --test-threads=1
 
-use std::sync::Mutex;
+mod common;
 
-use storage_manager::backend::constraint::{validate_row_delete, validate_row_insert};
+
+use storage_manager::backend::constraint::validate_row_insert;
 use storage_manager::backend::system_table::insert_constraint_metadata;
 use storage_manager::catalog::{
     create_database, create_table, init_catalog, load_catalog, save_catalog, Catalog, Column,
@@ -17,24 +18,6 @@ use storage_manager::executor::create_index::create_index;
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-fn workspace_dir(tag: &str) -> String {
-    format!("database_con_p{}_{}", std::process::id(), tag)
-}
-
-fn enter_workspace(tag: &str) {
-    let dir = workspace_dir(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(format!("{}/base", dir)).unwrap();
-    std::env::set_current_dir(&dir).unwrap();
-    init_catalog();
-}
-
-fn leave_workspace(tag: &str) {
-    std::env::set_current_dir("..").unwrap();
-    let _ = std::fs::remove_dir_all(workspace_dir(tag));
-}
 
 fn column(name: &str, data_type: DataType) -> Column {
     Column {
@@ -49,8 +32,7 @@ fn column(name: &str, data_type: DataType) -> Column {
 
 #[test]
 fn not_null_rejects_missing_value() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("notnull");
+    let _ws = common::TestWorkspace::new("con", "notnull");
 
     init_catalog();
     let mut catalog = load_catalog();
@@ -68,16 +50,13 @@ fn not_null_rejects_missing_value() {
     assert!(validate_row_insert(&catalog, "nn", "t", &["NULL", "x"]).is_err());
     // ...while a real value passes.
     assert!(validate_row_insert(&catalog, "nn", "t", &["1", "x"]).is_ok());
-
-    leave_workspace("notnull");
 }
 
 // ── UNIQUE ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn unique_with_index_rejects_duplicates() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("uniqidx");
+    let _ws = common::TestWorkspace::new("con", "uniqidx");
 
     init_catalog();
     let mut catalog = load_catalog();
@@ -101,14 +80,11 @@ fn unique_with_index_rejects_duplicates() {
         "duplicate must be rejected"
     );
     assert!(validate_row_insert(&catalog, "uq", "users", &["2", "b@x.io"]).is_ok());
-
-    leave_workspace("uniqidx");
 }
 
 #[test]
 fn unique_without_index_falls_back_to_heap_scan() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("uniqscan");
+    let _ws = common::TestWorkspace::new("con", "uniqscan");
 
     init_catalog();
     let mut catalog = load_catalog();
@@ -124,16 +100,13 @@ fn unique_without_index_falls_back_to_heap_scan() {
     // No index exists for `name` — validation must still catch duplicates
     // via the heap-scan fallback.
     assert!(validate_row_insert(&catalog, "uq2", "people", &["2", "Zed"]).is_err());
-
-    leave_workspace("uniqscan");
 }
 
 // ── CHECK ─────────────────────────────────────────────────────────────────────
 
 #[test]
 fn check_expression_is_enforced() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("check");
+    let _ws = common::TestWorkspace::new("con", "check");
 
     init_catalog();
     let mut catalog = load_catalog();
@@ -149,14 +122,12 @@ fn check_expression_is_enforced() {
     save_catalog(&catalog).unwrap();
 
     // Register CHECK (price > 0) the way the DDL handler does.
-    insert_constraint_metadata("ck", "items", "CHECK", "", None, None); // no-op guard
-    insert_constraint_metadata("ck", "items", "CHECK", "price > 0", None, None);
+    let _ = insert_constraint_metadata("ck", "items", "CHECK", "", None, None); // no-op guard
+    let _ = insert_constraint_metadata("ck", "items", "CHECK", "price > 0", None, None);
 
     let catalog = load_catalog();
     assert!(validate_row_insert(&catalog, "ck", "items", &["5"]).is_ok());
     assert!(validate_row_insert(&catalog, "ck", "items", &["-5"]).is_err());
-
-    leave_workspace("check");
 }
 
 // ── FOREIGN KEY ───────────────────────────────────────────────────────────────
@@ -187,8 +158,8 @@ fn setup_fk(db: &str, action: &str) -> Catalog {
     );
     save_catalog(&catalog).unwrap();
 
-    insert_constraint_metadata(db, "customers", "PRIMARY KEY", "id", None, None);
-    insert_constraint_metadata(
+    let _ = insert_constraint_metadata(db, "customers", "PRIMARY KEY", "id", None, None);
+    let _ = insert_constraint_metadata(
         db,
         "orders",
         &format!("FOREIGN KEY{}", action),
@@ -203,20 +174,16 @@ fn setup_fk(db: &str, action: &str) -> Catalog {
 
 #[test]
 fn fk_rejects_orphan_insert() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("fkorphan");
+    let _ws = common::TestWorkspace::new("con", "fkorphan");
     let catalog = setup_fk("fko", "");
 
     assert!(validate_row_insert(&catalog, "fko", "orders", &["1", "1"]).is_ok());
     assert!(validate_row_insert(&catalog, "fko", "orders", &["2", "99"]).is_err());
-
-    leave_workspace("fkorphan");
 }
 
 #[test]
 fn fk_restrict_blocks_parent_delete() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("fkrestrict");
+    let _ws = common::TestWorkspace::new("con", "fkrestrict");
     let catalog = setup_fk("fkr", "");
 
     insert_single_tuple(&catalog, "fkr", "orders", &["1", "1"]).unwrap();
@@ -229,14 +196,11 @@ fn fk_restrict_blocks_parent_delete() {
     // ...while an unreferenced one deletes normally.
     let result = delete_customers_by_id(&catalog, "fkr", 2);
     assert_eq!(result.deleted_count, 1);
-
-    leave_workspace("fkrestrict");
 }
 
 #[test]
 fn fk_cascade_deletes_children() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("fkcascade");
+    let _ws = common::TestWorkspace::new("con", "fkcascade");
     let catalog = setup_fk("fkc", " ON DELETE CASCADE");
 
     insert_single_tuple(&catalog, "fkc", "orders", &["1", "1"]).unwrap();
@@ -248,14 +212,11 @@ fn fk_cascade_deletes_children() {
 
     let out = count_orders(&catalog, "fkc");
     assert_eq!(out, 0, "child rows must be cascade-deleted");
-
-    leave_workspace("fkcascade");
 }
 
 #[test]
 fn fk_set_null_detaches_children() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("fksetnull");
+    let _ws = common::TestWorkspace::new("con", "fksetnull");
     let catalog = setup_fk("fkn", " ON DELETE SET NULL");
 
     insert_single_tuple(&catalog, "fkn", "orders", &["1", "1"]).unwrap();
@@ -267,8 +228,6 @@ fn fk_set_null_detaches_children() {
     let out = query_orders_customer_ids(&catalog, "fkn");
     assert_eq!(out.len(), 1);
     assert_eq!(out[0], "NULL");
-
-    leave_workspace("fksetnull");
 }
 
 // ── Helpers to observe effects ────────────────────────────────────────────────

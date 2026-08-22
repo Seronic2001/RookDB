@@ -11,7 +11,6 @@
 //!   cargo test --test test_fk_actions -- --test-threads=1
 
 use std::fs;
-use std::path::Path;
 use std::sync::Mutex;
 
 use storage_manager::catalog::{
@@ -22,26 +21,45 @@ use storage_manager::executor::delete::{delete_tuples, parse_where_clause};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::executor::update::{parse_set_clause, update_tuples};
 use storage_manager::heap::HeapManager;
-use storage_manager::layout::CATALOG_FILE;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::row::deserialize_nullable_row;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+use std::path::PathBuf;
 
-fn setup_clean_env() {
-    let _ = env_logger::builder().is_test(true).try_init();
-
-    // Remove catalog.json if present
-    if Path::new(CATALOG_FILE).exists() {
-        let _ = fs::remove_file(CATALOG_FILE);
-    }
-    // Remove system tables
-    let _ = fs::remove_dir_all("database/system");
-    // Remove test database files
-    let _ = fs::remove_dir_all("database/base/test_db");
+/// Per-test isolated workspace: creates `database_ws_<pid>_<tag>` under the
+/// crate root, switches the process into it, and removes it on drop — even
+/// when the test panics. Restores the previous working directory first.
+struct TestWorkspace {
+    prev_cwd: PathBuf,
+    path: PathBuf,
 }
+
+impl TestWorkspace {
+    fn new(tag: &str) -> Self {
+        let prev_cwd = std::env::current_dir().expect("read cwd");
+        let path = prev_cwd.join(format!(
+            "database_ws_p{}_{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("base")).expect("create workspace");
+        std::env::set_current_dir(&path).expect("chdir into workspace");
+        Self { prev_cwd, path }
+    }
+}
+
+impl Drop for TestWorkspace {
+    fn drop(&mut self) {
+        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Create the standard 3-table schema used by most FK action tests:
 ///   users(id:INT PK, name:VARCHAR(50))
@@ -183,7 +201,7 @@ fn get_column_values(db_name: &str, table_name: &str, column_name: &str) -> Vec<
 #[test]
 fn test_minimal_delete_cascade() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("01");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -252,7 +270,7 @@ fn test_minimal_delete_cascade() {
     assert_eq!(count_tuples(db_name, "users"), 0, "users should be empty");
     assert_eq!(count_tuples(db_name, "orders"), 0, "orders should be empty after CASCADE");
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("02");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -262,7 +280,7 @@ fn test_minimal_delete_cascade() {
 #[test]
 fn test_recursive_delete_cascade() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("03");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -316,7 +334,7 @@ fn test_recursive_delete_cascade() {
     assert_eq!(count_tuples(db_name, "orders"), 0, "orders should be empty");
     assert_eq!(count_tuples(db_name, "order_items"), 0, "order_items should be empty");
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("04");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -326,7 +344,7 @@ fn test_recursive_delete_cascade() {
 #[test]
 fn test_recursive_delete_set_null() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("05");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -386,7 +404,7 @@ fn test_recursive_delete_set_null() {
         );
     }
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("06");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -398,7 +416,7 @@ fn test_recursive_delete_set_null() {
 #[test]
 fn test_recursive_update_cascade() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("07");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -456,7 +474,7 @@ fn test_recursive_update_cascade() {
         );
     }
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("08");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -468,7 +486,7 @@ fn test_recursive_update_cascade() {
 #[test]
 fn test_recursive_update_cascade_same_column_chain() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("09");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -558,7 +576,7 @@ fn test_recursive_update_cascade_same_column_chain() {
         assert_eq!(val, "Int(10)", "order_items.fk_user_id should be Int(10), got {:?}", val);
     }
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("10");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -568,7 +586,7 @@ fn test_recursive_update_cascade_same_column_chain() {
 #[test]
 fn test_recursive_update_set_null() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("11");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -624,7 +642,7 @@ fn test_recursive_update_set_null() {
         );
     }
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("12");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -634,7 +652,7 @@ fn test_recursive_update_set_null() {
 #[test]
 fn test_recursive_update_set_null_same_column_chain() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("13");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -724,7 +742,7 @@ fn test_recursive_update_set_null_same_column_chain() {
         assert_eq!(val, "NULL", "order_items.fk_user_id should be NULL, got {:?}", val);
     }
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("14");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -735,7 +753,7 @@ fn test_recursive_update_set_null_same_column_chain() {
 #[test]
 fn test_cycle_detection_delete_cascade() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("15");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -823,7 +841,7 @@ fn test_cycle_detection_delete_cascade() {
     assert!(a_count <= 1, "table_a should have 0-1 rows, got {}", a_count);
     assert!(b_count <= 1, "table_b should have 0-1 rows, got {}", b_count);
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("16");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -833,7 +851,7 @@ fn test_cycle_detection_delete_cascade() {
 #[test]
 fn test_fk_restrict_blocks_delete() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    setup_clean_env();
+    let _ws = TestWorkspace::new("17");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -892,5 +910,5 @@ fn test_fk_restrict_blocks_delete() {
     assert_eq!(result.deleted_count, 0, "RESTRICT should block DELETE");
     assert_eq!(count_tuples(db_name, "parents"), 1, "parents row should still exist");
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("18");
 }

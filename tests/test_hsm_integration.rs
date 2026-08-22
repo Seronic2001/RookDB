@@ -1,5 +1,4 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use storage_manager::catalog::{
     create_database, create_table, init_catalog, load_catalog, save_catalog,
@@ -7,31 +6,48 @@ use storage_manager::catalog::{
 use storage_manager::catalog::types::{Column, Constraints};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::heap::HeapManager;
-use storage_manager::layout::CATALOG_FILE;
 use storage_manager::types::DataType;
 
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-fn setup_clean_env() {
-    let _ = env_logger::builder().is_test(true).try_init();
+/// Per-test isolated workspace: creates `database_ws_<pid>_<tag>` under the
+/// crate root, switches the process into it, and removes it on drop — even
+/// when the test panics. Restores the previous working directory first.
+struct TestWorkspace {
+    prev_cwd: PathBuf,
+    path: PathBuf,
+}
 
-    if Path::new(CATALOG_FILE).exists() {
-        let _ = fs::remove_file(CATALOG_FILE);
+impl TestWorkspace {
+    fn new(tag: &str) -> Self {
+        let prev_cwd = std::env::current_dir().expect("read cwd");
+        let path = prev_cwd.join(format!(
+            "database_ws_p{}_{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("base")).expect("create workspace");
+        std::env::set_current_dir(&path).expect("chdir into workspace");
+        Self { prev_cwd, path }
     }
+}
 
-    // The catalog lives in the system-table heap files since the
-    // system-catalog stage; clear them alongside the base data.
-    let _ = fs::remove_dir_all("database/system");
-    let _ = fs::remove_dir_all("database/base/test_db");
+impl Drop for TestWorkspace {
+    fn drop(&mut self) {
+        if std::env::set_current_dir(&self.prev_cwd).is_ok() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 #[test]
 fn test_multiple_columns_insertion() {
     let _lock = TEST_MUTEX.lock().unwrap();
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("01");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -114,14 +130,14 @@ fn test_multiple_columns_insertion() {
 
     assert_eq!(scanned_count, 2, "Should have 2 tuples inserted");
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("02");
 }
 
 #[test]
 fn test_multiple_tables_isolation() {
     let _lock = TEST_MUTEX.lock().unwrap();
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("03");
     init_catalog();
 
     let mut catalog = load_catalog();
@@ -242,5 +258,5 @@ fn test_multiple_tables_isolation() {
         "Table2 should have 2 tuples"
     );
 
-    setup_clean_env();
+    let _ws = TestWorkspace::new("04");
 }

@@ -12,6 +12,15 @@ fn test_init_table() {
     // Cleanup before test
     let _ = remove_file(TEST_FILE);
     let _ = remove_file(format!("{}.fsm", TEST_FILE));
+    /// Best-effort removal of both artifacts when the test ends.
+    struct BinCleanup;
+    impl Drop for BinCleanup {
+        fn drop(&mut self) {
+            let _ = remove_file(TEST_FILE);
+            let _ = remove_file(format!("{}.fsm", TEST_FILE));
+        }
+    }
+    let _bin_cleanup = BinCleanup;
 
     // Initialize table
     let _hm = HeapManager::create(std::path::PathBuf::from(TEST_FILE)).expect("Failed to create map manager");

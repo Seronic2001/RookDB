@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::fs;
+mod common;
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
 use storage_manager::types::DataType;
 
@@ -7,6 +8,7 @@ use storage_manager::layout::CATALOG_FILE;
 
 #[test]
 fn test_save_catalog() {
+    let _ws = common::TestWorkspace::new("save", "save_catalog");
     // Step 1: Ensure the catalog file exists (create if missing)
     if !Path::new(CATALOG_FILE).exists() {
         init_catalog();

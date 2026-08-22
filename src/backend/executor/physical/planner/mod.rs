@@ -1044,7 +1044,6 @@ impl PhysicalPlanner {
 mod tests {
     use super::*;
     use rook_ast::{PredicateNode, ExprNode, ComparisonOp, BinaryOp, ConstantValue};
-    use rook_ast::logical::*;
 
     fn col(name: &str) -> ExprNode { ExprNode::Column(name.to_string()) }
     fn compound(parts: &[&str]) -> ExprNode {

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+mod common;
 use storage_manager::catalog::init_catalog;
 use storage_manager::layout::{SYS_DATABASES_FILE, SYS_TABLES_FILE};
 
@@ -8,11 +9,10 @@ use storage_manager::layout::{SYS_DATABASES_FILE, SYS_TABLES_FILE};
 /// legacy `catalog.json` (which is migrated once, then retired).
 #[test]
 fn test_init_catalog() {
-    // Step 1: start from a clean slate
-    let _ = std::fs::remove_file("database/global/catalog.json");
-    let _ = std::fs::remove_dir_all("database/system");
+    // Isolated workspace: init_catalog() bootstraps the system tables here.
+    let _ws = common::TestWorkspace::new("initcat", "bootstrap");
 
-    // Step 2: Run init_catalog()
+    // Run init_catalog()
     init_catalog();
 
     // Step 3: the core system tables must now exist as heap files

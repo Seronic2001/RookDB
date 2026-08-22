@@ -6,7 +6,8 @@
 //! Run with: cargo test --test test_btree_index -- --test-threads=1
 
 use std::path::Path;
-use std::sync::Mutex;
+mod common;
+
 
 use rook_ast::logical::{LogicalPlan, LogicalTableScan};
 use rook_ast::{QueryPlan, SelectPlan};
@@ -14,30 +15,12 @@ use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::planner::PhysicalPlanner;
 use storage_manager::catalog::{
-    create_database, create_table, init_catalog, load_catalog, save_catalog, Catalog, Column,
+    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
 };
 use storage_manager::executor::create_index::create_index;
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-fn workspace_dir(tag: &str) -> String {
-    format!("database_btree_p{}_{}", std::process::id(), tag)
-}
-
-fn enter_workspace(tag: &str) {
-    let dir = workspace_dir(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(format!("{}/base", dir)).unwrap();
-    std::env::set_current_dir(&dir).unwrap();
-    init_catalog();
-}
-
-fn leave_workspace(tag: &str) {
-    std::env::set_current_dir("..").unwrap();
-    let _ = std::fs::remove_dir_all(workspace_dir(tag));
-}
 
 fn column(name: &str, data_type: DataType) -> Column {
     Column {
@@ -102,8 +85,7 @@ fn run_select(catalog: &Catalog, db: &str, sql: &str) -> Vec<Vec<String>> {
 
 #[test]
 fn create_index_builds_persistent_files() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("files");
+    let _ws = common::TestWorkspace::new("btree", "files");
     let catalog = setup_table("idx_db");
 
     let entries =
@@ -118,14 +100,11 @@ fn create_index_builds_persistent_files() {
         Path::new("database/base/idx_db/staff.by_salary.idx.meta").exists(),
         "index metadata file must exist"
     );
-
-    leave_workspace("files");
 }
 
 #[test]
 fn planner_prefers_existing_index_for_scans() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("planpref");
+    let _ws = common::TestWorkspace::new("btree", "planpref");
     let catalog = setup_table("idx_db");
 
     let scan_plan = || {
@@ -146,14 +125,11 @@ fn planner_prefers_existing_index_for_scans() {
     // With an index present it drives the scan.
     create_index(&catalog, "idx_db", "staff", "by_salary", "salary").unwrap();
     assert_eq!(planner.plan(&scan_plan()).unwrap().name(), "IndexScan(Full)");
-
-    leave_workspace("planpref");
 }
 
 #[test]
 fn index_scan_returns_identical_rows_to_seq_scan() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("equiv");
+    let _ws = common::TestWorkspace::new("btree", "equiv");
     let catalog = setup_table("eq_db");
 
     let before = run_select(&catalog, "eq_db", "SELECT name FROM staff ORDER BY id");
@@ -163,14 +139,11 @@ fn index_scan_returns_identical_rows_to_seq_scan() {
 
     assert_eq!(before, after, "index-driven scan must not change results");
     assert_eq!(before.len(), 6);
-
-    leave_workspace("equiv");
 }
 
 #[test]
 fn index_is_maintained_on_insert() {
-    let _g = TEST_MUTEX.lock().unwrap();
-    enter_workspace("maint");
+    let _ws = common::TestWorkspace::new("btree", "maint");
     let catalog = setup_table("mnt_db");
 
     create_index(&catalog, "mnt_db", "staff", "by_salary", "salary").unwrap();
@@ -201,6 +174,4 @@ fn index_is_maintained_on_insert() {
     let out = run_select(&catalog, "mnt_db", "SELECT name FROM staff WHERE salary = 55000");
     assert_eq!(out.len(), 1);
     assert_eq!(out[0][0], "'Gus'");
-
-    leave_workspace("maint");
 }

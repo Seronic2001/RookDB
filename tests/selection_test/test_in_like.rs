@@ -26,7 +26,7 @@
 
 use storage_manager::catalog::types::{Column, Table};
 use storage_manager::executor::selection::{
-    ColumnReference, Constant, Expr, Predicate, ComparisonOp,
+    ColumnReference, Constant, Expr, Predicate,
     SelectionExecutor, TriValue,
 };
 use storage_manager::types::{DataType, serialize_nullable_row};

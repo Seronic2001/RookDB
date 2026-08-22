@@ -42,6 +42,7 @@
 use std::collections::HashMap;
 use std::fs::{OpenOptions, remove_file};
 
+mod common;
 use storage_manager::catalog::types::{Catalog, Column, Database, Table};
 use storage_manager::disk::read_page;
 use storage_manager::executor::{ColumnValue, Operator, delete_tuples, parse_where_clause};
@@ -405,6 +406,17 @@ fn parse_combined_range_or_like() {
 const DB: &str = "_testdb_delete";
 const TBL: &str = "_tbl_delete";
 
+
+/// Removes a test's `.bin` heap file and its `.fsm` companion on drop,
+/// covering panic paths that skip the explicit end-of-test removal.
+struct BinCleanup(String);
+impl Drop for BinCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(format!("{}.fsm", self.0));
+    }
+}
+
 fn tmp_path(suffix: &str) -> String {
     format!("test_delete_{}.bin", suffix)
 }
@@ -413,6 +425,8 @@ fn tmp_path(suffix: &str) -> String {
 #[test]
 fn delete_single_by_eq() {
     let path = tmp_path("b1");
+    let _ws = common::TestWorkspace::new("del", "case0");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id = 5").unwrap();
@@ -436,6 +450,8 @@ fn delete_single_by_eq() {
 #[test]
 fn delete_by_range_lt() {
     let path = tmp_path("b2");
+    let _ws = common::TestWorkspace::new("del", "case1");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id < 3").unwrap();
@@ -460,6 +476,8 @@ fn delete_by_range_lt() {
 #[test]
 fn delete_by_not_in() {
     let path = tmp_path("b3");
+    let _ws = common::TestWorkspace::new("del", "case2");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 5);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id NOT IN (1, 2)").unwrap();
@@ -474,6 +492,8 @@ fn delete_by_not_in() {
 #[test]
 fn delete_by_in() {
     let path = tmp_path("b4");
+    let _ws = common::TestWorkspace::new("del", "case3");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id IN (2, 4, 6, 8, 10)").unwrap();
@@ -488,6 +508,8 @@ fn delete_by_in() {
 #[test]
 fn delete_by_like() {
     let path = tmp_path("b5");
+    let _ws = common::TestWorkspace::new("del", "case4");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     // rows 1-9 have names "row_01".."row_09" (contain "row_0")
@@ -503,6 +525,8 @@ fn delete_by_like() {
 #[test]
 fn delete_by_not_like() {
     let path = tmp_path("b6");
+    let _ws = common::TestWorkspace::new("del", "case5");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name NOT LIKE %row_0%").unwrap();
@@ -517,6 +541,8 @@ fn delete_by_not_like() {
 #[test]
 fn delete_all_rows() {
     let path = tmp_path("b7");
+    let _ws = common::TestWorkspace::new("del", "case6");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     println!("[DELETE] Empty WHERE → matches ALL rows. Scanning page 1 ...");
@@ -537,6 +563,8 @@ fn delete_all_rows() {
 #[test]
 fn delete_already_deleted_is_idempotent() {
     let path = tmp_path("b8");
+    let _ws = common::TestWorkspace::new("del", "case7");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 5);
     let catalog = make_catalog(DB, TBL);
     println!("[DELETE] Idempotency test — deleting id=3 twice.");
@@ -565,6 +593,8 @@ fn delete_already_deleted_is_idempotent() {
 #[test]
 fn delete_by_and_range() {
     let path = tmp_path("b9");
+    let _ws = common::TestWorkspace::new("del", "case8");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id >= 4 AND id <= 6").unwrap();
@@ -579,6 +609,8 @@ fn delete_by_and_range() {
 #[test]
 fn delete_by_or() {
     let path = tmp_path("b10");
+    let _ws = common::TestWorkspace::new("del", "case9");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id = 1 OR id = 10").unwrap();
@@ -593,6 +625,8 @@ fn delete_by_or() {
 #[test]
 fn delete_returning_star() {
     let path = tmp_path("b11");
+    let _ws = common::TestWorkspace::new("del", "case10");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 5);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id IN (2, 4)").unwrap();
@@ -617,6 +651,8 @@ fn delete_returning_star() {
 #[test]
 fn delete_by_between() {
     let path = tmp_path("b12");
+    let _ws = common::TestWorkspace::new("del", "case11");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id BETWEEN 3 AND 7").unwrap();
@@ -634,7 +670,9 @@ fn delete_by_between() {
 // C1 – TEXT equality  name = 'row_05'
 #[test]
 fn delete_text_eq() {
-    let path = tmp_path("c1");
+    let path = tmp_path("b13");
+    let _ws = common::TestWorkspace::new("del", "case12");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name = row_05").unwrap();
@@ -646,7 +684,9 @@ fn delete_text_eq() {
 // C2 – TEXT inequality  name != row_05  → deletes 9 rows
 #[test]
 fn delete_text_ne() {
-    let path = tmp_path("c2");
+    let path = tmp_path("b14");
+    let _ws = common::TestWorkspace::new("del", "case13");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name != row_05").unwrap();
@@ -659,7 +699,9 @@ fn delete_text_ne() {
 //       row_06..row_10 > row_05 → 5 rows (row_06,row_07,row_08,row_09,row_10)
 #[test]
 fn delete_text_gt() {
-    let path = tmp_path("c3");
+    let path = tmp_path("b15");
+    let _ws = common::TestWorkspace::new("del", "case14");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name > row_05").unwrap();
@@ -673,7 +715,9 @@ fn delete_text_gt() {
 //       row_01..row_04 < row_05 → 4 rows
 #[test]
 fn delete_text_lt() {
-    let path = tmp_path("c4");
+    let path = tmp_path("b16");
+    let _ws = common::TestWorkspace::new("del", "case15");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name < row_05").unwrap();
@@ -685,7 +729,9 @@ fn delete_text_lt() {
 // C5 – TEXT >=  name >= row_08  → row_08,row_09,row_10 = 3 rows
 #[test]
 fn delete_text_ge() {
-    let path = tmp_path("c5");
+    let path = tmp_path("b17");
+    let _ws = common::TestWorkspace::new("del", "case16");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name >= row_08").unwrap();
@@ -697,7 +743,9 @@ fn delete_text_ge() {
 // C6 – TEXT <=  name <= row_03  → row_01,row_02,row_03 = 3 rows
 #[test]
 fn delete_text_le() {
-    let path = tmp_path("c6");
+    let path = tmp_path("b18");
+    let _ws = common::TestWorkspace::new("del", "case17");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name <= row_03").unwrap();
@@ -709,7 +757,9 @@ fn delete_text_le() {
 // C7 – TEXT BETWEEN (lexicographic): name BETWEEN row_03 AND row_07 → 5 rows
 #[test]
 fn delete_text_between() {
-    let path = tmp_path("c7");
+    let path = tmp_path("b19");
+    let _ws = common::TestWorkspace::new("del", "case18");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     // row_03,row_04,row_05,row_06,row_07  (row_0X strings are all between row_03 and row_07)
@@ -722,7 +772,9 @@ fn delete_text_between() {
 // C8 – TEXT IN list
 #[test]
 fn delete_text_in() {
-    let path = tmp_path("c8");
+    let path = tmp_path("b20");
+    let _ws = common::TestWorkspace::new("del", "case19");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name IN (row_01, row_03, row_05)").unwrap();
@@ -734,7 +786,9 @@ fn delete_text_in() {
 // C9 – TEXT NOT IN list  → deletes all except the listed names
 #[test]
 fn delete_text_not_in() {
-    let path = tmp_path("c9");
+    let path = tmp_path("b21");
+    let _ws = common::TestWorkspace::new("del", "case20");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 5); // row_01..row_05
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name NOT IN (row_01, row_02)").unwrap();
@@ -746,7 +800,9 @@ fn delete_text_not_in() {
 // C10 – TEXT case-insensitive equality
 #[test]
 fn delete_text_eq_case_insensitive() {
-    let path = tmp_path("c10");
+    let path = tmp_path("b22");
+    let _ws = common::TestWorkspace::new("del", "case21");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 5);
     let catalog = make_catalog(DB, TBL);
     // rows are stored as "row_01" etc. — uppercase comparison should still match
@@ -763,7 +819,9 @@ fn delete_text_eq_case_insensitive() {
 // D1 – LIKE: exact match (no wildcards)
 #[test]
 fn delete_like_exact_no_wildcard() {
-    let path = tmp_path("d1");
+    let path = tmp_path("b23");
+    let _ws = common::TestWorkspace::new("del", "case22");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 5);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name LIKE row_03").unwrap();
@@ -775,7 +833,9 @@ fn delete_like_exact_no_wildcard() {
 // D2 – LIKE: trailing wildcard  row_%  → matches all 10
 #[test]
 fn delete_like_trailing_wildcard() {
-    let path = tmp_path("d2");
+    let path = tmp_path("b24");
+    let _ws = common::TestWorkspace::new("del", "case23");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name LIKE row_%").unwrap();
@@ -787,7 +847,9 @@ fn delete_like_trailing_wildcard() {
 // D3 – LIKE: _ single-char wildcard  row_0_  → matches row_01..row_09 (9 rows)
 #[test]
 fn delete_like_single_char_wildcard() {
-    let path = tmp_path("d3");
+    let path = tmp_path("b25");
+    let _ws = common::TestWorkspace::new("del", "case24");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("name LIKE row_0_").unwrap();
@@ -799,7 +861,9 @@ fn delete_like_single_char_wildcard() {
 // D4 – LIKE on INT column → never matches (not an error, just 0 deletions)
 #[test]
 fn delete_like_on_int_column_never_matches() {
-    let path = tmp_path("d4");
+    let path = tmp_path("b26");
+    let _ws = common::TestWorkspace::new("del", "case25");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     // 'id' is INT — LIKE on INT should never match
@@ -816,7 +880,9 @@ fn delete_like_on_int_column_never_matches() {
 // D5 – NOT LIKE on INT column → never matches either
 #[test]
 fn delete_not_like_on_int_column_never_matches() {
-    let path = tmp_path("d5");
+    let path = tmp_path("b27");
+    let _ws = common::TestWorkspace::new("del", "case26");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 5);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id NOT LIKE 1%").unwrap();
@@ -835,7 +901,9 @@ fn delete_not_like_on_int_column_never_matches() {
 // E1 – INT AND TEXT combined  id = 5 AND name = row_05
 #[test]
 fn delete_int_and_text_combined() {
-    let path = tmp_path("e1");
+    let path = tmp_path("b28");
+    let _ws = common::TestWorkspace::new("del", "case27");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id = 5 AND name = row_05").unwrap();
@@ -847,7 +915,9 @@ fn delete_int_and_text_combined() {
 // E2 – INT AND TEXT — mismatch (id=5 but name=row_99 doesn't exist) → 0
 #[test]
 fn delete_int_and_text_no_match() {
-    let path = tmp_path("e2");
+    let path = tmp_path("b29");
+    let _ws = common::TestWorkspace::new("del", "case28");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id = 5 AND name = row_99").unwrap();
@@ -859,7 +929,9 @@ fn delete_int_and_text_no_match() {
 // E3 – INT OR TEXT  id = 1 OR name = row_10  → 2 rows
 #[test]
 fn delete_int_or_text() {
-    let path = tmp_path("e3");
+    let path = tmp_path("b30");
+    let _ws = common::TestWorkspace::new("del", "case29");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id = 1 OR name = row_10").unwrap();
@@ -873,7 +945,9 @@ fn delete_int_or_text() {
 //      All of rows 2,3,4 match → 3 deletions
 #[test]
 fn delete_nested_and_with_like() {
-    let path = tmp_path("e4");
+    let path = tmp_path("b31");
+    let _ws = common::TestWorkspace::new("del", "case30");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("(id >= 2 AND id <= 4) AND name LIKE row_0%").unwrap();
@@ -887,7 +961,9 @@ fn delete_nested_and_with_like() {
 //      Both row_01 and row_02 match → 2 deletions
 #[test]
 fn delete_or_expanded_with_like() {
-    let path = tmp_path("e5");
+    let path = tmp_path("b32");
+    let _ws = common::TestWorkspace::new("del", "case31");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("(id = 1 OR id = 2) AND name LIKE row_0%").unwrap();
@@ -899,7 +975,9 @@ fn delete_or_expanded_with_like() {
 // E6 – triple OR  id = 1 OR id = 5 OR id = 10  → 3 rows
 #[test]
 fn delete_triple_or() {
-    let path = tmp_path("e6");
+    let path = tmp_path("b33");
+    let _ws = common::TestWorkspace::new("del", "case32");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id = 1 OR id = 5 OR id = 10").unwrap();
@@ -911,7 +989,9 @@ fn delete_triple_or() {
 // E7 – extra whitespace everywhere: "  id   >=   3   AND   id   <=   5  "
 #[test]
 fn delete_extra_whitespace_in_clause() {
-    let path = tmp_path("e7");
+    let path = tmp_path("b34");
+    let _ws = common::TestWorkspace::new("del", "case33");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("  id   >=   3   AND   id   <=   5  ").unwrap();
@@ -923,7 +1003,9 @@ fn delete_extra_whitespace_in_clause() {
 // E8 – IN with mixed spacing: "id IN (1,  2,   3)"
 #[test]
 fn delete_in_mixed_spacing() {
-    let path = tmp_path("e8");
+    let path = tmp_path("b35");
+    let _ws = common::TestWorkspace::new("del", "case34");
+    let _bin_cleanup = BinCleanup(path.clone());
     let mut file = setup_table(&path, 10);
     let catalog = make_catalog(DB, TBL);
     let groups = parse_where_clause("id IN (1,  2,   3)").unwrap();

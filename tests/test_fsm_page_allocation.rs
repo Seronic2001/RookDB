@@ -2,8 +2,11 @@
 /// Based on user issue: tuples were being forced to sequential pages (1, 2, 3...)
 /// instead of being distributed across pages with available free space
 
+mod common;
+
 #[test]
 fn test_fsm_page_allocation() {
+    let _ws = common::TestWorkspace::new("fsmp", "fsm_page_allocation");
     use std::fs;
     use std::io::Write;
 

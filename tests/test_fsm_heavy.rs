@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
+mod common;
 use storage_manager::backend::fsm::fsm::FSM;
 use storage_manager::backend::heap::heap_manager::HeapManager;
 use storage_manager::backend::instrumentation::StatsSnapshot;
@@ -38,6 +39,7 @@ fn get_test_path(db_path: &PathBuf, table_name: &str) -> PathBuf {
 /// 9. Time and space for various operations
 #[test]
 fn test_large_insertions() {
+    let _ws = common::TestWorkspace::new("fsmh", "large_insertions");
     let (db_path, _guard) = setup_db_dir("large_insert");
     let table_name = "large_insert";
     let file_path = get_test_path(&db_path, table_name);
@@ -72,6 +74,7 @@ fn test_large_insertions() {
 /// (VACUUM garbage collection would be needed for that), but slot entries are marked invalid.
 #[test]
 fn test_update_delete_fsm_deallocation() {
+    let _ws = common::TestWorkspace::new("fsmh", "update_delete_fsm_deallocation");
     let (db_path, _guard) = setup_db_dir("upd_del_fsm");
     let table_name = "upd_del_fsm";
     let file_path = get_test_path(&db_path, table_name);
@@ -107,6 +110,7 @@ fn test_update_delete_fsm_deallocation() {
 /// Verify that when space is requested, FSM marks it as used, never handing it blindly again without updates.
 #[test]
 fn test_allocation_accuracy() {
+    let _ws = common::TestWorkspace::new("fsmh", "allocation_accuracy");
     let (db_path, _guard) = setup_db_dir("alloc_accuracy");
     let table_name = "alloc_accuracy";
     let file_path = get_test_path(&db_path, table_name);
@@ -126,6 +130,7 @@ fn test_allocation_accuracy() {
 /// 5. Fragmentation Management (Bubble up logic and category correctness)
 #[test]
 fn test_fragmentation_management() {
+    let _ws = common::TestWorkspace::new("fsmh", "fragmentation_management");
     let (db_path, _guard) = setup_db_dir("frag_mgmt");
     let table_name = "frag_mgmt";
     let file_path = get_test_path(&db_path, table_name);
@@ -155,6 +160,7 @@ fn test_fragmentation_management() {
 /// 6. Persistence (System crash recovery)
 #[test]
 fn test_persistence_fsm_recovery() {
+    let _ws = common::TestWorkspace::new("fsmh", "persistence_fsm_recovery");
     let (db_path, _guard) = setup_db_dir("fsm_persistence");
     let table_name = "fsm_persistence";
     let file_path = get_test_path(&db_path, table_name);
@@ -183,6 +189,7 @@ fn test_persistence_fsm_recovery() {
 /// App writes past the chunk logically -> FSM/HM rejects tuples > PAGESIZE
 #[test]
 fn test_boundary_violations() {
+    let _ws = common::TestWorkspace::new("fsmh", "boundary_violations");
     let (db_path, _guard) = setup_db_dir("boundary_viol");
     let table_name = "boundary_viol";
     let file_path = get_test_path(&db_path, table_name);
@@ -203,6 +210,7 @@ fn test_boundary_violations() {
 /// 1. Reallocation after vacuum (Replaces upd_del_fsm logic effectively showing FSM reuse)
 #[test]
 fn test_fsm_reallocation_after_vacuum() {
+    let _ws = common::TestWorkspace::new("fsmh", "fsm_reallocation_after_vacuum");
     let (db_path, _guard) = setup_db_dir("fsm_reallocation");
     let table_name = "fsm_reallocation";
     let file_path = get_test_path(&db_path, table_name);
@@ -241,6 +249,7 @@ fn test_fsm_reallocation_after_vacuum() {
 /// 2. The "Masking" Bubble-Up Test
 #[test]
 fn test_fsm_bubble_up_recalculation() {
+    let _ws = common::TestWorkspace::new("fsmh", "fsm_bubble_up_recalculation");
     let (db_path, _guard) = setup_db_dir("bubble_up");
     let table_name = "bubble_up";
     let file_path = get_test_path(&db_path, table_name);
@@ -274,6 +283,7 @@ fn test_fsm_bubble_up_recalculation() {
 /// 3. The Initial Unused Space Test
 #[test]
 fn test_fsm_initial_state_routing() {
+    let _ws = common::TestWorkspace::new("fsmh", "fsm_initial_state_routing");
     let (db_path, _guard) = setup_db_dir("fsm_initial_state");
     let table_name = "fsm_initial_state";
     let file_path = get_test_path(&db_path, table_name);
@@ -299,6 +309,7 @@ fn test_fsm_initial_state_routing() {
 /// 4. The "Needle in the Haystack" Test (Deep Search)
 #[test]
 fn test_fsm_needle_in_haystack() {
+    let _ws = common::TestWorkspace::new("fsmh", "fsm_needle_in_haystack");
     let (db_path, _guard) = setup_db_dir("needle_haystack");
     let table_name = "needle_haystack";
     let file_path = get_test_path(&db_path, table_name);
@@ -339,6 +350,7 @@ fn test_fsm_needle_in_haystack() {
 /// 5. The Exact Fit / Left-Bias Test
 #[test]
 fn test_fsm_exact_fit_left_bias() {
+    let _ws = common::TestWorkspace::new("fsmh", "fsm_exact_fit_left_bias");
     let (db_path, _guard) = setup_db_dir("left_bias");
     let table_name = "left_bias";
     let file_path = get_test_path(&db_path, table_name);
