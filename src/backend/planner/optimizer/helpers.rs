@@ -1,0 +1,474 @@
+//! Helper functions for the rule-based optimizer.
+//!
+//! Provides expression folding, predicate folding, and column extraction
+//! utilities used by the optimization passes.
+
+use rook_ast::logical::*;
+use rook_ast::{ArithOp, ComparisonOp, ConstantValue, ExprNode, PredicateNode};
+
+use std::collections::HashSet;
+
+// ─── Expression Folding ───────────────────────────────────────────────────────
+
+/// Fold constants in an `ExprNode` tree.
+pub fn fold_expr(expr: &ExprNode) -> ExprNode {
+    match expr {
+        ExprNode::Column(_) | ExprNode::Constant(_) => expr.clone(),
+        ExprNode::Compound(_) => expr.clone(),
+        ExprNode::Cast { expr: inner, data_type } => {
+            let folded = fold_expr(inner);
+            ExprNode::Cast {
+                expr: Box::new(folded),
+                data_type: data_type.clone(),
+            }
+        }
+        ExprNode::ScalarSubquery(_) => expr.clone(),
+        ExprNode::Function { name, args, distinct } => {
+            let folded_args = args
+                .iter()
+                .map(|a| match a {
+                    rook_ast::FunctionArg::Star => rook_ast::FunctionArg::Star,
+                    rook_ast::FunctionArg::Expr(e) => {
+                        rook_ast::FunctionArg::Expr(Box::new(fold_expr(e)))
+                    }
+                })
+                .collect();
+            ExprNode::Function {
+                name: name.clone(),
+                args: folded_args,
+                distinct: *distinct,
+            }
+        }
+        ExprNode::Case { when_then_pairs, else_result } => {
+            let folded_pairs: Vec<_> = when_then_pairs
+                .iter()
+                .map(|(when, then)| (Box::new(fold_expr(when)), Box::new(fold_expr(then))))
+                .collect();
+            let folded_else = else_result.as_ref().map(|e| Box::new(fold_expr(e)));
+            ExprNode::Case {
+                when_then_pairs: folded_pairs,
+                else_result: folded_else,
+            }
+        }
+        ExprNode::Binary { left, op, right } => {
+            let left = fold_expr(left);
+            let right = fold_expr(right);
+            match (&left, op, &right) {
+                (ExprNode::Constant(a), _, ExprNode::Constant(b)) => fold_binary_op(a, *op, b),
+                (ExprNode::Constant(ConstantValue::Int(0)), ArithOp::Mul, _)
+                | (_, ArithOp::Mul, ExprNode::Constant(ConstantValue::Int(0))) => {
+                    ExprNode::Constant(ConstantValue::Int(0))
+                }
+                (ExprNode::Constant(ConstantValue::Float(f)), ArithOp::Mul, _) if *f == 0.0 => {
+                    ExprNode::Constant(ConstantValue::Float(*f))
+                }
+                (_, ArithOp::Mul, ExprNode::Constant(ConstantValue::Float(f))) if *f == 0.0 => {
+                    ExprNode::Constant(ConstantValue::Float(*f))
+                }
+                (e, ArithOp::Add, ExprNode::Constant(ConstantValue::Int(0)))
+                | (ExprNode::Constant(ConstantValue::Int(0)), ArithOp::Add, e) => e.clone(),
+                (e, ArithOp::Mul, ExprNode::Constant(ConstantValue::Int(1)))
+                | (ExprNode::Constant(ConstantValue::Int(1)), ArithOp::Mul, e) => e.clone(),
+                _ => ExprNode::Binary {
+                    left: Box::new(left),
+                    op: *op,
+                    right: Box::new(right),
+                },
+            }
+        }
+    }
+}
+
+/// Fold a binary operation between two constants.
+pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> ExprNode {
+    let result = match (a, b) {
+        (ConstantValue::Null, _) | (_, ConstantValue::Null) => ConstantValue::Null,
+        (ConstantValue::Int(ai), ConstantValue::Int(bi)) => {
+            let v = match op {
+                ArithOp::Add => ai.saturating_add(*bi),
+                ArithOp::Sub => ai.saturating_sub(*bi),
+                ArithOp::Mul => ai.saturating_mul(*bi),
+                ArithOp::Div => {
+                    if *bi == 0 { return ExprNode::Constant(ConstantValue::Null); }
+                    ai / bi
+                }
+            };
+            ConstantValue::Int(v)
+        }
+        (ConstantValue::Float(af), ConstantValue::Float(bf)) => {
+            let v = match op {
+                ArithOp::Add => af + bf,
+                ArithOp::Sub => af - bf,
+                ArithOp::Mul => af * bf,
+                ArithOp::Div => {
+                    if *bf == 0.0 { return ExprNode::Constant(ConstantValue::Null); }
+                    af / bf
+                }
+            };
+            ConstantValue::Float(v)
+        }
+        (ConstantValue::Int(ai), ConstantValue::Float(bf)) => {
+            let af = *ai as f64;
+            let v = match op {
+                ArithOp::Add => af + bf,
+                ArithOp::Sub => af - bf,
+                ArithOp::Mul => af * bf,
+                ArithOp::Div => {
+                    if *bf == 0.0 { return ExprNode::Constant(ConstantValue::Null); }
+                    af / bf
+                }
+            };
+            ConstantValue::Float(v)
+        }
+        (ConstantValue::Float(af), ConstantValue::Int(bi)) => {
+            let bf = *bi as f64;
+            let v = match op {
+                ArithOp::Add => af + bf,
+                ArithOp::Sub => af - bf,
+                ArithOp::Mul => af * bf,
+                ArithOp::Div => {
+                    if bf == 0.0 { return ExprNode::Constant(ConstantValue::Null); }
+                    af / bf
+                }
+            };
+            ConstantValue::Float(v)
+        }
+        (ConstantValue::Boolean(a), ConstantValue::Boolean(b)) => {
+            let v = match op {
+                ArithOp::Add => *a || *b,
+                ArithOp::Mul => *a && *b,
+                _ => return ExprNode::Constant(ConstantValue::Null),
+            };
+            ConstantValue::Boolean(v)
+        }
+        _ => ConstantValue::Null,
+    };
+    ExprNode::Constant(result)
+}
+
+// ─── Predicate Folding ────────────────────────────────────────────────────────
+
+/// Fold constants in a `PredicateNode` tree.
+pub fn fold_predicate(pred: &PredicateNode) -> PredicateNode {
+    match pred {
+        PredicateNode::BinaryOp { left, op, right } => {
+            let left = fold_predicate(left);
+            let right = fold_predicate(right);
+            PredicateNode::BinaryOp {
+                left: Box::new(left),
+                op: *op,
+                right: Box::new(right),
+            }
+        }
+        PredicateNode::Not(inner) => {
+            let inner = fold_predicate(inner);
+            PredicateNode::Not(Box::new(inner))
+        }
+        PredicateNode::Compare { left, op, right } => {
+            let left = fold_expr(left);
+            let right = fold_expr(right);
+            if let (ExprNode::Constant(a), ExprNode::Constant(b)) = (&left, &right) {
+                if let Some(result) = fold_comparison(a, *op, b) {
+                    return PredicateNode::Compare {
+                        left: Box::new(ExprNode::Constant(ConstantValue::Boolean(result))),
+                        op: *op,
+                        right: Box::new(ExprNode::Constant(b.clone())),
+                    };
+                }
+            }
+            PredicateNode::Compare {
+                left: Box::new(left),
+                op: *op,
+                right: Box::new(right),
+            }
+        }
+        PredicateNode::IsNull(expr) => PredicateNode::IsNull(Box::new(fold_expr(expr))),
+        PredicateNode::IsNotNull(expr) => PredicateNode::IsNotNull(Box::new(fold_expr(expr))),
+        PredicateNode::Between { expr, low, high } => PredicateNode::Between {
+            expr: Box::new(fold_expr(expr)),
+            low: Box::new(fold_expr(low)),
+            high: Box::new(fold_expr(high)),
+        },
+        PredicateNode::InList { expr, list } => PredicateNode::InList {
+            expr: Box::new(fold_expr(expr)),
+            list: list.iter().map(fold_expr).collect(),
+        },
+        PredicateNode::Like { expr, pattern, escape_char } => PredicateNode::Like {
+            expr: Box::new(fold_expr(expr)),
+            pattern: pattern.clone(),
+            escape_char: *escape_char,
+        },
+        PredicateNode::Exists(subquery) => PredicateNode::Exists(subquery.clone()),
+        PredicateNode::InSubquery { expr, subquery, negated } => PredicateNode::InSubquery {
+            expr: Box::new(fold_expr(expr)),
+            subquery: subquery.clone(),
+            negated: *negated,
+        },
+        PredicateNode::IsDistinctFrom { left, right } => PredicateNode::IsDistinctFrom {
+            left: Box::new(fold_expr(left)),
+            right: Box::new(fold_expr(right)),
+        },
+        PredicateNode::IsBoolean { expr, test, negated } => PredicateNode::IsBoolean {
+            expr: Box::new(fold_expr(expr)),
+            test: *test,
+            negated: *negated,
+        },
+    }
+}
+
+/// Fold a comparison between two constants.
+pub fn fold_comparison(a: &ConstantValue, op: ComparisonOp, b: &ConstantValue) -> Option<bool> {
+    let result = match (a, b) {
+        (ConstantValue::Null, _) | (_, ConstantValue::Null) => return None,
+        (ConstantValue::Int(ai), ConstantValue::Int(bi)) => match op {
+            ComparisonOp::Eq => ai == bi,
+            ComparisonOp::Ne => ai != bi,
+            ComparisonOp::Lt => ai < bi,
+            ComparisonOp::Le => ai <= bi,
+            ComparisonOp::Gt => ai > bi,
+            ComparisonOp::Ge => ai >= bi,
+        },
+        (ConstantValue::Float(af), ConstantValue::Float(bf)) => match op {
+            ComparisonOp::Eq => af == bf,
+            ComparisonOp::Ne => af != bf,
+            ComparisonOp::Lt => af < bf,
+            ComparisonOp::Le => af <= bf,
+            ComparisonOp::Gt => af > bf,
+            ComparisonOp::Ge => af >= bf,
+        },
+        (ConstantValue::Int(ai), ConstantValue::Float(bf)) => {
+            let af = *ai as f64;
+            match op {
+                ComparisonOp::Eq => af == *bf,
+                ComparisonOp::Ne => af != *bf,
+                ComparisonOp::Lt => af < *bf,
+                ComparisonOp::Le => af <= *bf,
+                ComparisonOp::Gt => af > *bf,
+                ComparisonOp::Ge => af >= *bf,
+            }
+        }
+        (ConstantValue::Float(af), ConstantValue::Int(bi)) => {
+            let bf = *bi as f64;
+            match op {
+                ComparisonOp::Eq => *af == bf,
+                ComparisonOp::Ne => *af != bf,
+                ComparisonOp::Lt => *af < bf,
+                ComparisonOp::Le => *af <= bf,
+                ComparisonOp::Gt => *af > bf,
+                ComparisonOp::Ge => *af >= bf,
+            }
+        }
+        (ConstantValue::Text(a), ConstantValue::Text(b)) => match op {
+            ComparisonOp::Eq => a == b,
+            ComparisonOp::Ne => a != b,
+            ComparisonOp::Lt => a < b,
+            ComparisonOp::Le => a <= b,
+            ComparisonOp::Gt => a > b,
+            ComparisonOp::Ge => a >= b,
+        },
+        (ConstantValue::Boolean(a), ConstantValue::Boolean(b)) => match op {
+            ComparisonOp::Eq => a == b,
+            ComparisonOp::Ne => a != b,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(result)
+}
+
+// ─── Column Extraction ────────────────────────────────────────────────────────
+
+/// Extract all column names referenced in a `PredicateNode`.
+pub fn columns_in_predicate(pred: &PredicateNode) -> HashSet<String> {
+    let mut cols = HashSet::new();
+    columns_in_predicate_recursive(pred, &mut cols);
+    cols
+}
+
+fn columns_in_predicate_recursive(pred: &PredicateNode, cols: &mut HashSet<String>) {
+    match pred {
+        PredicateNode::BinaryOp { left, right, .. } => {
+            columns_in_predicate_recursive(left, cols);
+            columns_in_predicate_recursive(right, cols);
+        }
+        PredicateNode::Not(inner) => columns_in_predicate_recursive(inner, cols),
+        PredicateNode::Compare { left, right, .. } => {
+            extract_expr_columns_into(left, cols);
+            extract_expr_columns_into(right, cols);
+        }
+        PredicateNode::IsNull(expr) | PredicateNode::IsNotNull(expr)
+        | PredicateNode::Like { expr, .. } | PredicateNode::Between { expr, .. } => {
+            extract_expr_columns_into(expr, cols);
+        }
+        PredicateNode::InList { expr, list } => {
+            extract_expr_columns_into(expr, cols);
+            for item in list { extract_expr_columns_into(item, cols); }
+        }
+        PredicateNode::Exists(_) => {}
+        PredicateNode::InSubquery { expr, .. } => extract_expr_columns_into(expr, cols),
+        PredicateNode::IsDistinctFrom { left, right } => {
+            extract_expr_columns_into(left, cols);
+            extract_expr_columns_into(right, cols);
+        }
+        PredicateNode::IsBoolean { expr, .. } => extract_expr_columns_into(expr, cols),
+    }
+}
+
+/// Extract column names from an `ExprNode` as a set.
+pub fn extract_expr_columns(expr: &ExprNode) -> HashSet<String> {
+    let mut cols = HashSet::new();
+    extract_expr_columns_into(expr, &mut cols);
+    cols
+}
+
+fn extract_expr_columns_into(expr: &ExprNode, cols: &mut HashSet<String>) {
+    match expr {
+        ExprNode::Column(name) => { cols.insert(name.clone()); }
+        ExprNode::Compound(parts) => {
+            if let Some(last) = parts.last() { cols.insert(last.clone()); }
+        }
+        ExprNode::Binary { left, right, .. } => {
+            extract_expr_columns_into(left, cols);
+            extract_expr_columns_into(right, cols);
+        }
+        ExprNode::Cast { expr: inner, .. } => extract_expr_columns_into(inner, cols),
+        ExprNode::Constant(_) => {}
+        ExprNode::ScalarSubquery(_) => {}
+        ExprNode::Function { args, .. } => {
+            for arg in args {
+                if let rook_ast::FunctionArg::Expr(inner) = arg {
+                    extract_expr_columns_into(inner, cols);
+                }
+            }
+        }
+        ExprNode::Case { when_then_pairs, else_result } => {
+            for (when, then) in when_then_pairs {
+                extract_expr_columns_into(when, cols);
+                extract_expr_columns_into(then, cols);
+            }
+            if let Some(else_node) = else_result {
+                extract_expr_columns_into(else_node, cols);
+            }
+        }
+    }
+}
+
+/// Collect all column names required by the ancestors of `TableScan`.
+pub fn collect_required_columns(plan: &LogicalPlan) -> HashSet<String> {
+    let mut cols = HashSet::new();
+    collect_required_columns_recursive(plan, &mut cols);
+    cols
+}
+
+fn collect_required_columns_recursive(plan: &LogicalPlan, cols: &mut HashSet<String>) {
+    match plan {
+        LogicalPlan::TableScan(_) => {}
+        LogicalPlan::Filter(f) => {
+            columns_in_predicate_recursive(&f.predicate, cols);
+            collect_required_columns_recursive(&f.child, cols);
+        }
+        LogicalPlan::Project(p) => {
+            for ne in &p.expressions { extract_expr_columns_into(&ne.expr, cols); }
+        }
+        LogicalPlan::Sort(s) => {
+            for ob in &s.order_by { extract_expr_columns_into(&ob.expr, cols); }
+            collect_required_columns_recursive(&s.child, cols);
+        }
+        LogicalPlan::Distinct(d) => collect_required_columns_recursive(&d.child, cols),
+        LogicalPlan::Limit(l) => collect_required_columns_recursive(&l.child, cols),
+        LogicalPlan::Aggregate(a) => {
+            for expr in &a.group_by { extract_expr_columns_into(expr, cols); }
+            for ag in &a.aggregates {
+                for arg in &ag.args { extract_expr_columns_into(arg, cols); }
+            }
+            if let Some(ref having) = a.having { columns_in_predicate_recursive(having, cols); }
+            collect_required_columns_recursive(&a.child, cols);
+        }
+        LogicalPlan::Join(j) => {
+            if let Some(ref cond) = j.condition { columns_in_predicate_recursive(cond, cols); }
+            collect_required_columns_recursive(&j.left, cols);
+            collect_required_columns_recursive(&j.right, cols);
+        }
+        LogicalPlan::SetOp(_) => {}
+        LogicalPlan::Subquery(sq) => collect_required_columns_recursive(&sq.subquery, cols),
+        LogicalPlan::Cte(c) => {
+            collect_required_columns_recursive(&c.inner, cols);
+            collect_required_columns_recursive(&c.outer, cols);
+        }
+        LogicalPlan::RecursiveCte(rc) => {
+            collect_required_columns_recursive(&rc.non_recursive, cols);
+            collect_required_columns_recursive(&rc.recursive, cols);
+            collect_required_columns_recursive(&rc.outer, cols);
+        }
+        LogicalPlan::CteScan(_) => {}
+        LogicalPlan::Insert(inp) => collect_required_columns_recursive(&inp.child, cols),
+    }
+}
+
+/// Extract column names from a `PredicateNode` as a `Vec<String>`.
+pub fn extract_column_names(pred: &PredicateNode) -> Vec<String> {
+    let mut result = Vec::new();
+    extract_column_names_recursive(pred, &mut result);
+    result
+}
+
+fn extract_column_names_recursive(pred: &PredicateNode, names: &mut Vec<String>) {
+    match pred {
+        PredicateNode::BinaryOp { left, right, .. } => {
+            extract_column_names_recursive(left, names);
+            extract_column_names_recursive(right, names);
+        }
+        PredicateNode::Not(inner) => extract_column_names_recursive(inner, names),
+        PredicateNode::Compare { left, right, .. } => {
+            extract_column_names_from_expr(left, names);
+            extract_column_names_from_expr(right, names);
+        }
+        PredicateNode::IsNull(expr) | PredicateNode::IsNotNull(expr)
+        | PredicateNode::Like { expr, .. } | PredicateNode::Between { expr, .. } => {
+            extract_column_names_from_expr(expr, names);
+        }
+        PredicateNode::InList { expr, list } => {
+            extract_column_names_from_expr(expr, names);
+            for item in list { extract_column_names_from_expr(item, names); }
+        }
+        PredicateNode::Exists(_) => {}
+        PredicateNode::InSubquery { expr, .. } => extract_column_names_from_expr(expr, names),
+        PredicateNode::IsDistinctFrom { left, right } => {
+            extract_column_names_from_expr(left, names);
+            extract_column_names_from_expr(right, names);
+        }
+        PredicateNode::IsBoolean { expr, .. } => extract_column_names_from_expr(expr, names),
+    }
+}
+
+fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<String>) {
+    match expr {
+        ExprNode::Column(name) => names.push(name.clone()),
+        ExprNode::Compound(parts) => {
+            if let Some(last) = parts.last() { names.push(last.clone()); }
+        }
+        ExprNode::Binary { left, right, .. } => {
+            extract_column_names_from_expr(left, names);
+            extract_column_names_from_expr(right, names);
+        }
+        ExprNode::Cast { expr: inner, .. } => extract_column_names_from_expr(inner, names),
+        ExprNode::Constant(_) => {}
+        ExprNode::ScalarSubquery(_) => {}
+        ExprNode::Function { args, .. } => {
+            for arg in args {
+                if let rook_ast::FunctionArg::Expr(inner) = arg {
+                    extract_column_names_from_expr(inner, names);
+                }
+            }
+        }
+        ExprNode::Case { when_then_pairs, else_result } => {
+            for (when, then) in when_then_pairs {
+                extract_column_names_from_expr(when, names);
+                extract_column_names_from_expr(then, names);
+            }
+            if let Some(else_node) = else_result {
+                extract_column_names_from_expr(else_node, names);
+            }
+        }
+    }
+}

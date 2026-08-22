@@ -14,6 +14,7 @@ pub mod page_api;
 pub mod statistics;
 pub mod table;
 pub mod types;
+pub mod planner;
 pub mod visibility_map;
 
 pub use log::operation_log;

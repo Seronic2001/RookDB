@@ -98,7 +98,7 @@ fn make_catalog(db: &str, table: &str) -> Catalog {
             ],
         },
     );
-    databases.insert(db.to_string(), Database { tables });
+    databases.insert(db.to_string(), Database { tables, views: HashMap::new() });
     Catalog { databases }
 }
 

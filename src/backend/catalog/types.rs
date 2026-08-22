@@ -46,10 +46,24 @@ pub struct Table {
     pub columns: Vec<Column>,
 }
 
+/// A stored view definition.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ViewDef {
+    /// The SELECT query that defines the view, serialised as a JSON string.
+    /// Stored as text so we can round-trip through the catalog.
+    pub query_json: String,
+}
+
 /// Represents a database containing multiple tables.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Database {
     pub tables: HashMap<String, Table>,
+    /// Named views stored in this database.
+    ///
+    /// Populated by the DDL stage; declared here so the catalog schema is
+    /// stable and old `catalog.json` files keep loading (`serde(default)`).
+    #[serde(default)]
+    pub views: HashMap<String, ViewDef>,
 }
 
 /// Represents the top-level catalog holding all databases.

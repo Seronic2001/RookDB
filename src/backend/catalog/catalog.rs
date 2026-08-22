@@ -232,6 +232,7 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
         db_name.to_string(),
         Database {
             tables: HashMap::new(),
+            views: HashMap::new(),
         },
     );
 
