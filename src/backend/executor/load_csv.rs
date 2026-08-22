@@ -207,7 +207,14 @@ pub fn load_csv(
 
         // --- 7. Insert tuple using HeapManager (FSM-aware) ---
         match heap_manager.insert_tuple(&tuple_bytes) {
-            Ok(_page_slot) => {
+            Ok((page_id, slot_id)) => {
+                // Update any existing B+ Tree index
+                if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
+                    db_name, table_name, &values, page_id, slot_id,
+                ) {
+                    log::warn!("Failed to update index for row {}: {}", line_idx, e);
+                }
+
                 inserted += 1;
                 if inserted % 100 == 0 {
                     log::info!("Inserted {} rows so far...", inserted);
@@ -270,6 +277,10 @@ pub fn insert_single_tuple(
     // Validate all values
     for (val, col) in values.iter().zip(columns.iter()) {
         let data_type = col.data_type.clone();
+        let trimmed = val.trim();
+        if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
+            continue;
+        }
 
         if let Err(e) = validate_value(&data_type, val) {
             log::info!("Column '{}': {}", col.name, e);
@@ -277,11 +288,23 @@ pub fn insert_single_tuple(
         }
     }
 
+    // Constraint validation: NOT NULL, UNIQUE, CHECK
+    if let Err(e) = crate::backend::constraint::validate_row_insert(
+        catalog, db_name, table_name, values,
+    ) {
+        log::info!("Constraint violation: {}", e);
+        return Ok(false);
+    }
+
     // Serialize tuple
     let mut row_ok = true;
 
     for (val, col) in values.iter().zip(columns.iter()) {
         let data_type = &col.data_type;
+        let trimmed = val.trim();
+        if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
+            continue;
+        }
 
         match DataValue::parse_and_encode(data_type, val) {
             Ok(_) => {}
@@ -305,7 +328,14 @@ pub fn insert_single_tuple(
 
     // Build nullable value list
     let nullable_values: Vec<Option<&str>> =
-        values.iter().map(|v| Some(*v)).collect();
+        values.iter().zip(columns.iter()).map(|(v, col)| {
+            let trimmed = v.trim();
+            if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
+                None
+            } else {
+                Some(*v)
+            }
+        }).collect();
 
     // Serialize using tuple layout serializer
     let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {
@@ -327,6 +357,14 @@ pub fn insert_single_tuple(
                     page_id,
                     slot_id
                 );
+
+                // Update any existing B+ Tree index
+                if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
+                    db_name, table_name, values, page_id, slot_id,
+                ) {
+                    log::warn!(" Failed to update index: {}", e);
+                }
+
                 Ok(true)
             }
             Err(e) => {

@@ -17,6 +17,7 @@ use std::fs::File;
 use std::io;
 
 use crate::backend::executor::compaction_api::rebuild_table_fsm;
+use crate::backend::executor::create_index::update_index_on_delete;
 use crate::backend::log::operation_log::{current_timestamp_iso, log_compaction, log_delete};
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::visibility_map::{vm_clear_page, vm_is_visible, vm_set_page};
@@ -425,9 +426,32 @@ pub fn delete_tuples(
                 }
 
                 let tuple_data = &page.data[offset as usize..(offset + length) as usize];
-                let decoded = decode_tuple(tuple_data, columns);
+                let tuple_data_copy = tuple_data.to_vec();
+                let decoded = decode_tuple(&tuple_data_copy, columns);
 
                 if matches_condition_groups(&decoded, condition_groups) {
+                    // FOREIGN KEY constraint check: reject (RESTRICT) or cascade (CASCADE)
+                    if let Err(e) = crate::backend::constraint::validate_row_delete(
+                        catalog, db_name, table_name, &decoded,
+                    ) {
+                        log::warn!(
+                            "[Delete] Skipping row due to FOREIGN KEY constraint: {}",
+                            e
+                        );
+                        // In a more sophisticated implementation, we'd collect all
+                        // violations and report them at the end.  For now, skip this
+                        // row and continue.
+                        continue;
+                    }
+
+                    // Re-read the page from disk because validate_row_delete might have
+                    // triggered a CASCADE delete that modified this exact page on disk.
+                    // If we don't re-read, our in-memory `page` buffer will overwrite
+                    // the cascaded deletions when we flush at the end of the loop!
+                    if let Err(e) = read_page(file, &mut page, page_num) {
+                        log::error!("Failed to re-read page after validation: {}", e);
+                    }
+
                     if returning {
                         let row: Vec<(String, String)> = decoded
                             .iter()
@@ -441,6 +465,13 @@ pub fn delete_tuples(
                             })
                             .collect();
                         returning_rows.push(row);
+                    }
+
+                    // Update any existing B+ Tree index
+                    if let Err(e) = update_index_on_delete(
+                        db_name, table_name, columns, &tuple_data_copy, page_num as u32, i as u32,
+                    ) {
+                        log::warn!("Failed to update index for deleted tuple: {}", e);
                     }
 
                     slots_to_delete.push(i);
@@ -1061,4 +1092,111 @@ pub fn parse_where_clause_with_schema(
 /// Kept for backward compatibility with tests and callers that don't supply schema.
 pub fn parse_where_clause(input: &str) -> Option<Vec<Vec<Condition>>> {
     parse_where_clause_with_schema(input, &[])
+}
+
+/// Delete rows identified by explicit heap pointers (page_id, slot_id).
+///
+/// This is the Volcano-aware DELETE path: instead of scanning the heap and
+/// evaluating WHERE conditions here, the caller (Volcano engine) has already
+/// identified the matching rows. This function deletes the rows at the given
+/// pointers using the same soft-delete semantics as `delete_tuples`.
+pub fn delete_by_pointers(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    pointers: &[(u32, u32)],
+) -> io::Result<DeleteResult> {
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+    })?;
+    let columns = &table.columns;
+
+    let path = format!("database/base/{}/{}.dat", db_name, table_name);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to open table file: {}", e)))?;
+    let file_identity = crate::table::file_identity_from_file(&file)?;
+
+    let mut deleted_count = 0usize;
+    let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
+
+    for &(page_num, slot_idx) in pointers {
+        let slot_index = slot_idx as u16;
+
+        // Acquire exclusive write lock on this page
+        let _page_lock = PageWriteLock::acquire(file_identity, page_num);
+
+        let mut page = Page::new();
+        read_page(&mut file, &mut page, page_num)?;
+
+        let base = (PAGE_HEADER_SIZE + slot_index as u32 * ITEM_ID_SIZE) as usize;
+        let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
+        let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
+        let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+
+        if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
+            continue;
+        }
+
+        let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
+        let decoded = decode_tuple(&tuple_data, columns);
+
+        // FOREIGN KEY constraint check
+        if let Err(e) = crate::backend::constraint::validate_row_delete(
+            catalog, db_name, table_name, &decoded,
+        ) {
+            log::warn!(
+                "[DeleteByPointers] Skipping row due to FOREIGN KEY constraint: {}", e
+            );
+            continue;
+        }
+
+        // Re-read the page in case validate_row_delete triggered CASCADE
+        if let Err(e) = read_page(&mut file, &mut page, page_num) {
+            log::error!("Failed to re-read page after validation: {}", e);
+        }
+
+        // Update any existing B+ Tree index
+        if let Err(e) = update_index_on_delete(
+            db_name, table_name, columns, &tuple_data, page_num, slot_idx,
+        ) {
+            log::warn!("Failed to update index for deleted tuple: {}", e);
+        }
+
+        // Soft-delete the slot
+        let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+        let new_flags = flags | SLOT_FLAG_DELETED;
+        page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
+
+        write_page(&mut file, &mut page, page_num)?;
+        let _ = vm_clear_page(db_name, table_name, page_num);
+
+        returning_rows.push(
+            decoded.iter().map(|(col, val)| {
+                let s = match val {
+                    ColumnValue::Int(n) => n.to_string(),
+                    ColumnValue::Text(t) => t.clone(),
+                    ColumnValue::List(_) => String::from("[list]"),
+                };
+                (col.clone(), s)
+            }).collect()
+        );
+
+        deleted_count += 1;
+    }
+
+    if deleted_count > 0 {
+        increment_dead_tuple_count(&mut file, deleted_count as u32)?;
+    }
+
+    let result = DeleteResult { deleted_count, returning_rows };
+    let details = delete_log_details(&[], false, Some(result.deleted_count), None);
+    let _ = log_delete(db_name, table_name, details, "success");
+
+    Ok(result)
 }

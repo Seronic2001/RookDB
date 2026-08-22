@@ -1,0 +1,362 @@
+//! System table data loaders for constraint metadata.
+//!
+//! Loads UNIQUE indexes, CHECK constraints, FOREIGN KEY definitions,
+//! and table schemas from the system tables (`sys_indexes`, `sys_constraints`,
+//! `sys_columns`, `sys_tables`).
+
+use crate::types::{DataValue, DataType};
+use crate::backend::heap::HeapManager;
+use std::path::PathBuf;
+
+/// Load unique index metadata from `sys_indexes` for a given table.
+///
+/// Delegates to [`load_table_indexes`] and filters for indexes marked
+/// as unique (`is_unique = true`).
+///
+/// Returns a list of `(index_name, column_name)` pairs for unique indexes.
+pub(crate) fn load_unique_indexes(db_name: &str, table_name: &str) -> Result<Vec<(String, String)>, String> {
+    let indexes = crate::backend::executor::create_index::load_table_indexes(db_name, table_name)?;
+    Ok(indexes
+        .into_iter()
+        .filter(|(_, _, is_unique)| *is_unique)
+        .map(|(name, col, _)| (name, col))
+        .collect())
+}
+
+/// Load CHECK constraint expressions from `sys_constraints` for a given `table_id`.
+///
+/// Returns a list of CHECK expression strings (e.g. "age > 0").
+pub(crate) fn load_check_constraints(table_id: i32) -> Result<Vec<String>, String> {
+    use crate::backend::system_table::SYS_CONSTRAINTS_SCHEMA;
+
+    let constr_path = PathBuf::from(format!("{}/constraints.dat", crate::layout::SYSTEM_DIR));
+    if !constr_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let heap = HeapManager::open(constr_path)
+        .map_err(|e| format!("Failed to open sys_constraints: {}", e))?;
+
+    let mut check_exprs = Vec::new();
+    let schema = SYS_CONSTRAINTS_SCHEMA;
+
+    for result in heap.scan() {
+        let (_page_id, _slot_id, raw_bytes) = result
+            .map_err(|e| format!("Error scanning sys_constraints: {}", e))?;
+        let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
+            .map_err(|e| format!("Error deserializing sys_constraints: {}", e))?;
+
+        // SYS_CONSTRAINTS_SCHEMA: constraint_id, table_id, constraint_type, columns, ref_table, ref_columns
+        if decoded.len() < 4 {
+            continue;
+        }
+
+        let row_table_id = match &decoded[1] {
+            Some(DataValue::Int(id)) => *id,
+            _ => continue,
+        };
+        if row_table_id != table_id {
+            continue;
+        }
+
+        let constr_type = match &decoded[2] {
+            Some(DataValue::Varchar(s)) => s.as_str(),
+            Some(DataValue::Char(s)) => s.as_str(),
+            _ => continue,
+        };
+        if !constr_type.eq_ignore_ascii_case("CHECK") {
+            continue;
+        }
+
+        let columns_field = match &decoded[3] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+
+        // The CHECK expression is stored in the columns field.
+        // Two formats: "CHECK(expr)" or bare "expr".
+        let expr = if let Some(inner) = columns_field.strip_prefix("CHECK(") {
+            if let Some(end) = inner.rfind(')') {
+                inner[..end].to_string()
+            } else {
+                inner.to_string()
+            }
+        } else {
+            columns_field.clone()
+        };
+
+        if !expr.is_empty() {
+            check_exprs.push(expr);
+        }
+    }
+
+    Ok(check_exprs)
+}
+
+/// Load FOREIGN KEY constraints from `sys_constraints` for a given child `table_id`.
+///
+/// Returns a list of `(child_column, parent_table_name, parent_column)` tuples.
+pub(crate) fn load_foreign_keys(table_id: i32) -> Result<Vec<(String, String, String)>, String> {
+    use crate::backend::system_table::SYS_CONSTRAINTS_SCHEMA;
+
+    let constr_path = PathBuf::from(format!("{}/constraints.dat", crate::layout::SYSTEM_DIR));
+    if !constr_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let heap = HeapManager::open(constr_path)
+        .map_err(|e| format!("Failed to open sys_constraints: {}", e))?;
+
+    let mut fks = Vec::new();
+    let schema = SYS_CONSTRAINTS_SCHEMA;
+
+    for result in heap.scan() {
+        let (_page_id, _slot_id, raw_bytes) = result
+            .map_err(|e| format!("Error scanning sys_constraints: {}", e))?;
+        let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
+            .map_err(|e| format!("Error deserializing sys_constraints: {}", e))?;
+
+        if decoded.len() < 6 {
+            continue;
+        }
+
+        let row_table_id = match &decoded[1] {
+            Some(DataValue::Int(id)) => *id,
+            _ => continue,
+        };
+        if row_table_id != table_id {
+            continue;
+        }
+
+        let constr_type = match &decoded[2] {
+            Some(DataValue::Varchar(s)) => s.as_str(),
+            Some(DataValue::Char(s)) => s.as_str(),
+            _ => continue,
+        };
+        if !constr_type.to_uppercase().contains("FOREIGN KEY") {
+            continue;
+        }
+
+        let child_col = match &decoded[3] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+        let parent_table = match &decoded[4] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+        let parent_col = match &decoded[5] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+
+        fks.push((child_col, parent_table, parent_col));
+    }
+
+    Ok(fks)
+}
+
+/// Load FOREIGN KEY constraints where `our_table` is the **parent** (referenced table).
+///
+/// Scans ALL constraints in the database to find constraints where
+/// `ref_table == our_table_name`.  Since `ref_table` is stored as a name string
+/// (not an ID), we filter by name.
+///
+/// Returns a list of `(child_table_name, child_column, parent_column, parent_table_name, action_type)`.
+pub fn load_referencing_foreign_keys(
+    db_name: &str,
+    our_table_name: &str,
+) -> Result<Vec<(String, String, String, String, String)>, String> {
+    use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_TABLES_SCHEMA};
+
+    let constr_path = PathBuf::from(format!("{}/constraints.dat", crate::layout::SYSTEM_DIR));
+    if !constr_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    // Resolve db_name → db_id
+    let (_, _db_id) = match crate::backend::system_table::resolve_table_id(db_name, our_table_name) {
+        Ok(ids) => ids,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    // Load sys_tables for the db to create a table_id → table_name mapping
+    let tbl_path = PathBuf::from(format!("{}/tables.dat", crate::layout::SYSTEM_DIR));
+    let mut tbl_id_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+    if tbl_path.exists() {
+        if let Ok(heap) = HeapManager::open(tbl_path) {
+            for result in heap.scan() {
+                if let Ok((_, _, raw_bytes)) = result {
+                    if let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes) {
+                        if decoded.len() >= 3 {
+                            if let Some(Some(DataValue::Int(tid))) = decoded.get(0) {
+                                let name_opt = match decoded.get(2) {
+                                    Some(Some(DataValue::Varchar(name))) => Some(name.clone()),
+                                    Some(Some(DataValue::Char(name))) => Some(name.clone()),
+                                    _ => None,
+                                };
+                                if let Some(name) = name_opt {
+                                    tbl_id_to_name.insert(*tid, name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let heap = HeapManager::open(constr_path)
+        .map_err(|e| format!("Failed to open sys_constraints: {}", e))?;
+
+    let mut referencing_fks = Vec::new();
+    let schema = SYS_CONSTRAINTS_SCHEMA;
+
+    for result in heap.scan() {
+        let (_page_id, _slot_id, raw_bytes) = result
+            .map_err(|e| format!("Error scanning sys_constraints: {}", e))?;
+        let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
+            .map_err(|e| format!("Error deserializing sys_constraints: {}", e))?;
+
+        if decoded.len() < 6 {
+            continue;
+        }
+
+        let constr_type = match &decoded[2] {
+            Some(DataValue::Varchar(s)) => s.as_str(),
+            Some(DataValue::Char(s)) => s.as_str(),
+            _ => continue,
+        };
+        if !constr_type.to_uppercase().contains("FOREIGN KEY") {
+            continue;
+        }
+
+        let ref_table = match &decoded[4] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+
+        // Check if this FK references our table
+        if !ref_table.eq_ignore_ascii_case(our_table_name) {
+            continue;
+        }
+
+        // Resolve the child table name from the table_id
+        let child_table_id = match &decoded[1] {
+            Some(DataValue::Int(id)) => *id,
+            _ => continue,
+        };
+        let child_table = tbl_id_to_name.get(&child_table_id)
+            .cloned()
+            .unwrap_or_else(|| format!("<table_id={}>", child_table_id));
+
+        let child_col = match &decoded[3] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+        let parent_col = match &decoded[5] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+
+        let action_type = constr_type.to_string();
+        referencing_fks.push((child_table, child_col, parent_col, ref_table, action_type));
+    }
+
+    Ok(referencing_fks)
+}
+
+/// Load the complete column schema for a table from `sys_columns`.
+///
+/// Returns `Vec<(column_name, DataType)>` ordered by ordinal position.
+pub(crate) fn load_table_schema(db_name: &str, table_name: &str) -> Result<Option<Vec<(String, DataType)>>, String> {
+    use crate::backend::system_table::{SYS_COLUMNS_SCHEMA, resolve_table_id};
+
+    let (table_id, _) = match resolve_table_id(db_name, table_name) {
+        Ok(ids) => ids,
+        Err(_) => return Ok(None),
+    };
+
+    let col_path = PathBuf::from(format!("{}/columns.dat", crate::layout::SYSTEM_DIR));
+    if !col_path.exists() {
+        return Ok(None);
+    }
+
+    let heap = HeapManager::open(col_path)
+        .map_err(|e| format!("Failed to open sys_columns: {}", e))?;
+
+    let mut schema: Vec<(i32, String, DataType)> = Vec::new();
+
+    for result in heap.scan() {
+        let (_page_id, _slot_id, raw_bytes) = result
+            .map_err(|e| format!("Error scanning sys_columns: {}", e))?;
+        let decoded = crate::types::deserialize_nullable_row(SYS_COLUMNS_SCHEMA, &raw_bytes)
+            .map_err(|e| format!("Error deserializing sys_columns: {}", e))?;
+
+        if decoded.len() < 8 {
+            continue;
+        }
+
+        // SYS_COLUMNS_SCHEMA: col_id, table_id, name, data_type, ordinal, nullable, has_default, default_value
+        let row_table_id = match &decoded[1] {
+            Some(DataValue::Int(id)) => *id,
+            _ => continue,
+        };
+        if row_table_id != table_id {
+            continue;
+        }
+
+        let col_name = match &decoded[2] {
+            Some(DataValue::Varchar(n)) => n.clone(),
+            Some(DataValue::Char(n)) => n.clone(),
+            _ => continue,
+        };
+        let col_type_str = match &decoded[3] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            Some(DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+        let ordinal = match &decoded[4] {
+            Some(DataValue::Int(o)) => *o,
+            _ => continue,
+        };
+
+        let col_type: DataType = col_type_str.parse().unwrap_or(DataType::Varchar(255));
+        schema.push((ordinal, col_name, col_type));
+    }
+
+    schema.sort_by_key(|(ord, _, _)| *ord);
+    Ok(Some(schema.into_iter().map(|(_, name, dt)| (name, dt)).collect()))
+}
+
+/// Load the schema for a table AND find the position and type of a specific column.
+///
+/// Returns `(full_schema_types, column_position, column_type)`.
+pub(crate) fn load_table_schema_for_column(
+    db_name: &str,
+    table_name: &str,
+    column_name: &str,
+) -> Result<Option<(Vec<DataType>, usize, DataType)>, String> {
+    let schema_names = match load_table_schema(db_name, table_name) {
+        Ok(Some(s)) => s,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+
+    let col_pos = match schema_names.iter().position(|(name, _)| name.eq_ignore_ascii_case(column_name)) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let col_type = schema_names[col_pos].1.clone();
+    let schema_types: Vec<DataType> = schema_names.into_iter().map(|(_, dt)| dt).collect();
+
+    Ok(Some((schema_types, col_pos, col_type)))
+}

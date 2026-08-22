@@ -13,7 +13,6 @@ use std::fs::File;
 use std::io;
 
 use crate::catalog::types::Catalog;
-use crate::types::value::{OrderedF32, OrderedF64};
 use crate::disk::{read_page, write_page};
 use crate::backend::executor::compaction_api as heap_api;
 use crate::backend::log::operation_log::log_update;
@@ -25,10 +24,11 @@ use crate::table::increment_dead_tuple_count;
 use crate::backend::visibility_map::vm_clear_page;
 use serde_json::{Value, json};
 use crate::types::row::deserialize_nullable_row;
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, OrderedF32, OrderedF64};
 use crate::types::datatype::DataType;
 use crate::types::row::serialize_nullable_typed_row;
 
+use super::create_index::update_index_on_update;
 use super::delete::{Condition, ColumnValue, condition_to_json, matches_condition_groups_pub};
 
 /// (page_num, slot_index) pair that uniquely identifies a stored tuple.
@@ -120,9 +120,7 @@ fn decode_tuple(
                 ColumnValue::Text(s.clone())
             }
 
-            // Render every other type as its SQL literal form (see Display)
-            // so encode_tuple can re-parse it losslessly below.
-            Some(other) => ColumnValue::Text(other.to_string()),
+            Some(other) => ColumnValue::Text(format!("{:?}", other)),
 
             None => ColumnValue::Text("NULL".to_string()),
         };
@@ -150,24 +148,33 @@ fn encode_tuple(
     let mut values: Vec<Option<DataValue>> = Vec::new();
 
     for col in columns {
-
         let val = decoded
             .iter()
             .find(|(name, _)| name == &col.name)
             .map(|(_, v)| v);
 
         let typed = match val {
-
             Some(ColumnValue::Int(n)) => {
-                Some(DataValue::Int(*n))
+                match &col.data_type {
+                    DataType::SmallInt => Some(DataValue::SmallInt(*n as i16)),
+                    DataType::Int => Some(DataValue::Int(*n)),
+                    DataType::BigInt => Some(DataValue::BigInt(*n as i64)),
+                    DataType::Real => Some(DataValue::Real(OrderedF32(*n as f32))),
+                    DataType::DoublePrecision => Some(DataValue::DoublePrecision(OrderedF64(*n as f64))),
+                    _ => Some(DataValue::Int(*n)),
+                }
             }
 
             Some(ColumnValue::Text(s)) => {
-                parse_text_value(&col.data_type, s)
+                if s.eq_ignore_ascii_case("NULL") {
+                    None
+                } else {
+                    // Use parse_string_to_value for proper type-aware parsing
+                    super::create_index::parse_string_to_value(&col.data_type, s).ok()
+                }
             }
 
             Some(ColumnValue::List(_)) => None,
-
             None => None,
         };
 
@@ -176,56 +183,6 @@ fn encode_tuple(
 
     serialize_nullable_typed_row(&schema, &values)
         .unwrap_or_default()
-}
-
-/// Parse a text literal into a `DataValue` matching the column's type.
-///
-/// Values arrive either from the SET clause (unquoted) or from the decode
-/// round-trip above (SQL literal form produced by `DataValue::Display`,
-/// which quotes strings and renders temporal types in ISO format).
-fn parse_text_value(ty: &DataType, raw: &str) -> Option<DataValue> {
-    let s = raw.trim().trim_matches('\'').trim_matches('"');
-
-    match ty {
-        DataType::SmallInt => s.parse::<i16>().ok().map(DataValue::SmallInt),
-        DataType::Int => s.parse::<i32>().ok().map(DataValue::Int),
-        DataType::BigInt => s.parse::<i64>().ok().map(DataValue::BigInt),
-        DataType::Real => s.parse::<f32>().ok().map(|v| DataValue::Real(OrderedF32(v))),
-        DataType::DoublePrecision => {
-            s.parse::<f64>().ok().map(|v| DataValue::DoublePrecision(OrderedF64(v)))
-        }
-        DataType::Bool => match s.to_ascii_lowercase().as_str() {
-            "true" | "t" | "1" => Some(DataValue::Bool(true)),
-            "false" | "f" | "0" => Some(DataValue::Bool(false)),
-            _ => None,
-        },
-        DataType::Char(_) | DataType::Character(_) => Some(DataValue::Char(s.to_string())),
-        DataType::Varchar(_) => Some(DataValue::Varchar(s.to_string())),
-        DataType::Date => {
-            use chrono::NaiveDate;
-            NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().map(DataValue::Date)
-        }
-        DataType::Time => {
-            use chrono::NaiveTime;
-            NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
-                .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
-                .ok()
-                .map(DataValue::Time)
-        }
-        DataType::Timestamp => {
-            use chrono::NaiveDateTime;
-            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
-                .ok()
-                .map(DataValue::Timestamp)
-        }
-        DataType::Bit(_) => Some(DataValue::Bit(
-            crate::types::bit_utils::normalize_bit_literal(s),
-        )),
-        // NUMERIC/DECIMAL keep their previous behaviour (unchanged) until the
-        // typed-value pipeline lands; they fall back to NULL like before.
-        _ => None,
-    }
 }
 
 /// Apply `assignments` to a decoded row, returning the new row.
@@ -275,7 +232,13 @@ fn apply_assignments(
 
 struct PendingUpdate {
     pointer: TuplePointer,
+    /// The raw bytes of the OLD tuple (before update), for index key extraction.
+    old_tuple_data: Vec<u8>,
+    /// The raw bytes of the NEW tuple (after update).
     new_bytes: Vec<u8>,
+    /// The decoded row BEFORE the update, for FK cascade propagation.
+    old_decoded: Vec<(String, ColumnValue)>,
+    /// The decoded row AFTER the update, for FK cascade propagation.
     updated_decoded: Vec<(String, ColumnValue)>,
 }
 
@@ -360,15 +323,36 @@ pub fn update_tuples(
                 continue;
             }
 
-            let updated_decoded = apply_assignments(decoded, assignments);
+            let updated_decoded = apply_assignments(decoded.clone(), assignments);
             let new_bytes       = encode_tuple(&updated_decoded, columns);
+
+            // Constraint validation: NOT NULL, UNIQUE, CHECK on the new values
+            let new_strings: Vec<String> = updated_decoded.iter().map(|(_name, val)| {
+                match val {
+                    ColumnValue::Int(n) => n.to_string(),
+                    ColumnValue::Text(s) => s.clone(),
+                    ColumnValue::List(_) => "[list]".to_string(),
+                }
+            }).collect();
+            let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = crate::backend::constraint::validate_row_update(
+                catalog, db_name, table_name, &new_values,
+            ) {
+                log::warn!(
+                    "[Update] Skipping row due to constraint violation on '{}.{}': {}",
+                    db_name, table_name, e
+                );
+                continue;
+            }
 
             pending_updates.push(PendingUpdate {
                 pointer: TuplePointer {
                     page_id: page_num,
                     slot_index: i as u16,
                 },
+                old_tuple_data: tuple_data,
                 new_bytes,
+                old_decoded: decoded,
                 updated_decoded,
             });
 
@@ -394,11 +378,24 @@ pub fn update_tuples(
     }
 
     if !pending_updates.is_empty() {
-        for update in pending_updates {
+        for update in &pending_updates {
             // Insert the updated tuple via the heap API.
-            // insert_raw_tuple routes through HeapManager so it uses the FSM
-            // to find freed pages before falling back to tail-append.
-            heap_api::insert_raw_tuple(db_name, table_name, &update.new_bytes)?;
+            let (new_page_id, new_slot_id) = heap_api::insert_raw_tuple(db_name, table_name, &update.new_bytes)?;
+
+            // Update any existing B+ Tree index (delete old key, insert new key)
+            if let Err(e) = update_index_on_update(
+                db_name,
+                table_name,
+                columns,
+                &update.old_tuple_data,
+                &update.new_bytes,
+                update.pointer.page_id,
+                update.pointer.slot_index as u32,
+                new_page_id,
+                new_slot_id,
+            ) {
+                log::warn!("Failed to update index for updated tuple: {}", e);
+            }
 
             if returning {
                 let row: Vec<(String, String)> = update
@@ -414,6 +411,23 @@ pub fn update_tuples(
                     })
                     .collect();
                 returning_rows.push(row);
+            }
+        }
+    }
+
+    // ── ON UPDATE CASCADE / SET NULL propagation ─────────────────────────────
+    // After all old tuples have been deleted and new tuples inserted, propagate
+    // the changes to child tables via the constraint validator.
+    if !pending_updates.is_empty() {
+        for update in &pending_updates {
+            if let Err(e) = crate::backend::constraint::propagate_update_to_children(
+                catalog, db_name, table_name,
+                &update.old_decoded, &update.updated_decoded,
+            ) {
+                log::warn!(
+                    "[Update] Failed to propagate FK cascade for '{}.{}': {}",
+                    db_name, table_name, e
+                );
             }
         }
     }
@@ -545,3 +559,151 @@ fn try_parse_arith_expr(rhs: &str) -> Option<(String, ArithOp, String)> {
 
 // Re-export parse_where_clause so callers only need to import from this module.
 pub use super::delete::parse_where_clause as parse_where_clause_update;
+
+/// Update rows identified by explicit heap pointers (page_id, slot_id).
+///
+/// This is the Volcano-aware UPDATE path: instead of scanning the heap and
+/// evaluating WHERE conditions here, the caller (Volcano engine) has already
+/// identified the matching rows. This function applies the SET assignments to
+/// the rows at the given pointers using the same delete+insert semantics as
+/// `update_tuples`.
+pub fn update_by_pointers(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    pointers: &[(u32, u32)],
+    assignments: &[SetAssignment],
+) -> io::Result<UpdateResult> {
+    let db = catalog.databases.get(db_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+    })?;
+    let columns = &table.columns;
+
+    let path = format!("database/base/{}/{}.dat", db_name, table_name);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to open table file: {}", e)))?;
+    let file_identity = crate::table::file_identity_from_file(&file)?;
+
+    let mut updated_count = 0usize;
+    let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
+    let mut pending_updates: Vec<PendingUpdate> = Vec::new();
+
+    for &(page_num, slot_idx) in pointers {
+        let slot_index = slot_idx as u16;
+
+        let mut page = Page::new();
+        crate::disk::read_page(&mut file, &mut page, page_num)?;
+
+        let base = (PAGE_HEADER_SIZE + slot_index as u32 * ITEM_ID_SIZE) as usize;
+        let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
+        let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
+        let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+
+        if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
+            continue;
+        }
+
+        let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
+        let decoded = decode_tuple(&tuple_data, columns);
+        let updated_decoded = apply_assignments(decoded.clone(), assignments);
+        let new_bytes = encode_tuple(&updated_decoded, columns);
+
+        // Constraint validation
+        let new_strings: Vec<String> = updated_decoded.iter().map(|(_name, val)| {
+            match val {
+                ColumnValue::Int(n) => n.to_string(),
+                ColumnValue::Text(s) => s.clone(),
+                ColumnValue::List(_) => "[list]".to_string(),
+            }
+        }).collect();
+        let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
+        if let Err(e) = crate::backend::constraint::validate_row_update(
+            catalog, db_name, table_name, &new_values,
+        ) {
+            log::warn!(
+                "[UpdateByPointers] Skipping row due to constraint violation: {}", e
+            );
+            continue;
+        }
+
+        pending_updates.push(PendingUpdate {
+            pointer: TuplePointer { page_id: page_num, slot_index },
+            old_tuple_data: tuple_data,
+            new_bytes,
+            old_decoded: decoded,
+            updated_decoded,
+        });
+
+        updated_count += 1;
+    }
+
+    // Phase 2: apply delete+insert for all pending updates
+    if !pending_updates.is_empty() {
+        for update in &pending_updates {
+            let _page_lock = PageWriteLock::acquire(file_identity, update.pointer.page_id);
+            let mut page = Page::new();
+            crate::disk::read_page(&mut file, &mut page, update.pointer.page_id)?;
+            let base = (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
+            let mut flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
+            flags |= SLOT_FLAG_DELETED;
+            page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
+            crate::disk::write_page(&mut file, &mut page, update.pointer.page_id)?;
+            let _ = crate::backend::visibility_map::vm_clear_page(db_name, table_name, update.pointer.page_id);
+        }
+        crate::table::increment_dead_tuple_count(&mut file, pending_updates.len() as u32)?;
+    }
+
+    if !pending_updates.is_empty() {
+        for update in &pending_updates {
+            let (new_page_id, new_slot_id) = crate::backend::executor::compaction_api::insert_raw_tuple(
+                db_name, table_name, &update.new_bytes,
+            )?;
+
+            if let Err(e) = crate::backend::executor::create_index::update_index_on_update(
+                db_name, table_name, columns,
+                &update.old_tuple_data, &update.new_bytes,
+                update.pointer.page_id, update.pointer.slot_index as u32,
+                new_page_id, new_slot_id,
+            ) {
+                log::warn!("Failed to update index for updated tuple: {}", e);
+            }
+
+            returning_rows.push(
+                update.updated_decoded.iter().map(|(col, val)| {
+                    let s = match val {
+                        ColumnValue::Int(n) => n.to_string(),
+                        ColumnValue::Text(t) => t.clone(),
+                        ColumnValue::List(_) => String::from("[list]"),
+                    };
+                    (col.clone(), s)
+                }).collect()
+            );
+        }
+    }
+
+    // FK cascade propagation
+    if !pending_updates.is_empty() {
+        for update in &pending_updates {
+            if let Err(e) = crate::backend::constraint::propagate_update_to_children(
+                catalog, db_name, table_name,
+                &update.old_decoded, &update.updated_decoded,
+            ) {
+                log::warn!(
+                    "[UpdateByPointers] Failed to propagate FK cascade: {}", e
+                );
+            }
+        }
+    }
+
+    let result = UpdateResult { updated_count, returning_rows };
+    let details = update_log_details(&[], false, Some(result.updated_count), None);
+    let _ = crate::backend::log::operation_log::log_update(db_name, table_name, details, "success");
+
+    Ok(result)
+}
