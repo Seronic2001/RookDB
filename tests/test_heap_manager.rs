@@ -140,6 +140,9 @@ fn test_heap_scan() {
         manager.insert_tuple(data).expect("Failed to insert");
     }
 
+    // Flush buffer pool to disk so the direct-I/O scan iterator can see the data.
+    manager.flush().expect("Failed to flush before scan");
+
     // Scan and count
     let mut count = 0;
     for result in manager.scan() {
@@ -301,6 +304,9 @@ fn test_heap_multiple_pages() {
 
     assert!(manager.header.page_count > 1, "Should have allocated pages");
     assert!(manager.header.total_tuples > 0, "Should have inserted tuples");
+
+    // Flush buffer pool to disk so the direct-I/O scan iterator can see the data.
+    manager.flush().expect("Failed to flush before scan");
 
     // Verify scan gets all inserted tuples
     let scanned_count: usize = manager.scan()

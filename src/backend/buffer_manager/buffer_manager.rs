@@ -1,59 +1,76 @@
-use crate::disk::read_all_pages;
-use crate::page::{PAGE_SIZE, Page, init_page};
-
-use std::fs::File;
 use std::io;
 
+use super::buffer_pool::BufferPool;
+
+/// BufferManager — High-level buffer manager wrapping the CLOCK BufferPool.
+///
+/// Provides backward-compatible API for existing callers while leveraging the
+/// new CLOCK-sweep eviction pool internally.
+///
+/// # Default Pool Capacity
+///
+/// The default pool size is 128 frames (1 MB). This can be adjusted with
+/// `with_pool_capacity()`.
 pub struct BufferManager {
-    pub pages: Vec<Page>, // In-memory pages (header + data)
+    /// The underlying CLOCK buffer pool.
+    pub pool: BufferPool,
 }
 
 impl BufferManager {
+    /// Create a new buffer manager with default capacity (128 frames = 1 MB).
     pub fn new() -> Self {
-        // Start with ONLY header page
-        let mut pages = Vec::new();
-
-        let mut header = Page::new();
-        init_page(&mut header);
-        pages.push(header);
-
-        log::info!("Buffer Manager initialized with header page only.");
-
-        Self { pages }
+        Self::with_pool_capacity(128)
     }
 
-    /// Allocate ONE new data page
-    pub fn allocate_page(&mut self) {
-        let mut page = Page::new();
-        init_page(&mut page);
-        self.pages.push(page);
+    /// Create a new buffer manager with a specified pool capacity.
+    pub fn with_pool_capacity(capacity: usize) -> Self {
+        log::info!(
+            "BufferManager initialized with CLOCK buffer pool ({} frames = {} KB)",
+            capacity,
+            capacity * 8
+        );
+        Self {
+            pool: BufferPool::new(capacity),
+        }
     }
 
-    /// Loads table from disk into buffer (opens an existing table)
+    /// Allocate ONE new data page via the buffer pool.
+    ///
+    /// Returns the page_id of the newly allocated page.
+    pub fn allocate_page(&mut self) -> io::Result<u32> {
+        let (page_id, frame_id) = self.pool.new_page()?;
+        self.pool.unpin(frame_id, false);
+        Ok(page_id)
+    }
+
+    /// Loads table from disk into buffer (opens an existing table).
+    /// This opens the file and makes it available through the buffer pool.
     pub fn load_table_from_disk(&mut self, db_name: &str, table_name: &str) -> io::Result<()> {
         let table_path = format!("database/base/{}/{}.dat", db_name, table_name);
-        let mut file = File::open(&table_path)?;
+        let path = std::path::Path::new(&table_path);
 
-        let metadata = file.metadata()?;
-        let file_size = metadata.len();
-        let total_pages = (file_size as usize) / PAGE_SIZE;
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Table file not found: {}", table_path),
+            ));
+        }
 
         log::info!(
-            "Loading table '{}' ({} bytes, {} pages)...",
-            table_name, file_size, total_pages
+            "BufferManager: loading table '{}.{}' into CLOCK buffer pool",
+            db_name,
+            table_name
         );
 
-        // Load all pages from disk
-        self.pages = read_all_pages(&mut file)?;
+        self.pool.open(path)?;
 
+        let total_pages = self.pool.total_pages();
         log::info!(
-            "Loaded {} pages (1 header + {} data).",
-            self.pages.len(),
-            self.pages.len().saturating_sub(1)
+            "BufferManager: loaded {} pages into buffer pool ({} frame capacity)",
+            total_pages,
+            self.pool.capacity()
         );
 
         Ok(())
     }
-
 }
-

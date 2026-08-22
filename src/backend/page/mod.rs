@@ -126,63 +126,69 @@ log::trace!("[page::get_tuple_count] Computing tuple_count: ({} - {}) / {} = {}"
 }
 
 /// Get slot entry (offset, length) for a given slot ID.
-/// Returns (offset, length) of the tuple data.
-/// 
+///
+/// Uses the canonical 3-field slot format `[offset: u32, length: u16, flags: u16]`.
+/// Returns `(0, 0)` for soft-deleted slots (those with `SLOT_FLAG_DELETED` set)
+/// so that callers can uniformly treat `(0, 0)` as "skip this slot".
+///
 /// # Arguments
-/// * `page` - The phase to read from
+/// * `page`    - The page to read from
 /// * `slot_id` - Zero-based slot index
-/// 
+///
 /// # Returns
-/// Result of (offset, length) or error if slot is invalid.
-/// 
+/// `(offset, length)` of the live tuple data, or `(0, 0)` for deleted slots.
+///
 /// # Errors
-/// Returns error if slot_id is out of bounds or read fails.
+/// Returns an error only if `slot_id` is out of bounds or the page is structurally invalid.
 pub fn get_slot_entry(page: &Page, slot_id: u32) -> std::io::Result<(u32, u32)> {
     let tuple_count = get_tuple_count(page)?;
-    
+
     if slot_id >= tuple_count {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Slot ID {} out of bounds (tuple_count={})", slot_id, tuple_count),
         ));
     }
-    
-    // Slot entries are stored right after the page header (8 bytes)
-    // Each entry is 8 bytes: 4 bytes offset + 4 bytes length
+
+    // Canonical slot layout: [offset: u32 (4B)][length: u16 (2B)][flags: u16 (2B)]
     let slot_offset = PAGE_HEADER_SIZE as usize + (slot_id as usize * ITEM_ID_SIZE as usize);
-    
+
     if slot_offset + ITEM_ID_SIZE as usize > page.data.len() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "Slot entry read would exceed page bounds",
         ));
     }
-    
-    let offset = u32::from_le_bytes(
-        page.data[slot_offset..slot_offset + 4]
-            .try_into()
-            .unwrap(),
-    );
-    let length = u32::from_le_bytes(
-        page.data[slot_offset + 4..slot_offset + 8]
-            .try_into()
-            .unwrap(),
-    );
 
-    if offset > PAGE_SIZE as u32 || length > PAGE_SIZE as u32 || offset + length > PAGE_SIZE as u32 {
+    let offset = u32::from_le_bytes(page.data[slot_offset..slot_offset + 4].try_into().unwrap());
+    let length = u16::from_le_bytes(page.data[slot_offset + 4..slot_offset + 6].try_into().unwrap());
+    let flags  = u16::from_le_bytes(page.data[slot_offset + 6..slot_offset + 8].try_into().unwrap());
+
+    // Soft-deleted slot: signal caller to skip it.
+    if flags & SLOT_FLAG_DELETED != 0 {
+        log::trace!("[page::get_slot_entry] Slot {} is soft-deleted — returning (0, 0)", slot_id);
+        return Ok((0, 0));
+    }
+
+    // Legacy dead-slot marker (offset=0 && length=0): treat the same as deleted.
+    if offset == 0 && length == 0 {
+        return Ok((0, 0));
+    }
+
+    let length_u32 = length as u32;
+    if offset > PAGE_SIZE as u32 || length_u32 > PAGE_SIZE as u32 || offset + length_u32 > PAGE_SIZE as u32 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Corrupted slot entry bounds: offset={}, length={}, page_size={}",
-                offset, length, PAGE_SIZE
+                offset, length_u32, PAGE_SIZE
             ),
         ));
     }
-    
-    log::trace!("[page::get_slot_entry] Slot {}: offset={}, length={}", 
-             slot_id, offset, length);
-    
-    Ok((offset, length))
+
+    log::trace!("[page::get_slot_entry] Slot {}: offset={}, length={}", slot_id, offset, length_u32);
+
+    Ok((offset, length_u32))
 }
 
 /// Read slot `slot_index`
