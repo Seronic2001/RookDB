@@ -638,4 +638,84 @@ impl DataValue {
             _ => Ok(self.to_bytes()),
         }
     }
+
+    /// Return the smallest representable value for a given SQL type.
+    /// Used as the low sentinel for open-ended range scans (`col < X`).
+    pub fn min_for_type(dt: &DataType) -> Self {
+        match dt {
+            DataType::SmallInt => DataValue::SmallInt(i16::MIN),
+            DataType::Int => DataValue::Int(i32::MIN),
+            DataType::BigInt => DataValue::BigInt(i64::MIN),
+            DataType::Real => DataValue::Real(OrderedF32(f32::MIN)),
+            DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::MIN)),
+            DataType::Date => DataValue::Date(NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap_or_default()),
+            DataType::Time => DataValue::Time(NaiveTime::from_num_seconds_from_midnight_opt(0, 0).unwrap_or_default()),
+            DataType::Timestamp => DataValue::Timestamp(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap_or_default(),
+                NaiveTime::from_num_seconds_from_midnight_opt(0, 0).unwrap_or_default(),
+            )),
+            DataType::Varchar(_) => DataValue::Varchar(String::new()),
+            DataType::Char(_) | DataType::Character(_) => DataValue::Char(String::new()),
+            DataType::Bool => DataValue::Bool(false),
+            DataType::Numeric { .. } | DataType::Decimal { .. } => {
+                DataValue::Numeric(NumericValue { unscaled: i128::MIN, scale: 0 })
+            }
+            DataType::Bit(_) => DataValue::Bit("0".to_string()),
+        }
+    }
+
+    /// Return the largest representable value for a given SQL type.
+    /// Used as the high sentinel for open-ended range scans (`col > X`).
+    pub fn max_for_type(dt: &DataType) -> Self {
+        match dt {
+            DataType::SmallInt => DataValue::SmallInt(i16::MAX),
+            DataType::Int => DataValue::Int(i32::MAX),
+            DataType::BigInt => DataValue::BigInt(i64::MAX),
+            DataType::Real => DataValue::Real(OrderedF32(f32::MAX)),
+            DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::MAX)),
+            DataType::Date => DataValue::Date(NaiveDate::from_ymd_opt(9999, 12, 31).unwrap_or_default()),
+            DataType::Time => DataValue::Time(
+                NaiveTime::from_num_seconds_from_midnight_opt(86399, 999_999_000).unwrap_or_default(),
+            ),
+            DataType::Timestamp => DataValue::Timestamp(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(9999, 12, 31).unwrap_or_default(),
+                NaiveTime::from_num_seconds_from_midnight_opt(86399, 999_999_000).unwrap_or_default(),
+            )),
+            DataType::Varchar(_) => DataValue::Varchar("\u{10FFFF}".to_string()),
+            DataType::Char(_) | DataType::Character(_) => DataValue::Char("\u{10FFFF}".to_string()),
+            DataType::Bool => DataValue::Bool(true),
+            DataType::Numeric { .. } | DataType::Decimal { .. } => {
+                DataValue::Numeric(NumericValue { unscaled: i128::MAX, scale: 0 })
+            }
+            DataType::Bit(_) => DataValue::Bit("1".to_string()),
+        }
+    }
+
+    /// Return the next representable value after `self` (toward +∞).
+    /// Returns `None` for non-ordered types (strings, bits, bool, date/time) or
+    /// when the value is already at the maximum (overflow).
+    pub fn increment(&self) -> Option<Self> {
+        match self {
+            DataValue::SmallInt(v) => v.checked_add(1).map(DataValue::SmallInt),
+            DataValue::Int(v) => v.checked_add(1).map(DataValue::Int),
+            DataValue::BigInt(v) => v.checked_add(1).map(DataValue::BigInt),
+            DataValue::Real(v) => Some(DataValue::Real(OrderedF32(v.0.next_up()))),
+            DataValue::DoublePrecision(v) => Some(DataValue::DoublePrecision(OrderedF64(v.0.next_up()))),
+            _ => None,
+        }
+    }
+
+    /// Return the previous representable value before `self` (toward -∞).
+    /// Returns `None` for non-ordered types or when the value is already at
+    /// the minimum (underflow).
+    pub fn decrement(&self) -> Option<Self> {
+        match self {
+            DataValue::SmallInt(v) => v.checked_sub(1).map(DataValue::SmallInt),
+            DataValue::Int(v) => v.checked_sub(1).map(DataValue::Int),
+            DataValue::BigInt(v) => v.checked_sub(1).map(DataValue::BigInt),
+            DataValue::Real(v) => Some(DataValue::Real(OrderedF32(v.0.next_down()))),
+            DataValue::DoublePrecision(v) => Some(DataValue::DoublePrecision(OrderedF64(v.0.next_down()))),
+            _ => None,
+        }
+    }
 }

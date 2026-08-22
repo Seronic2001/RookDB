@@ -34,6 +34,8 @@ use crate::backend::catalog::types::Catalog;
 use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
 use self::helpers::infer_expr_type_from_ast;
+use crate::types::Comparable;
+use crate::types::DataValue;
 
 pub mod helpers;
 pub mod subqueries;
@@ -72,8 +74,26 @@ impl PhysicalPlanner {
             LogicalPlan::TableScan(ts) => self.plan_table_scan(ts),
 
             LogicalPlan::Filter(f) => {
-                // NOTE: index-accelerated scans arrive with the B+Tree stage;
-                // filters always run as SeqScan + FilterOperator here.
+                // Check if the filter's child is a TableScan that can use an
+                // index-accelerated scan (PointLookup or RangeLookup) instead
+                // of a SeqScan + FilterOperator.
+                if let LogicalPlan::TableScan(ref ts) = *f.child {
+                    if let Some(scan_op) = self.try_plan_index_scan_with_predicate(ts, &f.predicate)? {
+                        log::info!(
+                            "[Volcano] Using index-accelerated scan for table '{}' (full predicate preserved on top)",
+                            ts.table
+                        );
+                        // IMPORTANT: Always apply the full predicate as a FilterOperator
+                        // on top of the index-accelerated scan. This guarantees correctness
+                        // for compound AND predicates like `indexed_col = 5 AND other > 10`
+                        // where only the indexed portion is used by the index scan and the
+                        // non-indexed portion must still be applied as a filter.
+                        let predicate = self.make_predicate(&f.predicate, scan_op.schema())?;
+                        return Ok(Box::new(FilterOperator::new(scan_op, predicate)));
+                    }
+                }
+
+                // Fall through: create a SeqScan + FilterOperator
                 let child = self.plan_internal(&f.child, cte_registry)?;
                 let predicate = self.make_predicate(&f.predicate, child.schema())?;
                 Ok(Box::new(FilterOperator::new(child, predicate)))
@@ -343,33 +363,51 @@ impl PhysicalPlanner {
 impl PhysicalPlanner {
     /// Create a table scan operator for the given LogicalTableScan.
     ///
-    /// System-table scans only support the virtual `__singlerow__` source at
-    /// this stage; real system tables arrive with the metadata stage. User
-    /// tables are scanned sequentially (index-driven scans arrive with the
-    /// B+Tree stage).
+    /// If the scan targets a system table (`ts.system_table_name.is_some()`),
+    /// the heap path is resolved to `database/system/{name}.dat` and the
+    /// column schema for the output tuples is drawn from the system table's
+    /// definition rather than the user catalog.
+    ///
+    /// Otherwise, if a `.idx` file exists alongside the `.dat` heap file,
+    /// uses an `IndexScanOperator` with `FullScan` mode instead of a
+    /// sequential scan.  This allows the B+ Tree index to drive tuple
+    /// retrieval in key order.
     pub(crate) fn plan_table_scan(&self, ts: &LogicalTableScan) -> Result<Box<dyn PhysicalOperator>, String> {
         // ── System table path ─────────────────────────────────────────────
-        //
-        // INFORMATION_SCHEMA views read their backing system table from
-        // database/system/{name}.dat, deserialising with the physical schema
-        // while exposing the standard SQL view column names via a mapping.
         if let Some(sys_name) = &ts.system_table_name {
             // Virtual single-row table: no heap file needed
             if sys_name == "__singlerow__" {
                 return Ok(Box::new(SingleRowOperator::new()));
             }
-
-            let heap_path = PathBuf::from(format!("database/system/{}.dat", sys_name));
+            let heap_path = PathBuf::from(format!(
+                "database/system/{}.dat",
+                sys_name
+            ));
             if !heap_path.exists() {
                 return Err(format!("System table heap file not found: {:?}", heap_path));
             }
-
+            // Use the system table's actual physical schema for deserialisation
+            // (so INT columns are decoded as Int, BOOL as Bool, etc.) but keep
+            // the INFORMATION_SCHEMA view column names for display.
+            //
+            // IMPORTANT: Some INFORMATION_SCHEMA views (especially COLUMNS) have
+            // column names that do NOT positionally align with the physical system
+            // table columns.  For example, sys_columns has physical columns
+            // [col_id, table_id, name, data_type, ordinal, nullable, has_default,
+            //  default_value] but the COLUMNS view exposes [table_catalog,
+            //  table_schema, table_name, column_name, ordinal_position, data_type,
+            //  is_nullable, column_default].  We must map each info_schema column
+            //  to the correct physical column index and type.
+            //
+            // Use ts.schema (view column names, set by the logical planner) instead
+            // of info_schema_column_schema(sys_name) because sys_name is the system
+            // table name (e.g. "databases") while ts.schema holds the correct view
+            // column names (e.g. "catalog_name", "schema_name" for SCHEMATA).
             let info_schema = &ts.schema;
-            let sys_schema =
-                crate::backend::system_table::system_table_schema(sys_name);
-            let (mut column_info, column_mapping) =
-                self.map_info_schema_columns(sys_name, info_schema, &sys_schema);
-            // Set the table name so qualified refs resolve against the view.
+            let sys_schema = crate::backend::system_table::system_table_schema(sys_name);
+            // Map info_schema column names to physical column types + positions
+            let (mut column_info, column_mapping) = self.map_info_schema_columns(sys_name, info_schema, sys_schema);
+            // Set the table name for each column to allow table-qualified resolution
             let sys_table_name = sys_name.to_string();
             for ci in column_info.iter_mut() {
                 ci.table = Some(sys_table_name.clone());
@@ -385,7 +423,7 @@ impl PhysicalPlanner {
             )));
         }
 
-
+        // ── Regular user table path ───────────────────────────────────────
         let table_schema = self.resolve_table_schema(&ts.table)?;
         let table_name = ts.table.clone();
         let column_info: Vec<ColumnInfo> = table_schema.iter().map(|c| {
@@ -405,19 +443,14 @@ impl PhysicalPlanner {
             return Err(format!("Heap file not found: {:?}", heap_path));
         }
 
-        // ── Index-driven scans ────────────────────────────────────────────
-        // If an index file exists alongside the heap file, let the B+ Tree
-        // drive tuple retrieval in key order instead of a sequential scan.
-        // Predicate-based Point/Range selection arrives with the
-        // index-acceleration stage.
-
-        // Named indexes are registered in sys_indexes as {table}.{index}.idx files.
+        // Check for any index files (named or legacy) alongside the heap file
+        // First try loading named indexes from sys_indexes
         let named_indexes = crate::backend::executor::create_index::load_table_indexes(
-            &self.db_name, &ts.table,
-        )
-        .unwrap_or_default();
+            &self.db_name, &ts.table
+        ).unwrap_or_default();
 
         if !named_indexes.is_empty() {
+            // Use the first named index for the full scan
             let first_idx_name = &named_indexes[0].0;
             let index_path = PathBuf::from(format!(
                 "database/base/{}/{}.{}.idx",
@@ -426,20 +459,16 @@ impl PhysicalPlanner {
 
             if index_path.exists() {
                 log::info!(
-                    "[Volcano] Named index '{}' found for table '{}', using IndexScanOperator with FullScan",
-                    first_idx_name,
-                    ts.table
+                    "[Volcano] Named index '{}' file found at {:?}, using IndexScanOperator with FullScan",
+                    first_idx_name, index_path
                 );
 
                 let mut btree = BTree::open(index_path)
                     .map_err(|e| format!("Failed to open index for table '{}': {}", ts.table, e))?;
 
-                // Key type must come from the indexed column (NOT necessarily
-                // the first table column).
+                // Set the key type from the indexed column (NOT the first table column)
                 let idx_col_name = &named_indexes[0].1;
-                if let Some(idx_col) =
-                    table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(idx_col_name))
-                {
+                if let Some(idx_col) = table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(idx_col_name)) {
                     btree.set_key_type(idx_col.data_type.clone());
                 } else if let Some(first_col) = table_schema.first() {
                     btree.set_key_type(first_col.data_type.clone());
@@ -457,7 +486,7 @@ impl PhysicalPlanner {
             }
         }
 
-        // Fallback: legacy single unnamed index file ({table}.idx).
+        // Fallback: check for legacy single-index file
         let legacy_index_path = PathBuf::from(format!(
             "database/base/{}/{}.idx",
             self.db_name, ts.table
@@ -465,12 +494,12 @@ impl PhysicalPlanner {
 
         if legacy_index_path.exists() {
             log::info!(
-                "[Volcano] Legacy index file found for table '{}', using IndexScanOperator with FullScan",
-                ts.table
+                "[Volcano] Legacy index file found at {:?}, using IndexScanOperator with FullScan",
+                legacy_index_path
             );
 
             let mut btree = BTree::open(legacy_index_path)
-                .map_err(|e| format!("Failed to open index for table '{}': {}", ts.table, e))?;
+                .map_err(|e| format!("Failed to open legacy index for table '{}': {}", ts.table, e))?;
 
             if let Some(first_col) = table_schema.first() {
                 btree.set_key_type(first_col.data_type.clone());
@@ -487,7 +516,11 @@ impl PhysicalPlanner {
             )));
         }
 
-        // ── Sequential fallback ───────────────────────────────────────────
+        log::info!(
+            "[Volcano] No index file found for table '{}', using SeqScan",
+            ts.table
+        );
+
         let heap_manager = HeapManager::open(heap_path)
             .map_err(|e| format!("Failed to open heap for table '{}': {}", ts.table, e))?;
 
@@ -644,5 +677,1100 @@ impl PhysicalPlanner {
                 Ok((e, data_type))
             }
         }
+    }
+}
+
+// ── Index-accelerated scan planning (M1 + M2) ────────────────────────────────
+
+impl PhysicalPlanner {
+    /// Try to create an index-accelerated scan from a Filter + TableScan pattern.
+    ///
+    /// Examines the filter predicate and table indexes to determine if a
+    /// PointLookup or RangeLookup can replace the SeqScan + FilterOperator.
+    /// When multiple indexes exist, selects the best one (dynamic index selection, M2).
+    pub(crate) fn try_plan_index_scan_with_predicate(
+        &self,
+        ts: &LogicalTableScan,
+        pred_node: &rook_ast::PredicateNode,
+    ) -> Result<Option<Box<dyn PhysicalOperator>>, String> {
+        // Only works for regular user tables
+        if ts.system_table_name.is_some() {
+            return Ok(None);
+        }
+
+        let table_schema = match self.resolve_table_schema(&ts.table) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+
+        // Build column_info for the table
+        let table_name = ts.table.clone();
+        let column_info: Vec<ColumnInfo> = table_schema.iter().map(|c| {
+            ColumnInfo {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+                table: Some(table_name.clone()),
+            }
+        }).collect();
+
+        let heap_path = PathBuf::from(format!(
+            "database/base/{}/{}.dat", self.db_name, ts.table
+        ));
+        if !heap_path.exists() {
+            return Ok(None);
+        }
+
+        // Load indexes (both named and legacy)
+        let named_indexes = crate::backend::executor::create_index::load_table_indexes(
+            &self.db_name, &ts.table,
+        ).unwrap_or_default();
+
+        // Try named indexes first (dynamic selection — M2)
+        let mut best_idx_name: Option<String> = None;
+        let mut best_col_name: Option<String> = None;
+        let mut best_mode: Option<IndexScanMode> = None;
+
+        for (idx_name, col_name, _is_unique) in &named_indexes {
+            // Look up the indexed column's DataType for sentinel bounds
+            let col_type = table_schema.iter()
+                .find(|c| c.name.eq_ignore_ascii_case(col_name))
+                .map(|c| &c.data_type)
+                .unwrap_or_else(|| &DataType::Int);
+            if let Some(mode) = self.extract_index_mode_from_predicate(pred_node, col_name, col_type) {
+                let priority = Self::scan_mode_priority(&mode);
+                let should_replace = match &best_mode {
+                    Some(existing) => priority < Self::scan_mode_priority(existing),
+                    None => true,
+                };
+                if should_replace {
+                    best_idx_name = Some(idx_name.clone());
+                    best_col_name = Some(col_name.clone());
+                    best_mode = Some(mode);
+                }
+            }
+        }
+
+        // Try legacy index if no named index matched
+        if best_mode.is_none() {
+            let legacy_idx_path = PathBuf::from(format!(
+                "database/base/{}/{}.idx", self.db_name, ts.table
+            ));
+            let meta_path = format!("database/base/{}/{}.idx.meta", self.db_name, ts.table);
+            if legacy_idx_path.exists() {
+                if let Ok(meta_json) = std::fs::read_to_string(&meta_path) {
+                    #[derive(serde::Deserialize)]
+                    struct IndexMeta { column_name: String }
+                    if let Ok(meta) = serde_json::from_str::<IndexMeta>(&meta_json) {
+                        let col_type = table_schema.iter()
+                            .find(|c| c.name.eq_ignore_ascii_case(&meta.column_name))
+                            .map(|c| &c.data_type)
+                            .unwrap_or_else(|| &DataType::Int);
+                        if let Some(mode) = self.extract_index_mode_from_predicate(pred_node, &meta.column_name, col_type) {
+                            let col_name = meta.column_name.clone();
+                            best_mode = Some(mode);
+                            best_col_name = Some(col_name);
+                            best_idx_name = Some(format!("idx_{}_{}", ts.table, meta.column_name));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build the index scan operator if a matching index was found
+        if let (Some(idx_name), Some(ref col_name), Some(mode)) = (best_idx_name, best_col_name, best_mode) {
+            let idx_path = PathBuf::from(format!(
+                "database/base/{}/{}.{}.idx", self.db_name, ts.table, idx_name
+            ));
+            if !idx_path.exists() {
+                return Ok(None);
+            }
+
+            log::info!(
+                "[Volcano] Index-accelerated scan: mode={:?}, table='{}'",
+                mode, ts.table
+            );
+
+            let mut btree = BTree::open(idx_path)
+                .map_err(|e| format!("Failed to open index: {}", e))?;
+            // Set key type from the INDEXED column (NOT the first table column)
+            if let Some(idx_col) = table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(col_name.as_str())) {
+                btree.set_key_type(idx_col.data_type.clone());
+            } else if let Some(first_col) = table_schema.first() {
+                btree.set_key_type(first_col.data_type.clone());
+            }
+
+            let heap_manager = HeapManager::open(heap_path)
+                .map_err(|e| format!("Failed to open heap: {}", e))?;
+
+            return Ok(Some(Box::new(IndexScanOperator::new(
+                btree, heap_manager, mode, column_info,
+            ))));
+        }
+
+        Ok(None)
+    }
+
+    /// Priority for dynamic index selection: lower = better.
+    fn scan_mode_priority(mode: &IndexScanMode) -> u8 {
+        match mode {
+            IndexScanMode::PointLookup(_) => 0,
+            IndexScanMode::RangeLookup(..) => 1,
+            IndexScanMode::FullScan => 2,
+        }
+    }
+
+    /// Extract an IndexScanMode from a predicate if it matches an indexed column.
+    ///
+    /// Matches:
+    ///   - `column = constant` → PointLookup
+    ///   - `column >= constant` → RangeLookup(constant, MAX)
+    ///   - `column > constant` → RangeLookup(constant+1, MAX)        (for ints/floats)
+    ///   - `column <= constant` → RangeLookup(MIN, constant)
+    ///   - `column < constant` → RangeLookup(MIN, constant-1)        (for ints/floats)
+    ///   - `column BETWEEN low AND high` → RangeLookup(low, high)
+    ///   - `column IN (single_constant)` → PointLookup
+    ///   - AND predicates: tries both sides and combines ranges on the
+    ///     same column into the tightest [max(low), min(high)] interval.
+    ///
+    /// Non-matched predicates and complex expressions fall through to
+    /// SeqScan + FilterOperator for correct results.
+    fn extract_index_mode_from_predicate(
+        &self,
+        pred: &rook_ast::PredicateNode,
+        indexed_col: &str,
+        col_type: &DataType,
+    ) -> Option<IndexScanMode> {
+        match pred {
+            rook_ast::PredicateNode::Compare { left, op, right } => {
+                // Extract column name and constant value from the comparison
+                let (col_name, const_val) = match (left.as_ref(), right.as_ref()) {
+                    // column op constant or constant op column
+                    (col @ rook_ast::ExprNode::Column(_), rook_ast::ExprNode::Constant(cv))
+                    | (rook_ast::ExprNode::Constant(cv), col @ rook_ast::ExprNode::Column(_)) => {
+                        (col, cv)
+                    }
+                    // compound.column op constant or constant op compound.column
+                    (col @ rook_ast::ExprNode::Compound(_), rook_ast::ExprNode::Constant(cv))
+                    | (rook_ast::ExprNode::Constant(cv), col @ rook_ast::ExprNode::Compound(_)) => {
+                        (col, cv)
+                    }
+                    _ => return None,
+                };
+
+                // Extract the leaf column name (last part for Compound)
+                let leaf_name = match col_name {
+                    rook_ast::ExprNode::Column(name) => name.as_str(),
+                    rook_ast::ExprNode::Compound(parts) => parts.last()?.as_str(),
+                    _ => return None,
+                };
+
+                // Check if the column matches the indexed column
+                if !leaf_name.eq_ignore_ascii_case(indexed_col) {
+                    return None;
+                }
+
+                let dv = Self::ast_constant_to_data_value(const_val);
+
+                match op {
+                    rook_ast::ComparisonOp::Eq => Some(IndexScanMode::PointLookup(dv)),
+                    // ── Single range operators → RangeLookup with sentinels ──
+                    rook_ast::ComparisonOp::Gt => {
+                        // col > val → RangeLookup(val+1, MAX)
+                        let low = dv.increment()?;
+                        let high = DataValue::max_for_type(col_type);
+                        Some(IndexScanMode::RangeLookup(low, high))
+                    }
+                    rook_ast::ComparisonOp::Ge => {
+                        // col >= val → RangeLookup(val, MAX)
+                        let high = DataValue::max_for_type(col_type);
+                        Some(IndexScanMode::RangeLookup(dv, high))
+                    }
+                    rook_ast::ComparisonOp::Lt => {
+                        // col < val → RangeLookup(MIN, val-1)
+                        let low = DataValue::min_for_type(col_type);
+                        let high = dv.decrement()?;
+                        Some(IndexScanMode::RangeLookup(low, high))
+                    }
+                    rook_ast::ComparisonOp::Le => {
+                        // col <= val → RangeLookup(MIN, val)
+                        let low = DataValue::min_for_type(col_type);
+                        Some(IndexScanMode::RangeLookup(low, dv))
+                    }
+                    _ => None,
+                }
+            }
+
+            // ── BETWEEN: col BETWEEN low AND high → RangeLookup(low, high) ──
+            rook_ast::PredicateNode::Between { expr, low, high } => {
+                // Extract column name from the BETWEEN expression
+                let leaf_name = match expr.as_ref() {
+                    rook_ast::ExprNode::Column(name) => name.as_str(),
+                    rook_ast::ExprNode::Compound(parts) => parts.last()?.as_str(),
+                    _ => return None,
+                };
+
+                // Check if the column matches the indexed column
+                if !leaf_name.eq_ignore_ascii_case(indexed_col) {
+                    return None;
+                }
+
+                // Both bounds must be constants
+                let low_val = match low.as_ref() {
+                    rook_ast::ExprNode::Constant(cv) => Self::ast_constant_to_data_value(cv),
+                    _ => return None,
+                };
+                let high_val = match high.as_ref() {
+                    rook_ast::ExprNode::Constant(cv) => Self::ast_constant_to_data_value(cv),
+                    _ => return None,
+                };
+
+                Some(IndexScanMode::RangeLookup(low_val, high_val))
+            }
+
+            // ── IN list: col IN (val)  or  col IN (v1, v2, ...) ──────────
+            rook_ast::PredicateNode::InList { expr, list } => {
+                // Extract column name from the IN expression
+                let leaf_name = match expr.as_ref() {
+                    rook_ast::ExprNode::Column(name) => name.as_str(),
+                    rook_ast::ExprNode::Compound(parts) => parts.last()?.as_str(),
+                    _ => return None,
+                };
+
+                // Check if the column matches the indexed column
+                if !leaf_name.eq_ignore_ascii_case(indexed_col) {
+                    return None;
+                }
+
+                // Single-element IN list: col IN (val) → PointLookup(val)
+                if list.len() == 1 {
+                    if let rook_ast::ExprNode::Constant(cv) = &list[0] {
+                        return Some(IndexScanMode::PointLookup(
+                            Self::ast_constant_to_data_value(cv),
+                        ));
+                    }
+                }
+
+                // Multi-element IN lists are not directly accelerated.
+                // They fall through to SeqScan + FilterOperator which
+                // evaluates the IN predicate correctly.
+                None
+            }
+
+            // ── AND predicates: try both sides and combine if both match ──
+            rook_ast::PredicateNode::BinaryOp {
+                left, op: rook_ast::BinaryOp::And, right,
+            } => {
+                let left_mode = self.extract_index_mode_from_predicate(left, indexed_col, col_type);
+                let right_mode = self.extract_index_mode_from_predicate(right, indexed_col, col_type);
+
+                match (left_mode, right_mode) {
+                    // Both sides match on the same column → combine into tightest range
+                    (Some(a), Some(b)) => Some(Self::combine_index_modes(a, b)),
+                    // Only one side matches → use it (existing fall-through behaviour)
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Combine two `IndexScanMode` values from an AND predicate on the same column.
+    ///
+    /// The goal is to produce the tightest possible range:
+    /// - Two `RangeLookup`s → `RangeLookup(max(low_a, low_b), min(high_a, high_b))`
+    /// - `PointLookup` + `RangeLookup` → prefer `PointLookup` (more selective)
+    /// - Two `PointLookup`s → keep the first (both must be the same value under AND)
+    /// - Any other combination → keep the more selective mode
+    fn combine_index_modes(a: IndexScanMode, b: IndexScanMode) -> IndexScanMode {
+        match (&a, &b) {
+            // Two RangeLookups on the same column: intersect the intervals
+            (IndexScanMode::RangeLookup(low_a, high_a), IndexScanMode::RangeLookup(low_b, high_b)) => {
+                let low = if low_a.compare(low_b).ok() == Some(std::cmp::Ordering::Greater) {
+                    low_a.clone()
+                } else {
+                    low_b.clone()
+                };
+                let high = if high_a.compare(high_b).ok() == Some(std::cmp::Ordering::Less) {
+                    high_a.clone()
+                } else {
+                    high_b.clone()
+                };
+                // If low > high, the range is empty — still correct (no rows match)
+                IndexScanMode::RangeLookup(low, high)
+            }
+            // PointLookup + RangeLookup (or vice versa): PointLookup is more selective
+            (IndexScanMode::PointLookup(_), _) => a,
+            (_, IndexScanMode::PointLookup(_)) => b,
+            // RangeLookup + FullScan: RangeLookup wins
+            (IndexScanMode::RangeLookup(..), _) | (_, IndexScanMode::RangeLookup(..)) => {
+                match (&a, &b) {
+                    (IndexScanMode::RangeLookup(..), _) => a,
+                    (_, IndexScanMode::RangeLookup(..)) => b,
+                    _ => unreachable!(),
+                }
+            }
+            // Fallback: any other combination
+            _ => a,
+        }
+    }
+
+    /// Convert an AST ConstantValue to a DataValue.
+    fn ast_constant_to_data_value(cv: &rook_ast::ConstantValue) -> crate::types::value::DataValue {
+        match cv {
+            rook_ast::ConstantValue::Null => crate::types::value::DataValue::Int(0),
+            rook_ast::ConstantValue::Int(i) => {
+                if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
+                    crate::types::value::DataValue::Int(*i as i32)
+                } else {
+                    crate::types::value::DataValue::BigInt(*i)
+                }
+            }
+            rook_ast::ConstantValue::Float(f) => {
+                crate::types::value::DataValue::DoublePrecision(
+                    crate::types::value::OrderedF64(*f),
+                )
+            }
+            rook_ast::ConstantValue::Text(s) => crate::types::value::DataValue::Varchar(s.clone()),
+            rook_ast::ConstantValue::Boolean(b) => crate::types::value::DataValue::Bool(*b),
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rook_ast::{PredicateNode, ExprNode, ComparisonOp, BinaryOp, ConstantValue};
+    use rook_ast::logical::*;
+
+    fn col(name: &str) -> ExprNode { ExprNode::Column(name.to_string()) }
+    fn compound(parts: &[&str]) -> ExprNode {
+        ExprNode::Compound(parts.iter().map(|s| s.to_string()).collect())
+    }
+    fn constant_int(v: i64) -> ExprNode { ExprNode::Constant(ConstantValue::Int(v)) }
+    fn constant_float(v: f64) -> ExprNode { ExprNode::Constant(ConstantValue::Float(v)) }
+    fn constant_text(s: &str) -> ExprNode { ExprNode::Constant(ConstantValue::Text(s.to_string())) }
+    #[allow(dead_code)]
+    fn constant_bool(b: bool) -> ExprNode { ExprNode::Constant(ConstantValue::Boolean(b)) }
+
+    fn eq_pred(l: ExprNode, r: ExprNode) -> PredicateNode {
+        PredicateNode::Compare { left: Box::new(l), op: ComparisonOp::Eq, right: Box::new(r) }
+    }
+    fn gt_pred(l: ExprNode, r: ExprNode) -> PredicateNode {
+        PredicateNode::Compare { left: Box::new(l), op: ComparisonOp::Gt, right: Box::new(r) }
+    }
+    fn and_pred(l: PredicateNode, r: PredicateNode) -> PredicateNode {
+        PredicateNode::BinaryOp { left: Box::new(l), op: BinaryOp::And, right: Box::new(r) }
+    }
+    fn not_pred(inner: PredicateNode) -> PredicateNode {
+        PredicateNode::Not(Box::new(inner))
+    }
+
+    /// Create a dummy PhysicalPlanner for testing private methods.
+    fn make_planner() -> PhysicalPlanner {
+        use std::collections::HashMap;
+        PhysicalPlanner {
+            catalog: Catalog { databases: HashMap::new() },
+            db_name: "test".to_string(),
+        }
+    }
+
+    // ── extract_index_mode_from_predicate ─────────────────────────────────
+
+    #[test]
+    fn test_extract_point_lookup_simple_eq() {
+        let planner = make_planner();
+        let pred = eq_pred(col("id"), constant_int(42));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_some(), "Equality on indexed column should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(42));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_point_lookup_constant_on_left() {
+        let planner = make_planner();
+        let pred = eq_pred(constant_int(99), col("age"));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "constant = col should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(99));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_non_indexed_column_returns_none() {
+        let planner = make_planner();
+        let pred = eq_pred(col("name"), constant_int(1));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_none(), "Non-indexed column should not match");
+    }
+
+    #[test]
+    fn test_extract_and_predicate_first_side_matches() {
+        let planner = make_planner();
+        let pred = and_pred(
+            eq_pred(col("id"), constant_int(5)),
+            eq_pred(col("name"), constant_text("hello")),
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_some(), "First side of AND should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(5));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_and_predicate_second_side_matches() {
+        let planner = make_planner();
+        let pred = and_pred(
+            eq_pred(col("name"), constant_text("hello")),
+            eq_pred(col("id"), constant_int(10)),
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_some(), "Second side of AND should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(10));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_and_predicate_neither_side_matches() {
+        let planner = make_planner();
+        let pred = and_pred(
+            eq_pred(col("name"), constant_text("hello")),
+            eq_pred(col("age"), constant_int(30)),
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_none(), "Neither side matches indexed column 'id'");
+    }
+
+    #[test]
+    fn test_extract_not_predicate_returns_none() {
+        let planner = make_planner();
+        let pred = not_pred(eq_pred(col("id"), constant_int(5)));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_none(), "NOT predicate should not match");
+    }
+
+    #[test]
+    fn test_extract_gt_returns_range_lookup() {
+        let planner = make_planner();
+        // col > 18 → RangeLookup(19, MAX) for INT
+        let pred = gt_pred(col("age"), constant_int(18));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "Range operator should now match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(19), "Gt should increment the bound");
+                assert_eq!(high, crate::types::value::DataValue::Int(i32::MAX), "Gt should use MAX sentinel");
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_ge_uses_value_as_low() {
+        let planner = make_planner();
+        // col >= 18 → RangeLookup(18, MAX) for INT
+        let pred = PredicateNode::Compare {
+            left: Box::new(col("age")),
+            op: ComparisonOp::Ge,
+            right: Box::new(constant_int(18)),
+        };
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "Ge should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(18), "Ge should NOT increment the bound");
+                assert_eq!(high, crate::types::value::DataValue::Int(i32::MAX));
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_lt_returns_range_lookup() {
+        let planner = make_planner();
+        // col < 10 → RangeLookup(MIN, 9) for INT
+        let pred = PredicateNode::Compare {
+            left: Box::new(col("age")),
+            op: ComparisonOp::Lt,
+            right: Box::new(constant_int(10)),
+        };
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "Lt should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(i32::MIN));
+                assert_eq!(high, crate::types::value::DataValue::Int(9), "Lt should decrement the bound");
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_le_uses_value_as_high() {
+        let planner = make_planner();
+        // col <= 10 → RangeLookup(MIN, 10) for INT
+        let pred = PredicateNode::Compare {
+            left: Box::new(col("age")),
+            op: ComparisonOp::Le,
+            right: Box::new(constant_int(10)),
+        };
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "Le should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(i32::MIN));
+                assert_eq!(high, crate::types::value::DataValue::Int(10), "Le should NOT decrement the bound");
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_gt_float_range() {
+        let planner = make_planner();
+        // salary > 50000.0 → RangeLookup(nextafter(50000.0), MAX) for DOUBLE
+        let pred = gt_pred(col("salary"), constant_float(50000.0));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        assert!(mode.is_some(), "Gt on float should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                match low {
+                    crate::types::value::DataValue::DoublePrecision(v) => {
+                        assert!(v.0 > 50000.0, "Gt on float should use next-up value");
+                    }
+                    _ => panic!("Expected DoublePrecision"),
+                }
+                match high {
+                    crate::types::value::DataValue::DoublePrecision(v) => {
+                        assert_eq!(v.0, f64::MAX);
+                    }
+                    _ => panic!("Expected DoublePrecision"),
+                }
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_gt_bigint_range() {
+        let planner = make_planner();
+        // big_col > 1_000_000_000_000 → RangeLookup(1_000_000_000_001, MAX) for BIGINT
+        let pred = gt_pred(col("big_col"), constant_int(1_000_000_000_000));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "big_col", &DataType::BigInt);
+        assert!(mode.is_some(), "Gt on BigInt should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::BigInt(1_000_000_000_001));
+                assert_eq!(high, crate::types::value::DataValue::BigInt(i64::MAX));
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_and_combines_two_range_lookups() {
+        let planner = make_planner();
+        // AND(col > 5, col < 10) on same column → RangeLookup(6, 9)
+        let pred = and_pred(
+            gt_pred(col("age"), constant_int(5)),
+            PredicateNode::Compare {
+                left: Box::new(col("age")),
+                op: ComparisonOp::Lt,
+                right: Box::new(constant_int(10)),
+            },
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "AND of two ranges should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(6),
+                    "Combined low should be max(6, MIN) = 6");
+                assert_eq!(high, crate::types::value::DataValue::Int(9),
+                    "Combined high should be min(MAX, 9) = 9");
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_and_combines_ge_and_le() {
+        let planner = make_planner();
+        // AND(col >= 5, col <= 10) → RangeLookup(5, 10)
+        let pred = and_pred(
+            PredicateNode::Compare {
+                left: Box::new(col("age")),
+                op: ComparisonOp::Ge,
+                right: Box::new(constant_int(5)),
+            },
+            PredicateNode::Compare {
+                left: Box::new(col("age")),
+                op: ComparisonOp::Le,
+                right: Box::new(constant_int(10)),
+            },
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "AND of Ge+Le should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(5));
+                assert_eq!(high, crate::types::value::DataValue::Int(10));
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_and_combines_eq_and_gt() {
+        let planner = make_planner();
+        // AND(age = 7, age > 5) → PointLookup(7) (more selective)
+        let pred = and_pred(
+            eq_pred(col("age"), constant_int(7)),
+            gt_pred(col("age"), constant_int(5)),
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "AND of Eq+Gt should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(7),
+                    "PointLookup should be preferred over RangeLookup");
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_compound_column() {
+        let planner = make_planner();
+        let pred = eq_pred(compound(&["users", "id"]), constant_int(42));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_some(), "Compound column should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(42));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_varchar_equality() {
+        let planner = make_planner();
+        let pred = eq_pred(col("name"), constant_text("Alice"));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
+        assert!(mode.is_some(), "Varchar equality should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Varchar("Alice".to_string()));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_float_equality() {
+        let planner = make_planner();
+        let pred = eq_pred(col("salary"), constant_float(75000.5));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        assert!(mode.is_some(), "Float equality should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                match dv {
+                    crate::types::value::DataValue::DoublePrecision(v) => {
+                        assert!((v.0 - 75000.5).abs() < 0.001, "Unexpected value: {}", v.0);
+                    }
+                    _ => panic!("Expected DoublePrecision"),
+                }
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_case_insensitive_column_match() {
+        let planner = make_planner();
+        // Indexed column is "ID" but predicate uses "id"
+        let pred = eq_pred(col("id"), constant_int(1));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "ID", &DataType::Int);
+        assert!(mode.is_some(), "Column matching should be case-insensitive");
+    }
+
+    // ── scan_mode_priority ────────────────────────────────────────────────
+
+    #[test]
+    fn test_scan_mode_priority_ordering() {
+        let point = IndexScanMode::PointLookup(crate::types::value::DataValue::Int(0));
+        let full = IndexScanMode::FullScan;
+
+        assert_eq!(PhysicalPlanner::scan_mode_priority(&point), 0,
+            "PointLookup should have highest priority (0)");
+        assert_eq!(PhysicalPlanner::scan_mode_priority(&full), 2,
+            "FullScan should have lowest priority (2)");
+        assert!(
+            PhysicalPlanner::scan_mode_priority(&point) < PhysicalPlanner::scan_mode_priority(&full),
+            "PointLookup priority should be higher (lower number) than FullScan"
+        );
+    }
+
+    // ── ast_constant_to_data_value ────────────────────────────────────────
+
+    #[test]
+    fn test_ast_constant_int_to_data_value() {
+        let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Int(42));
+        assert_eq!(dv, crate::types::value::DataValue::Int(42));
+    }
+
+    #[test]
+    fn test_ast_constant_bigint_to_data_value() {
+        // Larger than i32::MAX should become BigInt
+        let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Int(3_000_000_000));
+        assert_eq!(dv, crate::types::value::DataValue::BigInt(3_000_000_000));
+    }
+
+    #[test]
+    fn test_ast_constant_float_to_data_value() {
+        let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Float(3.14));
+        match dv {
+            crate::types::value::DataValue::DoublePrecision(v) => {
+                assert!((v.0 - 3.14).abs() < 0.001);
+            }
+            _ => panic!("Expected DoublePrecision"),
+        }
+    }
+
+    #[test]
+    fn test_ast_constant_text_to_data_value() {
+        let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Text("hello".to_string()));
+        assert_eq!(dv, crate::types::value::DataValue::Varchar("hello".to_string()));
+    }
+
+    #[test]
+    fn test_ast_constant_bool_to_data_value() {
+        let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Boolean(true));
+        assert_eq!(dv, crate::types::value::DataValue::Bool(true));
+    }
+
+    #[test]
+    fn test_ast_constant_null_to_data_value() {
+        let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Null);
+        assert_eq!(dv, crate::types::value::DataValue::Int(0), "Null defaults to Int(0)");
+    }
+
+    // ── try_plan_index_scan_with_predicate edge cases ─────────────────────
+
+    #[test]
+    fn test_try_index_scan_system_table_returns_none() {
+        // System tables are skipped (e.g., information_schema)
+        let planner = make_planner();
+        let ts = LogicalTableScan {
+            table: "tables".to_string(),
+            alias: None,
+            schema: ColumnSchema::empty(),
+            system_table_name: Some("tables".to_string()),
+        };
+        let pred = eq_pred(col("table_name"), constant_text("users"));
+        let result = planner.try_plan_index_scan_with_predicate(&ts, &pred)
+            .expect("Should not error");
+        assert!(result.is_none(), "System tables should not use index-accelerated scans");
+    }
+
+    #[test]
+    fn test_try_index_scan_nonexistent_table_returns_none() {
+        // Table not found in catalog → graceful None
+        let planner = make_planner();
+        let ts = LogicalTableScan {
+            table: "ghost_table".to_string(),
+            alias: None,
+            schema: ColumnSchema::empty(),
+            system_table_name: None,
+        };
+        let pred = eq_pred(col("id"), constant_int(1));
+        let result = planner.try_plan_index_scan_with_predicate(&ts, &pred)
+            .expect("Should not error");
+        assert!(result.is_none(), "Non-existent table should return None gracefully");
+    }
+
+    #[test]
+    fn test_try_index_scan_nonexistent_table_is_graceful() {
+        // Table doesn't exist in catalog → graceful None (not panic)
+        let planner = make_planner();
+        let ts = LogicalTableScan {
+            table: "ghost".to_string(),
+            alias: None,
+            schema: ColumnSchema::empty(),
+            system_table_name: None,
+        };
+        let pred = eq_pred(col("id"), constant_int(1));
+        let result = planner.try_plan_index_scan_with_predicate(&ts, &pred);
+        assert!(result.is_ok(), "Should not error on non-existent table");
+        assert!(result.unwrap().is_none(), "Should return None gracefully");
+    }
+
+    // ── Compound AND predicate correctness ─────────────────────────────────
+
+    #[test]
+    fn test_extract_and_predicate_preserves_non_indexed_condition() {
+        // This validates that extract_index_mode_from_predicate returns the
+        // indexed portion of an AND predicate. The full predicate is ALWAYS
+        // applied as a FilterOperator on top of the index scan, so the
+        // non-indexed portion is preserved. This test verifies we correctly
+        // extract the indexed-match portion.
+        let planner = make_planner();
+
+        // AND: indexed_col = 5 AND non_indexed_col > 10
+        // Only the indexed part should be returned by extract
+        let pred = and_pred(
+            eq_pred(col("salary"), constant_float(50000.0)),
+            gt_pred(col("age"), constant_int(30)),
+        );
+
+        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        assert!(mode.is_some(), "Should match the indexed column part of AND");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::DoublePrecision(
+                    crate::types::value::OrderedF64(50000.0)
+                ), "Should extract the indexed side of the AND");
+            }
+            other => panic!("Expected PointLookup for indexed column, got {:?}", other),
+        }
+
+        // NOTE: The non-indexed part (age > 30) is preserved by the FilterOperator
+        // that wraps the index scan in plan_internal. This test just verifies
+        // that extract_index_mode_from_predicate returns the correct indexed portion.
+    }
+
+    // ── BETWEEN index range pushdown (L1) ─────────────────────────────────
+
+    fn between_pred(expr: ExprNode, low: ExprNode, high: ExprNode) -> PredicateNode {
+        PredicateNode::Between {
+            expr: Box::new(expr),
+            low: Box::new(low),
+            high: Box::new(high),
+        }
+    }
+
+    fn inlist_pred(expr: ExprNode, items: Vec<ExprNode>) -> PredicateNode {
+        PredicateNode::InList {
+            expr: Box::new(expr),
+            list: items,
+        }
+    }
+
+    #[test]
+    fn test_extract_between_int_range() {
+        let planner = make_planner();
+        // age BETWEEN 18 AND 65 → RangeLookup(18, 65)
+        let pred = between_pred(col("age"), constant_int(18), constant_int(65));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "BETWEEN on indexed column should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(18));
+                assert_eq!(high, crate::types::value::DataValue::Int(65));
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_between_float_range() {
+        let planner = make_planner();
+        // salary BETWEEN 30000.0 AND 80000.0 → RangeLookup(30000.0, 80000.0)
+        let pred = between_pred(col("salary"), constant_float(30000.0), constant_float(80000.0));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        assert!(mode.is_some(), "BETWEEN on indexed column should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                match (low, high) {
+                    (crate::types::value::DataValue::DoublePrecision(l),
+                     crate::types::value::DataValue::DoublePrecision(h)) => {
+                        assert!((l.0 - 30000.0).abs() < 0.001);
+                        assert!((h.0 - 80000.0).abs() < 0.001);
+                    }
+                    _ => panic!("Expected DoublePrecision values"),
+                }
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_between_non_indexed_column_returns_none() {
+        let planner = make_planner();
+        // BETWEEN on 'name' but index is on 'id'
+        let pred = between_pred(col("name"), constant_text("A"), constant_text("Z"));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_none(), "BETWEEN on non-indexed column should not match");
+    }
+
+    #[test]
+    fn test_extract_between_varchar_range() {
+        let planner = make_planner();
+        // name BETWEEN 'Alice' AND 'Charlie' → RangeLookup('Alice', 'Charlie')
+        let pred = between_pred(col("name"), constant_text("Alice"), constant_text("Charlie"));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
+        assert!(mode.is_some(), "BETWEEN on indexed VARCHAR column should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Varchar("Alice".to_string()));
+                assert_eq!(high, crate::types::value::DataValue::Varchar("Charlie".to_string()));
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_between_compound_column() {
+        let planner = make_planner();
+        // users.id BETWEEN 10 AND 20 → RangeLookup(10, 20)
+        let pred = between_pred(
+            compound(&["users", "id"]),
+            constant_int(10),
+            constant_int(20),
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_some(), "BETWEEN with compound column should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(10));
+                assert_eq!(high, crate::types::value::DataValue::Int(20));
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_between_expression_not_constant_returns_none() {
+        let planner = make_planner();
+        // age BETWEEN col+1 AND 100  (dynamic low bound) → should not match
+        let dynamic_low = ExprNode::Binary {
+            left: Box::new(col("min_age")),
+            op: rook_ast::ArithOp::Add,
+            right: Box::new(constant_int(1)),
+        };
+        let pred = between_pred(col("age"), dynamic_low, constant_int(100));
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_none(), "BETWEEN with dynamic low bound should not match");
+    }
+
+    #[test]
+    fn test_extract_between_and_eq_compound_uses_between() {
+        let planner = make_planner();
+        // AND(age BETWEEN 18 AND 65, name = 'Alice') on indexed 'age'
+        // Should pick BETWEEN (RangeLookup) since it matches 'age'
+        let pred = and_pred(
+            between_pred(col("age"), constant_int(18), constant_int(65)),
+            eq_pred(col("name"), constant_text("Alice")),
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
+        assert!(mode.is_some(), "BETWEEN side of AND should match");
+        match mode.unwrap() {
+            IndexScanMode::RangeLookup(low, high) => {
+                assert_eq!(low, crate::types::value::DataValue::Int(18));
+                assert_eq!(high, crate::types::value::DataValue::Int(65));
+            }
+            other => panic!("Expected RangeLookup, got {:?}", other),
+        }
+    }
+
+    // ── IN list index pushdown (L1) ───────────────────────────────────────
+
+    #[test]
+    fn test_extract_inlist_single_element_creates_point_lookup() {
+        let planner = make_planner();
+        // id IN (42) → PointLookup(42)
+        let pred = inlist_pred(col("id"), vec![constant_int(42)]);
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_some(), "Single-element IN list on indexed column should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(42));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_inlist_multi_element_returns_none() {
+        let planner = make_planner();
+        // id IN (1, 2, 3) → not accelerated, falls through to SeqScan+Filter
+        let pred = inlist_pred(col("id"), vec![
+            constant_int(1),
+            constant_int(2),
+            constant_int(3),
+        ]);
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_none(), "Multi-element IN list should not be directly accelerated");
+    }
+
+    #[test]
+    fn test_extract_inlist_non_indexed_column_returns_none() {
+        let planner = make_planner();
+        // name IN ('Alice') on indexed 'id' → no match
+        let pred = inlist_pred(col("name"), vec![constant_text("Alice")]);
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_none(), "IN on non-indexed column should not match");
+    }
+
+    #[test]
+    fn test_extract_inlist_varchar_single() {
+        let planner = make_planner();
+        // name IN ('Bob') → PointLookup('Bob')
+        let pred = inlist_pred(col("name"), vec![constant_text("Bob")]);
+        let mode = planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
+        assert!(mode.is_some(), "Single-element VARCHAR IN should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Varchar("Bob".to_string()));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_inlist_compound_column_single() {
+        let planner = make_planner();
+        // users.id IN (100) → PointLookup(100)
+        let pred = inlist_pred(
+            compound(&["users", "id"]),
+            vec![constant_int(100)],
+        );
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_some(), "Single-element IN with compound column should match");
+        match mode.unwrap() {
+            IndexScanMode::PointLookup(dv) => {
+                assert_eq!(dv, crate::types::value::DataValue::Int(100));
+            }
+            other => panic!("Expected PointLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_inlist_single_non_constant_returns_none() {
+        let planner = make_planner();
+        // id IN (some_column) → single element but not constant → no match
+        let pred = inlist_pred(col("id"), vec![col("other")]);
+        let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
+        assert!(mode.is_none(), "IN with non-constant list element should not match");
     }
 }
