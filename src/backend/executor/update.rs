@@ -13,6 +13,7 @@ use std::fs::File;
 use std::io;
 
 use crate::catalog::types::Catalog;
+use crate::types::value::{OrderedF32, OrderedF64};
 use crate::disk::{read_page, write_page};
 use crate::backend::executor::compaction_api as heap_api;
 use crate::backend::log::operation_log::log_update;
@@ -119,7 +120,9 @@ fn decode_tuple(
                 ColumnValue::Text(s.clone())
             }
 
-            Some(other) => ColumnValue::Text(format!("{:?}", other)),
+            // Render every other type as its SQL literal form (see Display)
+            // so encode_tuple can re-parse it losslessly below.
+            Some(other) => ColumnValue::Text(other.to_string()),
 
             None => ColumnValue::Text("NULL".to_string()),
         };
@@ -160,22 +163,7 @@ fn encode_tuple(
             }
 
             Some(ColumnValue::Text(s)) => {
-                match &col.data_type {
-
-                    DataType::Varchar(_)
-                    | DataType::Char(_)
-                    | DataType::Character(_) => {
-                        Some(DataValue::Varchar(s.clone()))
-                    }
-
-                    DataType::Int => {
-                        Some(DataValue::Int(
-                            s.parse::<i32>().unwrap_or(0)
-                        ))
-                    }
-
-                    _ => None,
-                }
+                parse_text_value(&col.data_type, s)
             }
 
             Some(ColumnValue::List(_)) => None,
@@ -188,6 +176,56 @@ fn encode_tuple(
 
     serialize_nullable_typed_row(&schema, &values)
         .unwrap_or_default()
+}
+
+/// Parse a text literal into a `DataValue` matching the column's type.
+///
+/// Values arrive either from the SET clause (unquoted) or from the decode
+/// round-trip above (SQL literal form produced by `DataValue::Display`,
+/// which quotes strings and renders temporal types in ISO format).
+fn parse_text_value(ty: &DataType, raw: &str) -> Option<DataValue> {
+    let s = raw.trim().trim_matches('\'').trim_matches('"');
+
+    match ty {
+        DataType::SmallInt => s.parse::<i16>().ok().map(DataValue::SmallInt),
+        DataType::Int => s.parse::<i32>().ok().map(DataValue::Int),
+        DataType::BigInt => s.parse::<i64>().ok().map(DataValue::BigInt),
+        DataType::Real => s.parse::<f32>().ok().map(|v| DataValue::Real(OrderedF32(v))),
+        DataType::DoublePrecision => {
+            s.parse::<f64>().ok().map(|v| DataValue::DoublePrecision(OrderedF64(v)))
+        }
+        DataType::Bool => match s.to_ascii_lowercase().as_str() {
+            "true" | "t" | "1" => Some(DataValue::Bool(true)),
+            "false" | "f" | "0" => Some(DataValue::Bool(false)),
+            _ => None,
+        },
+        DataType::Char(_) | DataType::Character(_) => Some(DataValue::Char(s.to_string())),
+        DataType::Varchar(_) => Some(DataValue::Varchar(s.to_string())),
+        DataType::Date => {
+            use chrono::NaiveDate;
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().map(DataValue::Date)
+        }
+        DataType::Time => {
+            use chrono::NaiveTime;
+            NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+                .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
+                .ok()
+                .map(DataValue::Time)
+        }
+        DataType::Timestamp => {
+            use chrono::NaiveDateTime;
+            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+                .ok()
+                .map(DataValue::Timestamp)
+        }
+        DataType::Bit(_) => Some(DataValue::Bit(
+            crate::types::bit_utils::normalize_bit_literal(s),
+        )),
+        // NUMERIC/DECIMAL keep their previous behaviour (unchanged) until the
+        // typed-value pipeline lands; they fall back to NULL like before.
+        _ => None,
+    }
 }
 
 /// Apply `assignments` to a decoded row, returning the new row.
