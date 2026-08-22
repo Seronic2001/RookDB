@@ -404,3 +404,31 @@ fn insert_into_select_copies_rows() {
 
     leave_workspace("iis");
 }
+
+#[test]
+fn group_by_with_aliased_aggregates_and_having() {
+    let _g = TEST_MUTEX.lock().unwrap();
+    enter_workspace("agialias");
+    let catalog = setup_tables("agg_alias_db");
+
+    // Aliased aggregates must be projected by their alias and referenceable
+    // from HAVING — both by re-calling the aggregate and by using the alias.
+    let out = run_select(
+        &catalog,
+        "agg_alias_db",
+        "SELECT dept_id, COUNT(*) AS n FROM employees \
+         GROUP BY dept_id HAVING COUNT(*) >= 2 ORDER BY dept_id",
+    );
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0], vec!["10", "2"]);
+
+    let out = run_select(
+        &catalog,
+        "agg_alias_db",
+        "SELECT dept_id, COUNT(*) AS n FROM employees \
+         GROUP BY dept_id HAVING n >= 2 ORDER BY dept_id",
+    );
+    assert_eq!(out.len(), 2);
+
+    leave_workspace("agialias");
+}

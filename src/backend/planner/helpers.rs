@@ -156,22 +156,17 @@ pub fn expand_projections(
                 result.push(NamedExpr { name, expr: resolved_expr });
             }
             SelectExpr::ExprWithAlias { expr, alias } => {
-                // For expressions containing nested aggregates (e.g. `SUM(a)+1`),
-                // recursively replace aggregate function calls with column references.
-                let resolved_expr = if contains_aggregate_expr(expr) {
-                    replace_aggregates_in_expr(expr)
-                } else {
-                    match expr {
-                        ExprNode::Function { name: fn_name, .. } => {
-                            let upper = fn_name.to_ascii_uppercase();
-                            if is_aggregate_function(&upper) {
-                                ExprNode::Column(fn_name.clone())
-                            } else {
-                                expr.clone()
-                            }
-                        }
-                        _ => expr.clone(),
+                // A top-level aliased aggregate (`COUNT(*) AS n`) computes a
+                // column named after the ALIAS — reference that. Otherwise
+                // rewrite nested aggregate calls (`SUM(a)+1`) recursively.
+                let resolved_expr = match expr {
+                    ExprNode::Function { name, .. }
+                        if is_aggregate_function(&name.to_ascii_uppercase()) =>
+                    {
+                        ExprNode::Column(alias.clone())
                     }
+                    _ if contains_aggregate_expr(expr) => replace_aggregates_in_expr(expr),
+                    _ => expr.clone(),
                 };
                 result.push(NamedExpr { name: alias.clone(), expr: resolved_expr });
             }
