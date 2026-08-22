@@ -441,6 +441,62 @@ pub fn extract_aggregates(projections: &[SelectExpr]) -> Vec<AggregateExpr> {
     aggregates
 }
 
+/// Extract aggregate calls from a HAVING (or WHERE-style) predicate tree.
+///
+/// `HAVING COUNT(*) >= 2` must compute `COUNT(*)` even when it does not
+/// appear in the SELECT list, so the logical planner merges these into the
+/// aggregate list as well.
+pub fn extract_aggregates_from_predicate(pred: &PredicateNode) -> Vec<AggregateExpr> {
+    use PredicateNode as P;
+    match pred {
+        P::BinaryOp { left, right, .. } => {
+            let mut out = self::extract_aggregates_from_predicate(left);
+            out.extend(extract_aggregates_from_predicate(right));
+            out
+        }
+        P::Not(inner) => extract_aggregates_from_predicate(inner),
+        P::Compare { left, right, .. } => {
+            let mut out = extract_aggregates_from_expr(left);
+            out.extend(extract_aggregates_from_expr(right));
+            out
+        }
+        P::IsNull(e) | P::IsNotNull(e) => extract_aggregates_from_expr(e),
+        P::Between { expr, low, high } => {
+            let mut out = extract_aggregates_from_expr(expr);
+            out.extend(extract_aggregates_from_expr(low));
+            out.extend(extract_aggregates_from_expr(high));
+            out
+        }
+        P::InList { expr, list } => {
+            let mut out = extract_aggregates_from_expr(expr);
+            for e in list {
+                out.extend(extract_aggregates_from_expr(e));
+            }
+            out
+        }
+        P::Like { expr, .. } => extract_aggregates_from_expr(expr),
+        P::IsDistinctFrom { left, right } => {
+            let mut out = extract_aggregates_from_expr(left);
+            out.extend(extract_aggregates_from_expr(right));
+            out
+        }
+        P::IsBoolean { expr, .. } => extract_aggregates_from_expr(expr),
+        // Subquery predicates carry their own scope; their aggregates are
+        // planned inside the subquery.
+        P::Exists(_) | P::InSubquery { .. } => Vec::new(),
+    }
+}
+
+/// Stable identity of an aggregate call, used to deduplicate repeated
+/// occurrences of the same expression across SELECT / HAVING.
+pub fn aggregate_identity(agg: &AggregateExpr) -> String {
+    format!(
+        "{:?}({})",
+        agg.function,
+        agg.args.iter().map(|a| expr_to_name(a)).collect::<Vec<_>>().join(",")
+    )
+}
+
 // ── Plan Tree Labels ──────────────────────────────────────────────────────────
 
 /// Collect all node labels from the plan tree in depth-first order.

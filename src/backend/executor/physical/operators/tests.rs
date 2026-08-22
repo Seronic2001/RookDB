@@ -273,8 +273,985 @@ fn employee_tuples(data: Vec<(&str, Option<i32>, Option<f64>)>) -> (Vec<Tuple>, 
     (tuples, schema)
 }
 
-// NOTE: aggregate, join, set-operation and subquery operator tests arrive
-// with the advanced-operators stage.
+#[test]
+fn test_aggregate_count_star() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(50000.0)),
+        ("Bob", Some(25), Some(60000.0)),
+        ("Charlie", Some(35), Some(70000.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![AggregateInfo {
+            function: AggregateFunction::Count,
+            input: None,
+            output_name: "cnt".to_string(),
+            output_type: DataType::BigInt,
+            distinct: false,
+        }],
+        None,
+    );
+
+    let result = agg.next().unwrap().unwrap();
+    assert_eq!(result.values[0], Some(DataValue::BigInt(3)));
+    assert!(agg.next().unwrap().is_none());
+}
+
+#[test]
+fn test_aggregate_count_column() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(50000.0)),
+        ("Bob", Some(25), Some(60000.0)),
+        ("Charlie", Some(35), Some(70000.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![AggregateInfo {
+            function: AggregateFunction::Count,
+            input: Some(Expr::Column { table: None, column: "age".into() }),
+            output_name: "cnt".to_string(),
+            distinct: false,
+            output_type: DataType::BigInt,
+        }],
+        None,
+    );
+
+    let result = agg.next().unwrap().unwrap();
+    assert_eq!(result.values[0], Some(DataValue::BigInt(3)));
+}
+
+#[test]
+fn test_aggregate_count_with_nulls() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(50000.0)),
+        ("Bob", None, Some(60000.0)),
+        ("Charlie", Some(35), Some(70000.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![AggregateInfo {
+            function: AggregateFunction::Count,
+            input: Some(Expr::Column { table: None, column: "age".into() }),
+            distinct: false,
+            output_name: "cnt".to_string(),
+            output_type: DataType::BigInt,
+        }],
+        None,
+    );
+
+    let result = agg.next().unwrap().unwrap();
+    assert_eq!(result.values[0], Some(DataValue::BigInt(2)));
+}
+
+#[test]
+fn test_aggregate_group_by() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(50000.0)),
+        ("Bob", Some(25), Some(60000.0)),
+        ("Alice", Some(32), Some(55000.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![Expr::Column { table: None, column: "name".into() }],
+        vec!["name".to_string()],
+        vec![DataType::Varchar(100)],
+        vec![AggregateInfo {
+            function: AggregateFunction::Count,
+            distinct: false,
+            input: None,
+            output_name: "cnt".to_string(),
+            output_type: DataType::BigInt,
+        }],
+        None,
+    );
+
+    let t1 = agg.next().unwrap().unwrap();
+    let t2 = agg.next().unwrap().unwrap();
+    assert!(agg.next().unwrap().is_none());
+
+    let names: Vec<String> = [t1.clone(), t2.clone()].iter().map(|t| {
+        match &t.values[0] {
+            Some(DataValue::Varchar(s)) => s.clone(),
+            _ => panic!("Expected Varchar"),
+        }
+    }).collect();
+    assert!(names.contains(&"Alice".to_string()));
+    assert!(names.contains(&"Bob".to_string()));
+}
+
+#[test]
+fn test_aggregate_sum_avg() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(100.0)),
+        ("Bob", Some(25), Some(200.0)),
+        ("Charlie", Some(35), Some(300.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![
+            AggregateInfo {
+                function: AggregateFunction::Sum,
+                input: Some(Expr::Column { table: None, column: "salary".into() }),
+                output_name: "total".to_string(),
+                output_type: DataType::DoublePrecision,
+                distinct: false,
+            },
+            AggregateInfo {
+                function: AggregateFunction::Avg,
+                input: Some(Expr::Column { table: None, column: "salary".into() }),
+                output_name: "avg".to_string(),
+                output_type: DataType::DoublePrecision,
+                distinct: false,
+            },
+        ],
+        None,
+    );
+
+    let result = agg.next().unwrap().unwrap();
+    assert!(agg.next().unwrap().is_none());
+
+    match &result.values[0] {
+        Some(DataValue::DoublePrecision(v)) => assert!((v.0 - 600.0).abs() < 0.001),
+        _ => panic!("Expected DoublePrecision"),
+    }
+    match &result.values[1] {
+        Some(DataValue::DoublePrecision(v)) => assert!((v.0 - 200.0).abs() < 0.001),
+        _ => panic!("Expected DoublePrecision"),
+    }
+}
+
+#[test]
+fn test_aggregate_min_max() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(50000.0)),
+        ("Bob", Some(25), Some(60000.0)),
+        ("Charlie", Some(35), Some(70000.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![
+            AggregateInfo {
+                function: AggregateFunction::Min,
+                input: Some(Expr::Column { table: None, column: "age".into() }),
+                output_name: "min_age".to_string(),
+                distinct: false,
+                output_type: DataType::Int,
+            },
+            AggregateInfo {
+                function: AggregateFunction::Max,
+                input: Some(Expr::Column { table: None, column: "age".into() }),
+                output_name: "max_age".to_string(),
+                output_type: DataType::Int,
+                distinct: false,
+            },
+        ],
+        None,
+    );
+
+    let result = agg.next().unwrap().unwrap();
+    assert_eq!(result.values[0], Some(DataValue::Int(25)));
+    assert_eq!(result.values[1], Some(DataValue::Int(35)));
+}
+
+#[test]
+fn test_aggregate_sum_null() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), None),
+        ("Bob", Some(25), None),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![AggregateInfo {
+            function: AggregateFunction::Sum,
+            input: Some(Expr::Column { table: None, column: "salary".into() }),
+            output_name: "total".to_string(),
+            output_type: DataType::DoublePrecision,
+            distinct: false,
+        }],
+        None,
+    );
+
+    let result = agg.next().unwrap().unwrap();
+    assert_eq!(result.values[0], None);
+}
+
+#[test]
+fn test_aggregate_reset() {
+    let (tuples, schema) = employee_tuples(vec![
+        ("Alice", Some(30), Some(50000.0)),
+        ("Bob", Some(25), Some(60000.0)),
+    ]);
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![AggregateInfo {
+            function: AggregateFunction::Count,
+            input: None,
+            output_name: "cnt".to_string(),
+            output_type: DataType::BigInt,
+            distinct: false,
+        }],
+        None,
+    );
+
+    let r1 = agg.next().unwrap().unwrap();
+    assert_eq!(r1.values[0], Some(DataValue::BigInt(2)));
+    assert!(agg.next().unwrap().is_none());
+
+    agg.reset().unwrap();
+    let r2 = agg.next().unwrap().unwrap();
+    assert_eq!(r2.values[0], Some(DataValue::BigInt(2)));
+    assert!(agg.next().unwrap().is_none());
+}
+
+fn single_col_schema(name: &str) -> Vec<ColumnInfo> {
+    vec![
+        ColumnInfo { name: name.into(), data_type: DataType::Int, table: None },
+    ]
+}
+
+fn single_col_tuples(data: Vec<Option<i32>>, name: &str) -> (Vec<Tuple>, Vec<ColumnInfo>) {
+    let schema = single_col_schema(name);
+    let tuples = data.into_iter().map(|v| {
+        Tuple::new(vec![v.map(DataValue::Int)], schema.clone())
+    }).collect();
+    (tuples, schema)
+}
+
+#[test]
+fn test_nl_join_inner() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2), Some(3)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2), Some(3), Some(4)], "rid");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "id".into() },
+            ComparisonOp::Equals,
+            Expr::Column { table: None, column: "rid".into() },
+        )),
+        JoinType::Inner,
+    );
+
+    let t1 = join.next().unwrap().unwrap();
+    assert_eq!(t1.values[0], Some(DataValue::Int(2)));
+    assert_eq!(t1.values[1], Some(DataValue::Int(2)));
+
+    let t2 = join.next().unwrap().unwrap();
+    assert_eq!(t2.values[0], Some(DataValue::Int(3)));
+    assert_eq!(t2.values[1], Some(DataValue::Int(3)));
+
+    assert!(join.next().unwrap().is_none());
+}
+
+#[test]
+fn test_nl_join_left_outer() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2), Some(3)], "rid");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "id".into() },
+            ComparisonOp::Equals,
+            Expr::Column { table: None, column: "rid".into() },
+        )),
+        JoinType::Left,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 2);
+
+    let matched = results.iter().find(|t| t.values[1].is_some()).unwrap();
+    assert_eq!(matched.values[0], Some(DataValue::Int(2)));
+    assert_eq!(matched.values[1], Some(DataValue::Int(2)));
+
+    let unmatched = results.iter().find(|t| t.values[1].is_none()).unwrap();
+    assert_eq!(unmatched.values[0], Some(DataValue::Int(1)));
+}
+
+#[test]
+fn test_nl_join_right_outer() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2), Some(3)], "rid");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "id".into() },
+            ComparisonOp::Equals,
+            Expr::Column { table: None, column: "rid".into() },
+        )),
+        JoinType::Right,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 2);
+
+    let matched = results.iter().find(|t| t.values[0].is_some()).unwrap();
+    assert_eq!(matched.values[0], Some(DataValue::Int(2)));
+    assert_eq!(matched.values[1], Some(DataValue::Int(2)));
+
+    let unmatched = results.iter().find(|t| t.values[0].is_none()).unwrap();
+    assert_eq!(unmatched.values[1], Some(DataValue::Int(3)));
+}
+
+#[test]
+fn test_nl_join_full_outer() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2), Some(3)], "rid");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "id".into() },
+            ComparisonOp::Equals,
+            Expr::Column { table: None, column: "rid".into() },
+        )),
+        JoinType::Full,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn test_nl_cross_join() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(10), Some(20)], "val");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        None,
+        JoinType::Cross,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 4);
+}
+
+#[test]
+fn test_nl_join_empty() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![], "rid");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "id".into() },
+            ComparisonOp::Equals,
+            Expr::Column { table: None, column: "rid".into() },
+        )),
+        JoinType::Inner,
+    );
+
+    assert!(join.next().unwrap().is_none());
+}
+
+#[test]
+fn test_nl_join_no_matches() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(3), Some(4)], "rid");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "id".into() },
+            ComparisonOp::Equals,
+            Expr::Column { table: None, column: "rid".into() },
+        )),
+        JoinType::Inner,
+    );
+
+    assert!(join.next().unwrap().is_none());
+}
+
+#[test]
+fn test_nl_join_reset() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "left_id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2)], "right_id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut join = NestedLoopJoinOperator::new(
+        Box::new(left),
+        Box::new(right),
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "left_id".into() },
+            ComparisonOp::Equals,
+            Expr::Column { table: None, column: "right_id".into() },
+        )),
+        JoinType::Inner,
+    );
+
+    let t1 = join.next().unwrap().unwrap();
+    assert_eq!(t1.values[0], Some(DataValue::Int(2)));
+    assert!(join.next().unwrap().is_none());
+
+    join.reset().unwrap();
+    let t2 = join.next().unwrap().unwrap();
+    assert_eq!(t2.values[0], Some(DataValue::Int(2)));
+    assert!(join.next().unwrap().is_none());
+}
+
+#[test]
+fn test_hash_join_basic() {
+    let (b_tuples, b_schema) = single_col_tuples(vec![Some(1), Some(2), Some(3)], "id");
+    let (p_tuples, p_schema) = single_col_tuples(vec![Some(2), Some(3), Some(4)], "id");
+
+    let build = MockOperator::new(b_tuples, b_schema);
+    let probe = MockOperator::new(p_tuples, p_schema);
+
+    let mut join = HashJoinOperator::new(
+        Box::new(build),
+        Box::new(probe),
+        vec![Expr::Column { table: None, column: "id".into() }],
+        vec![Expr::Column { table: None, column: "id".into() }],
+        None,
+    );
+
+    let t1 = join.next().unwrap().unwrap();
+    assert_eq!(t1.values[0], Some(DataValue::Int(2)));
+    assert_eq!(t1.values[1], Some(DataValue::Int(2)));
+
+    let t2 = join.next().unwrap().unwrap();
+    assert_eq!(t2.values[0], Some(DataValue::Int(3)));
+    assert_eq!(t2.values[1], Some(DataValue::Int(3)));
+
+    assert!(join.next().unwrap().is_none());
+}
+
+#[test]
+fn test_hash_join_with_nulls() {
+    let (b_tuples, b_schema) = single_col_tuples(vec![Some(1), None, Some(3)], "id");
+    let (p_tuples, p_schema) = single_col_tuples(vec![Some(1), Some(2), Some(3)], "id");
+
+    let build = MockOperator::new(b_tuples, b_schema);
+    let probe = MockOperator::new(p_tuples, p_schema);
+
+    let mut join = HashJoinOperator::new(
+        Box::new(build),
+        Box::new(probe),
+        vec![Expr::Column { table: None, column: "id".into() }],
+        vec![Expr::Column { table: None, column: "id".into() }],
+        None,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 2); // NULL keys skipped
+}
+
+#[test]
+fn test_hash_join_reset() {
+    let (b_tuples, b_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (p_tuples, p_schema) = single_col_tuples(vec![Some(2)], "id");
+
+    let build = MockOperator::new(b_tuples, b_schema);
+    let probe = MockOperator::new(p_tuples, p_schema);
+
+    let mut join = HashJoinOperator::new(
+        Box::new(build),
+        Box::new(probe),
+        vec![Expr::Column { table: None, column: "id".into() }],
+        vec![Expr::Column { table: None, column: "id".into() }],
+        None,
+    );
+
+    let t1 = join.next().unwrap().unwrap();
+    assert_eq!(t1.values[0], Some(DataValue::Int(2)));
+    assert!(join.next().unwrap().is_none());
+
+    join.reset().unwrap();
+    let t2 = join.next().unwrap().unwrap();
+    assert_eq!(t2.values[0], Some(DataValue::Int(2)));
+    assert!(join.next().unwrap().is_none());
+}
+
+#[test]
+fn test_hash_join_table_qualified() {
+    // Both sides have a column named "id", differentiated by table qualifier.
+    // Tests that table-qualified Expr::Column refs work correctly as join keys.
+    let build_schema = vec![
+        ColumnInfo { name: "id".into(), data_type: DataType::Int, table: Some("t1".into()) },
+        ColumnInfo { name: "name".into(), data_type: DataType::Varchar(20), table: Some("t1".into()) },
+    ];
+    let probe_schema = vec![
+        ColumnInfo { name: "id".into(), data_type: DataType::Int, table: Some("t2".into()) },
+        ColumnInfo { name: "val".into(), data_type: DataType::Varchar(20), table: Some("t2".into()) },
+    ];
+
+    let build_tuples = vec![
+        Tuple::new(
+            vec![Some(DataValue::Int(1)), Some(DataValue::Varchar("Alice".into()))],
+            build_schema.clone(),
+        ),
+        Tuple::new(
+            vec![Some(DataValue::Int(2)), Some(DataValue::Varchar("Bob".into()))],
+            build_schema.clone(),
+        ),
+        Tuple::new(
+            vec![Some(DataValue::Int(3)), Some(DataValue::Varchar("Charlie".into()))],
+            build_schema.clone(),
+        ),
+    ];
+    let probe_tuples = vec![
+        Tuple::new(
+            vec![Some(DataValue::Int(2)), Some(DataValue::Varchar("x".into()))],
+            probe_schema.clone(),
+        ),
+        Tuple::new(
+            vec![Some(DataValue::Int(3)), Some(DataValue::Varchar("y".into()))],
+            probe_schema.clone(),
+        ),
+        Tuple::new(
+            vec![Some(DataValue::Int(4)), Some(DataValue::Varchar("z".into()))],
+            probe_schema.clone(),
+        ),
+    ];
+
+    let build = MockOperator::new(build_tuples, build_schema);
+    let probe = MockOperator::new(probe_tuples, probe_schema);
+
+    let mut join = HashJoinOperator::new(
+        Box::new(build),
+        Box::new(probe),
+        // Table-qualified: t1.id = t2.id
+        vec![Expr::Column { table: Some("t1".into()), column: "id".into() }],
+        vec![Expr::Column { table: Some("t2".into()), column: "id".into() }],
+        None,
+    );
+
+    // Should match t1.id=2 with t2.id=2, and t1.id=3 with t2.id=3
+    let t1 = join.next().unwrap().unwrap();
+    assert_eq!(t1.values[0], Some(DataValue::Int(2)));  // t1.id
+    assert_eq!(t1.values[1], Some(DataValue::Varchar("Bob".into())));   // t1.name
+    assert_eq!(t1.values[2], Some(DataValue::Int(2)));  // t2.id
+    assert_eq!(t1.values[3], Some(DataValue::Varchar("x".into())));   // t2.val
+
+    let t2 = join.next().unwrap().unwrap();
+    assert_eq!(t2.values[0], Some(DataValue::Int(3)));  // t1.id
+    assert_eq!(t2.values[1], Some(DataValue::Varchar("Charlie".into()))); // t1.name
+    assert_eq!(t2.values[2], Some(DataValue::Int(3)));  // t2.id
+    assert_eq!(t2.values[3], Some(DataValue::Varchar("y".into())));   // t2.val
+
+    assert!(join.next().unwrap().is_none());
+}
+
+#[test]
+fn test_hash_join_multi_column() {
+    // Multi-column join key: t1.a = t2.a AND t1.b = t2.b
+    let (b_tuples, b_schema) = int_tuples(vec![
+        (Some(1), Some(10)),
+        (Some(2), Some(20)),
+        (Some(3), Some(30)),
+        (Some(2), Some(99)), // same a=2 but different b
+    ]);
+    let (p_tuples, p_schema) = int_tuples(vec![
+        (Some(2), Some(20)),  // matches build (2,20)
+        (Some(2), Some(99)),  // matches build (2,99)
+        (Some(3), Some(30)),  // matches build (3,30)
+        (Some(3), Some(31)),  // no match (b=31 != 30)
+        (Some(4), Some(40)),  // no match (a=4 not in build)
+    ]);
+
+    let build = MockOperator::new(b_tuples, b_schema);
+    let probe = MockOperator::new(p_tuples, p_schema);
+
+    let mut join = HashJoinOperator::new(
+        Box::new(build),
+        Box::new(probe),
+        vec![
+            Expr::Column { table: None, column: "a".into() },
+            Expr::Column { table: None, column: "b".into() },
+        ],
+        vec![
+            Expr::Column { table: None, column: "a".into() },
+            Expr::Column { table: None, column: "b".into() },
+        ],
+        None,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert_eq!(results.len(), 3);
+
+    // Verify (2,20) matched (2,20)
+    assert!(results.iter().any(|t| {
+        t.values[0] == Some(DataValue::Int(2))
+            && t.values[1] == Some(DataValue::Int(20))
+            && t.values[2] == Some(DataValue::Int(2))
+            && t.values[3] == Some(DataValue::Int(20))
+    }));
+
+    // Verify (2,99) matched (2,99)
+    assert!(results.iter().any(|t| {
+        t.values[0] == Some(DataValue::Int(2))
+            && t.values[1] == Some(DataValue::Int(99))
+            && t.values[2] == Some(DataValue::Int(2))
+            && t.values[3] == Some(DataValue::Int(99))
+    }));
+
+    // Verify (3,30) matched (3,30)
+    assert!(results.iter().any(|t| {
+        t.values[0] == Some(DataValue::Int(3))
+            && t.values[1] == Some(DataValue::Int(30))
+            && t.values[2] == Some(DataValue::Int(3))
+            && t.values[3] == Some(DataValue::Int(30))
+    }));
+}
+
+#[test]
+fn test_hash_join_table_qualified_multi_column() {
+    // Multi-column join key with table-qualified refs where both sides
+    // have columns with the same names ("id", "code").
+    let build_schema = vec![
+        ColumnInfo { name: "id".into(), data_type: DataType::Int, table: Some("t1".into()) },
+        ColumnInfo { name: "code".into(), data_type: DataType::Int, table: Some("t1".into()) },
+    ];
+    let probe_schema = vec![
+        ColumnInfo { name: "id".into(), data_type: DataType::Int, table: Some("t2".into()) },
+        ColumnInfo { name: "code".into(), data_type: DataType::Int, table: Some("t2".into()) },
+    ];
+
+    let build_tuples = vec![
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(100))], build_schema.clone()),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(200))], build_schema.clone()),
+        Tuple::new(vec![Some(DataValue::Int(3)), Some(DataValue::Int(300))], build_schema.clone()),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(999))], build_schema.clone()), // same id, different code
+    ];
+    let probe_tuples = vec![
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(200))], probe_schema.clone()), // matches build (2,200)
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(300))], probe_schema.clone()), // build has (2,999) but code=300 != 999, and (2,200) but code=200 != 300
+        Tuple::new(vec![Some(DataValue::Int(3)), Some(DataValue::Int(300))], probe_schema.clone()), // matches build (3,300)
+    ];
+
+    let build = MockOperator::new(build_tuples, build_schema);
+    let probe = MockOperator::new(probe_tuples, probe_schema);
+
+    let mut join = HashJoinOperator::new(
+        Box::new(build),
+        Box::new(probe),
+        vec![
+            Expr::Column { table: Some("t1".into()), column: "id".into() },
+            Expr::Column { table: Some("t1".into()), column: "code".into() },
+        ],
+        vec![
+            Expr::Column { table: Some("t2".into()), column: "id".into() },
+            Expr::Column { table: Some("t2".into()), column: "code".into() },
+        ],
+        None,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+
+    // Expected matches:
+    // (2,200)probe → (2,200)build = MATCH
+    // (2,300)probe → no match (build has (2,200) and (2,999), neither has code=300) = NO MATCH
+    // (3,300)probe → (3,300)build = MATCH
+    assert_eq!(results.len(), 2);
+
+    // Verify column_info has table qualifiers preserved in output
+    for r in &results {
+        assert_eq!(r.column_info[0].table, Some("t1".into()));
+        assert_eq!(r.column_info[2].table, Some("t2".into()));
+    }
+}
+
+#[test]
+fn test_hash_join_remaining_predicate() {
+    // Hash join on "department_id" with a remaining non-equality predicate
+    // on a uniquely-named column ("salary" > "min_salary").
+    let build_schema = vec![
+        ColumnInfo { name: "dept_id".into(), data_type: DataType::Int, table: None },
+        ColumnInfo { name: "salary".into(), data_type: DataType::Int, table: None },
+    ];
+    let probe_schema = vec![
+        ColumnInfo { name: "dept_id".into(), data_type: DataType::Int, table: None },
+        ColumnInfo { name: "min_salary".into(), data_type: DataType::Int, table: None },
+    ];
+
+    // Build: employees (dept_id, salary)
+    // Probe: department minimum salary thresholds (dept_id, min_salary)
+    let build_tuples = vec![
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(50000))], build_schema.clone()),
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(70000))], build_schema.clone()),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(30000))], build_schema.clone()),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(60000))], build_schema.clone()),
+    ];
+    let probe_tuples = vec![
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(55000))], probe_schema.clone()), // dept 1 min salary
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(50000))], probe_schema.clone()), // dept 2 min salary
+    ];
+
+    let build = MockOperator::new(build_tuples, build_schema);
+    let probe = MockOperator::new(probe_tuples, probe_schema);
+
+    let mut join = HashJoinOperator::new(
+        Box::new(build),
+        Box::new(probe),
+        // Hash join on dept_id
+        vec![Expr::Column { table: None, column: "dept_id".into() }],
+        vec![Expr::Column { table: None, column: "dept_id".into() }],
+        // Remaining predicate: salary >= min_salary (employee's salary meets the department minimum)
+        Some(Predicate::Compare(
+            Expr::Column { table: None, column: "salary".into() },
+            ComparisonOp::GreaterOrEqual,
+            Expr::Column { table: None, column: "min_salary".into() },
+        )),
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| join.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+
+    // Expected matches:
+    // Dept 1 probe (55000): build (50000) → 50000 >= 55000? NO; (70000) → 70000 >= 55000? YES
+    // Dept 2 probe (50000): build (30000) → 30000 >= 50000? NO; (60000) → 60000 >= 50000? YES
+    assert_eq!(results.len(), 2);
+
+    // Check actual values: first should be (1, 70000, 1, 55000) or (1, 55000, 1, 70000)
+    // Order depends on hash table insertion order (dept 1 first in build)
+    let dept1_result = results.iter().find(|t| t.values[0] == Some(DataValue::Int(1))).unwrap();
+    assert_eq!(dept1_result.values[1], Some(DataValue::Int(70000))); // salary >= 55000
+    assert_eq!(dept1_result.values[3], Some(DataValue::Int(55000))); // min_salary
+
+    let dept2_result = results.iter().find(|t| t.values[0] == Some(DataValue::Int(2))).unwrap();
+    assert_eq!(dept2_result.values[1], Some(DataValue::Int(60000))); // salary >= 50000
+    assert_eq!(dept2_result.values[3], Some(DataValue::Int(50000))); // min_salary
+}
+
+#[test]
+fn test_set_op_union_all() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(3), Some(4)], "id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut op = SetOpOperator::new(
+        Box::new(left),
+        Box::new(right),
+        SetOpType::Union,
+        true,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| op.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 4);
+}
+
+#[test]
+fn test_set_op_union_distinct() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(1), Some(2)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2), Some(3)], "id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut op = SetOpOperator::new(
+        Box::new(left),
+        Box::new(right),
+        SetOpType::Union,
+        false,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| op.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn test_set_op_intersect_all() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(1), Some(2), Some(3)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(1), Some(2), Some(2)], "id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut op = SetOpOperator::new(
+        Box::new(left),
+        Box::new(right),
+        SetOpType::Intersect,
+        true,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| op.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_set_op_intersect_distinct() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2), Some(3)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2), Some(3), Some(4)], "id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut op = SetOpOperator::new(
+        Box::new(left),
+        Box::new(right),
+        SetOpType::Intersect,
+        false,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| op.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_set_op_except_all() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(1), Some(2), Some(3)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(1), Some(2)], "id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut op = SetOpOperator::new(
+        Box::new(left),
+        Box::new(right),
+        SetOpType::Except,
+        true,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| op.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_set_op_except_distinct() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![Some(1), Some(2), Some(3)], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![Some(2)], "id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut op = SetOpOperator::new(
+        Box::new(left),
+        Box::new(right),
+        SetOpType::Except,
+        false,
+    );
+
+    let results: Vec<Tuple> = std::iter::from_fn(|| op.next().transpose())
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_set_op_empty_input() {
+    let (l_tuples, l_schema) = single_col_tuples(vec![], "id");
+    let (r_tuples, r_schema) = single_col_tuples(vec![], "id");
+
+    let left = MockOperator::new(l_tuples, l_schema);
+    let right = MockOperator::new(r_tuples, r_schema);
+
+    let mut op = SetOpOperator::new(
+        Box::new(left),
+        Box::new(right),
+        SetOpType::Union,
+        true,
+    );
+
+    assert!(op.next().unwrap().is_none());
+}
+
+#[test]
+fn test_subquery_exec_scalar() {
+    let (tuples, schema) = int_tuples(vec![(Some(42), Some(10))]);
+    let child = MockOperator::new(tuples, schema);
+    let mut sub = SubqueryExecOperator::new(
+        Box::new(child),
+        SubqueryType::Scalar,
+        None,
+    );
+
+    let result = sub.next().unwrap().unwrap();
+    assert_eq!(result.values.len(), 2);
+    assert_eq!(result.values[0], Some(DataValue::Int(42)));
+    assert!(sub.next().unwrap().is_none());
+}
+
+#[test]
+fn test_subquery_exec_exists_true() {
+    let (tuples, schema) = int_tuples(vec![(Some(1), Some(2))]);
+    let child = MockOperator::new(tuples, schema);
+    let mut sub = SubqueryExecOperator::new(
+        Box::new(child),
+        SubqueryType::Exists,
+        None,
+    );
+
+    let result = sub.next().unwrap().unwrap();
+    assert_eq!(result.values[0], Some(DataValue::Bool(true)));
+    assert!(sub.next().unwrap().is_none());
+}
+
+#[test]
+fn test_subquery_exec_exists_false() {
+    let (tuples, schema) = int_tuples(vec![]);
+    let child = MockOperator::new(tuples, schema);
+    let mut sub = SubqueryExecOperator::new(
+        Box::new(child),
+        SubqueryType::Exists,
+        None,
+    );
+
+    let result = sub.next().unwrap().unwrap();
+    assert_eq!(result.values[0], Some(DataValue::Bool(false)));
+    assert!(sub.next().unwrap().is_none());
+}
 
 #[test]
 fn test_single_row_operator() {

@@ -42,7 +42,11 @@ pub use tuple::{ColumnInfo, Tuple, display_tuples, format_tuple,
 pub use expr::{Expr, Predicate, ComparisonOp, evaluate_predicate};
 pub use operators::{PhysicalOperator, SeqScanOperator, FilterOperator, ProjectionOperator,
                     LimitOperator, DistinctOperator, SortOperator, NullOperator, SingleRowOperator,
-                    CteScanOperator};
+                    CteScanOperator,
+                    AggregateOperator, AggregateInfo, AggregateFunction, infer_aggregate_output_type,
+                    NestedLoopJoinOperator, HashJoinOperator, JoinType,
+                    SetOpOperator, SetOpType,
+                    SubqueryExecOperator, SubqueryType};
 pub use external_sort::{ExternalSortOperator, ExternalSortConfig};
 pub use planner::PhysicalPlanner;
 pub use engine::{execute_plan, execute_plan_collect};

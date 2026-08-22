@@ -211,7 +211,20 @@ fn plan_select_with_ctes(
         || select.projections.iter().any(|p| contains_aggregate(p));
 
     if has_aggregates {
-        let aggregates = extract_aggregates(&select.projections);
+        let mut aggregates = extract_aggregates(&select.projections);
+
+        // Aggregates that appear only inside HAVING must still be computed.
+        // Merge them in, skipping calls already present in the SELECT list
+        // (same function applied to the same arguments).
+        if let Some(ref having) = select.having {
+            for agg in extract_aggregates_from_predicate(having) {
+                let id = aggregate_identity(&agg);
+                if !aggregates.iter().any(|a| aggregate_identity(a) == id) {
+                    aggregates.push(agg);
+                }
+            }
+        }
+
         current_plan = LogicalPlan::Aggregate(LogicalAggregate {
             group_by: select.group_by.clone(),
             aggregates,
