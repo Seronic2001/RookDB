@@ -134,9 +134,20 @@ fn left_join_pads_missing_right_side() {
         "SELECT name, dept_name FROM employees \
          LEFT JOIN departments ON employees.dept_id = departments.id",
     );
-    assert_eq!(out.len(), 5, "every employee appears exactly once");
-    let dan = out.iter().find(|r| r[0] == "'Dan'").unwrap();
-    assert_eq!(dan[1], "NULL", "Dan has no matching department");
+    // Full-table check: every employee exactly once with the right values,
+    // unmatched right side padded with NULL. (No ORDER BY => compare sets.)
+    let mut got = out.clone();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            vec!["'Alice'", "'Engineering'"],
+            vec!["'Bob'", "'Sales'"],
+            vec!["'Cara'", "'Engineering'"],
+            vec!["'Dan'", "NULL"],
+            vec!["'Eve'", "'Sales'"],
+        ]
+    );
 }
 
 #[test]
@@ -228,7 +239,7 @@ fn union_deduplicates() {
         "SELECT dept_id FROM employees WHERE dept_id = 10 \
          UNION SELECT id FROM departments WHERE id = 10",
     );
-    assert_eq!(out.len(), 1, "UNION collapses duplicates to one '10'");
+    assert_eq!(out, vec![vec!["10"]], "UNION collapses duplicates to one '10'");
 }
 
 #[test]

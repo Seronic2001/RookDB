@@ -175,3 +175,24 @@ fn index_is_maintained_on_insert() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0][0], "'Gus'");
 }
+
+#[test]
+fn index_scan_walks_keys_in_ascending_order() {
+    // B+ Tree leaf pages are linked in key order: a full index scan MUST
+    // visit rows by ascending indexed value no matter how they were
+    // inserted. This pins the leaf-link capability itself.
+    let _ws = common::TestWorkspace::new("btree", "keyorder");
+    let catalog = setup_table("ko_db");
+
+    create_index(&catalog, "ko_db", "staff", "by_salary", "salary").unwrap();
+
+    let out = run_select(&catalog, "ko_db", "SELECT salary FROM staff");
+    let salaries: Vec<String> = out.iter().map(|r| r[0].clone()).collect();
+
+    let mut sorted = salaries.clone();
+    sorted.sort_by_key(|s| s.parse::<i64>().unwrap());
+    assert_eq!(
+        salaries, sorted,
+        "index-driven scan must walk keys ascending\ninsertion-independent order expected"
+    );
+}

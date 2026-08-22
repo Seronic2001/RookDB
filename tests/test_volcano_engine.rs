@@ -170,7 +170,13 @@ fn distinct_values() {
     let catalog = setup_table("emp_db");
 
     let out = run_select(&catalog, "emp_db", "SELECT DISTINCT dept FROM employees");
-    assert_eq!(out.len(), 3, "eng, sales and hr are the distinct values");
+    let mut got: Vec<String> = out.iter().map(|r| r[0].clone()).collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec!["'eng'", "'hr'", "'sales'"],
+        "DISTINCT must yield exactly these departments"
+    );
 }
 
 #[test]
