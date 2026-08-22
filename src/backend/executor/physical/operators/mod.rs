@@ -6,7 +6,7 @@
 //!
 //! This module is split into per-category files for maintainability:
 //! - `trait_.rs`: PhysicalOperator trait definition
-//! - `scans.rs`: SeqScanOperator (IndexScan arrives with the B+Tree stage)
+//! - `scans.rs`: SeqScanOperator, IndexScanOperator, IndexScanMode
 //! - `joins.rs`: NestedLoopJoinOperator, HashJoinOperator, JoinType
 //! - `filter_project.rs`: Filter, Projection, Limit, Distinct, SingleRow,
 //!   Null and CteScan operators
@@ -34,7 +34,7 @@ mod tests;
 
 // Re-export everything from submodules
 pub use trait_::PhysicalOperator;
-pub use scans::SeqScanOperator;
+pub use scans::{SeqScanOperator, IndexScanOperator, IndexScanMode};
 pub use joins::{NestedLoopJoinOperator, HashJoinOperator, JoinType};
 pub use insert::InsertOperator;
 

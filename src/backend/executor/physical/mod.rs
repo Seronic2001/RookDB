@@ -46,7 +46,8 @@ pub use operators::{PhysicalOperator, SeqScanOperator, FilterOperator, Projectio
                     AggregateOperator, AggregateInfo, AggregateFunction, infer_aggregate_output_type,
                     NestedLoopJoinOperator, HashJoinOperator, JoinType,
                     SetOpOperator, SetOpType,
-                    SubqueryExecOperator, SubqueryType};
+                    SubqueryExecOperator, SubqueryType,
+                    IndexScanOperator, IndexScanMode};
 pub use external_sort::{ExternalSortOperator, ExternalSortConfig};
 pub use planner::PhysicalPlanner;
 pub use engine::{execute_plan, execute_plan_collect};

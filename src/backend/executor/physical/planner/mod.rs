@@ -16,6 +16,8 @@ use super::operators::{
     SeqScanOperator,
     CteScanOperator,
     SingleRowOperator,
+    IndexScanOperator,
+    IndexScanMode,
     FilterOperator,
     ProjectionOperator,
     LimitOperator,
@@ -30,6 +32,7 @@ use super::operators::{
 
 use crate::backend::catalog::types::Catalog;
 use crate::backend::heap::heap_manager::HeapManager;
+use crate::backend::index::btree::BTree;
 use self::helpers::infer_expr_type_from_ast;
 use crate::types::DataValue;
 
@@ -380,6 +383,89 @@ impl PhysicalPlanner {
             return Err(format!("Heap file not found: {:?}", heap_path));
         }
 
+        // ── Index-driven scans ────────────────────────────────────────────
+        // If an index file exists alongside the heap file, let the B+ Tree
+        // drive tuple retrieval in key order instead of a sequential scan.
+        // Predicate-based Point/Range selection arrives with the
+        // index-acceleration stage.
+
+        // Named indexes are registered in sys_indexes as {table}.{index}.idx files.
+        let named_indexes = crate::backend::executor::create_index::load_table_indexes(
+            &self.db_name, &ts.table,
+        )
+        .unwrap_or_default();
+
+        if !named_indexes.is_empty() {
+            let first_idx_name = &named_indexes[0].0;
+            let index_path = PathBuf::from(format!(
+                "database/base/{}/{}.{}.idx",
+                self.db_name, ts.table, first_idx_name
+            ));
+
+            if index_path.exists() {
+                log::info!(
+                    "[Volcano] Named index '{}' found for table '{}', using IndexScanOperator with FullScan",
+                    first_idx_name,
+                    ts.table
+                );
+
+                let mut btree = BTree::open(index_path)
+                    .map_err(|e| format!("Failed to open index for table '{}': {}", ts.table, e))?;
+
+                // Key type must come from the indexed column (NOT necessarily
+                // the first table column).
+                let idx_col_name = &named_indexes[0].1;
+                if let Some(idx_col) =
+                    table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(idx_col_name))
+                {
+                    btree.set_key_type(idx_col.data_type.clone());
+                } else if let Some(first_col) = table_schema.first() {
+                    btree.set_key_type(first_col.data_type.clone());
+                }
+
+                let heap_manager = HeapManager::open(heap_path)
+                    .map_err(|e| format!("Failed to open heap for table '{}': {}", ts.table, e))?;
+
+                return Ok(Box::new(IndexScanOperator::new(
+                    btree,
+                    heap_manager,
+                    IndexScanMode::FullScan,
+                    column_info,
+                )));
+            }
+        }
+
+        // Fallback: legacy single unnamed index file ({table}.idx).
+        let legacy_index_path = PathBuf::from(format!(
+            "database/base/{}/{}.idx",
+            self.db_name, ts.table
+        ));
+
+        if legacy_index_path.exists() {
+            log::info!(
+                "[Volcano] Legacy index file found for table '{}', using IndexScanOperator with FullScan",
+                ts.table
+            );
+
+            let mut btree = BTree::open(legacy_index_path)
+                .map_err(|e| format!("Failed to open index for table '{}': {}", ts.table, e))?;
+
+            if let Some(first_col) = table_schema.first() {
+                btree.set_key_type(first_col.data_type.clone());
+            }
+
+            let heap_manager = HeapManager::open(heap_path)
+                .map_err(|e| format!("Failed to open heap for table '{}': {}", ts.table, e))?;
+
+            return Ok(Box::new(IndexScanOperator::new(
+                btree,
+                heap_manager,
+                IndexScanMode::FullScan,
+                column_info,
+            )));
+        }
+
+        // ── Sequential fallback ───────────────────────────────────────────
         let heap_manager = HeapManager::open(heap_path)
             .map_err(|e| format!("Failed to open heap for table '{}': {}", ts.table, e))?;
 

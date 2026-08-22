@@ -1,5 +1,6 @@
 
 use crate::backend::heap::heap_manager::{HeapManager, HeapScanIterator};
+use crate::backend::index::btree::BTree;
 
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::trait_::PhysicalOperator;
@@ -125,5 +126,151 @@ impl PhysicalOperator for SeqScanOperator {
 
     fn name(&self) -> &'static str {
         "SeqScan"
+    }
+}
+
+// ── IndexScan Operator ────────────────────────────────────────────────
+
+/// Mode of index scan (point lookup, range scan, or full scan).
+#[derive(Debug, Clone)]
+pub enum IndexScanMode {
+    /// Exact point lookup: only tuples matching this key.
+    PointLookup(DataValue),
+    /// Range scan: all tuples with keys in `[low, high]` inclusive.
+    RangeLookup(DataValue, DataValue),
+    /// Full scan: scan all entries in the index via the leaf linked list.
+    /// This replaces a SeqScan when an index is available.
+    FullScan,
+}
+
+/// An index scan operator that uses a B+ Tree index for efficient lookups.
+///
+/// # Point lookup mode
+/// Searches the B+ Tree for an exact key match, retrieves the heap tuple
+/// identified by the returned `(page_id, slot_id)`, and yields it.
+///
+/// # Range scan mode
+/// Searches the B+ Tree for all keys in `[low, high]`, retrieves each
+/// heap tuple, and yields them in index order.
+///
+/// In both modes, the operator materializes all matching tuples on the
+/// first `next()` call, then yields them one at a time.
+pub struct IndexScanOperator {
+    /// B+ Tree index for key lookups.
+    btree: BTree,
+    /// Heap manager for fetching actual tuple data from (page_id, slot_id).
+    heap_manager: HeapManager,
+    /// The scan mode (point lookup or range scan).
+    mode: IndexScanMode,
+    /// Column metadata for the full table schema.
+    column_info: Vec<ColumnInfo>,
+    /// Data types for deserialising raw tuple bytes.
+    schema_types: Vec<DataType>,
+    /// Materialized list of heap tuple locations from the index.
+    results: Vec<(u32, u32)>,
+    /// Current read position in results.
+    pos: usize,
+    /// Whether the index has been queried and results loaded.
+    loaded: bool,
+}
+
+impl IndexScanOperator {
+    /// Create a new index scan operator.
+    ///
+    /// `btree` is an opened B+ Tree index.
+    /// `heap_manager` provides access to the heap file for fetching tuple data.
+    /// `mode` specifies point lookup or range scan.
+    /// `column_info` contains the full table schema (used for output tuple deserialization).
+    pub fn new(
+        btree: BTree,
+        heap_manager: HeapManager,
+        mode: IndexScanMode,
+        column_info: Vec<ColumnInfo>,
+    ) -> Self {
+        let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
+        Self {
+            btree,
+            heap_manager,
+            mode,
+            column_info,
+            schema_types,
+            results: Vec::new(),
+            pos: 0,
+            loaded: false,
+        }
+    }
+
+    /// Query the B+ Tree and materialize the matching heap tuple locations.
+    fn load_results(&mut self) -> Result<(), String> {
+        match &self.mode {
+            IndexScanMode::PointLookup(key) => {
+                // Use search_range with the same key for both bounds to retrieve
+                // ALL matching entries, not just the first one found by search().
+                // This handles non-unique indexes where multiple rows share the
+                // same key value (e.g., multiple employees in the same department).
+                let tids = self.btree.search_range(key, key)
+                    .map_err(|e| format!("Index scan point lookup error: {}", e))?;
+                self.results = tids;
+            }
+            IndexScanMode::RangeLookup(low, high) => {
+                let tids = self.btree.search_range(low, high)
+                    .map_err(|e| format!("Index scan range lookup error: {}", e))?;
+                self.results = tids;
+            }
+            IndexScanMode::FullScan => {
+                let tids = self.btree.scan_all()
+                    .map_err(|e| format!("Index scan full scan error: {}", e))?;
+                self.results = tids;
+            }
+        }
+        self.loaded = true;
+        Ok(())
+    }
+
+    /// Fetch a tuple from the heap by (page_id, slot_id) and deserialize it.
+    /// Propagates the heap location metadata so DML operations (UPDATE/DELETE)
+    /// can identify which physical row to modify.
+    fn fetch_tuple(&mut self, page_id: u32, slot_id: u32) -> Result<Tuple, String> {
+        let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id)
+            .map_err(|e| format!("Failed to fetch heap tuple (page={}, slot={}): {}", page_id, slot_id, e))?;
+        let values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
+            .map_err(|e| format!("Failed to deserialise tuple: {}", e))?;
+        Ok(Tuple::new_with_location(values, self.column_info.clone(), page_id, slot_id))
+    }
+}
+
+impl PhysicalOperator for IndexScanOperator {
+    fn next(&mut self) -> Result<Option<Tuple>, String> {
+        if !self.loaded {
+            self.load_results()?;
+        }
+
+        if self.pos < self.results.len() {
+            let (page_id, slot_id) = self.results[self.pos];
+            self.pos += 1;
+            let tuple = self.fetch_tuple(page_id, slot_id)?;
+            Ok(Some(tuple))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn schema(&self) -> &[ColumnInfo] {
+        &self.column_info
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        self.results.clear();
+        self.pos = 0;
+        self.loaded = false;
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        match self.mode {
+            IndexScanMode::PointLookup(_) => "IndexScan(Point)",
+            IndexScanMode::RangeLookup(..) => "IndexScan(Range)",
+            IndexScanMode::FullScan => "IndexScan(Full)",
+        }
     }
 }
