@@ -18,7 +18,7 @@ pub use functions::{
     trim, upper,
 };
 pub use null_bitmap::NullBitmap;
-pub use row::{Row, deserialize_nullable_row, serialize_nullable_row};
+pub use row::{Row, deserialize_nullable_row, serialize_nullable_row, serialize_nullable_typed_row};
 pub use row_layout::{PhysicalSchema, RowLayout};
 pub use validation::{
     TypeValidationError, validate_bigint, validate_bit, validate_bool, validate_char,

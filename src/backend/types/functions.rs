@@ -62,7 +62,8 @@ impl std::error::Error for FunctionError {}
 
 /// A calendar or clock field that can be extracted from a temporal value.
 ///
-/// Used by [`extract`] to select which component to return.
+/// Used by [`extract`] to select which component to return,
+/// and by [`date_trunc_floor`]/[`date_trunc_ceil`] for temporal truncation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatePart {
     Year,
@@ -71,6 +72,25 @@ pub enum DatePart {
     Hour,
     Minute,
     Second,
+}
+
+/// Parse a date-part string (e.g. "YEAR", "MONTH", "DAY") into a `DatePart`.
+/// Returns `Err` if the string is not a recognized date part.
+pub fn parse_date_part(s: &DataValue) -> Result<DatePart, String> {
+    let upper = match s {
+        DataValue::Varchar(s) => s.to_uppercase(),
+        DataValue::Char(s) => s.to_uppercase(),
+        _ => return Err(format!("Invalid date part argument: expected string, got {:?}", s)),
+    };
+    match upper.as_str() {
+        "YEAR" => Ok(DatePart::Year),
+        "MONTH" => Ok(DatePart::Month),
+        "DAY" => Ok(DatePart::Day),
+        "HOUR" => Ok(DatePart::Hour),
+        "MINUTE" => Ok(DatePart::Minute),
+        "SECOND" => Ok(DatePart::Second),
+        _ => Err(format!("Unknown date part: '{}'", upper)),
+    }
 }
 
 // ── String functions ──────────────────────────────────────────────────────────
@@ -183,6 +203,38 @@ pub fn rtrim(value: &DataValue) -> Result<DataValue, FunctionError> {
             expected: "VARCHAR/CHAR".to_string(),
             found: value_type_name(value).to_string(),
         }),
+    }
+}
+
+/// Return the 1-based position of `substring` within `value`.
+///
+/// Implements SQL `POSITION(substring IN string)` semantics.
+/// Returns 0 if `substring` is not found (SQL returns 0, not NULL).
+/// Returns [`FunctionError::TypeMismatch`] for non-string values.
+pub fn position(value: &DataValue, substring: &DataValue) -> Result<i32, FunctionError> {
+    let s = match value {
+        DataValue::Varchar(s) => s.as_str(),
+        DataValue::Char(s) => s.trim_end_matches(' '),
+        _ => {
+            return Err(FunctionError::TypeMismatch {
+                expected: "VARCHAR/CHAR".to_string(),
+                found: value_type_name(value).to_string(),
+            });
+        }
+    };
+    let sub = match substring {
+        DataValue::Varchar(s) => s.as_str(),
+        DataValue::Char(s) => s.trim_end_matches(' '),
+        _ => {
+            return Err(FunctionError::TypeMismatch {
+                expected: "VARCHAR/CHAR".to_string(),
+                found: value_type_name(value).to_string(),
+            });
+        }
+    };
+    match s.find(sub) {
+        Some(idx) => Ok(idx as i32 + 1), // 1-based SQL position
+        None => Ok(0),
     }
 }
 
@@ -311,6 +363,164 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
     }
 }
 
+// ── Temporal truncation ───────────────────────────────────────────────────────
+
+/// Truncate a temporal value to the start of the specified `DatePart` unit.
+///
+/// This implements `FLOOR(date TO <unit>)` and `CEILING(date TO <unit>)` semantics.
+/// For `Floor` mode, the value is truncated down to the start of the unit.
+/// For `Ceil` mode, the value is rounded up to the start of the NEXT unit.
+///
+/// Supported units for DATE: Year, Month, Day
+/// Supported units for TIMESTAMP: Year, Month, Day, Hour, Minute, Second
+///
+/// Examples:
+/// - `date_trunc_floor(Date(2024-07-15), Month)` → Date(2024-07-01)
+/// - `date_trunc_floor(Timestamp(2024-07-15 14:30:00), Day)` → Timestamp(2024-07-15 00:00:00)
+pub fn date_trunc_floor(value: &DataValue, part: DatePart) -> Result<DataValue, FunctionError> {
+    match value {
+        DataValue::Date(d) => {
+            let (y, m, d_part) = (d.year(), d.month(), d.day());
+            let truncated = match part {
+                DatePart::Year => chrono::NaiveDate::from_ymd_opt(y, 1, 1),
+                DatePart::Month => chrono::NaiveDate::from_ymd_opt(y, m, 1),
+                DatePart::Day => chrono::NaiveDate::from_ymd_opt(y, m, d_part),
+                _ => return Err(FunctionError::TypeMismatch {
+                    expected: "DATE with year/month/day".to_string(),
+                    found: format!("DATE with {:?}", part),
+                }),
+            };
+            Ok(DataValue::Date(truncated.ok_or_else(|| {
+                FunctionError::InvalidArgument("Invalid date after truncation".to_string())
+            })?))
+        }
+        DataValue::Timestamp(ts) => {
+            let (y, m, d_part, h, min, s) = (
+                ts.year(), ts.month(), ts.day(),
+                ts.hour(), ts.minute(), ts.second(),
+            );
+            let naivedate = chrono::NaiveDate::from_ymd_opt(y, m, d_part)
+                .ok_or_else(|| FunctionError::InvalidArgument("Invalid date in timestamp".to_string()))?;
+            let truncated = match part {
+                DatePart::Year => {
+                    let d = chrono::NaiveDate::from_ymd_opt(y, 1, 1)
+                        .ok_or_else(|| FunctionError::InvalidArgument("Invalid year".to_string()))?;
+                    d.and_hms_opt(0, 0, 0)
+                }
+                DatePart::Month => {
+                    let d = chrono::NaiveDate::from_ymd_opt(y, m, 1)
+                        .ok_or_else(|| FunctionError::InvalidArgument("Invalid month".to_string()))?;
+                    d.and_hms_opt(0, 0, 0)
+                }
+                DatePart::Day => {
+                    naivedate.and_hms_opt(0, 0, 0)
+                }
+                DatePart::Hour => {
+                    naivedate.and_hms_opt(h, 0, 0)
+                }
+                DatePart::Minute => {
+                    naivedate.and_hms_opt(h, min, 0)
+                }
+                DatePart::Second => {
+                    naivedate.and_hms_opt(h, min, s)
+                }
+            };
+            Ok(DataValue::Timestamp(truncated.ok_or_else(|| {
+                FunctionError::InvalidArgument("Invalid timestamp after truncation".to_string())
+            })?))
+        }
+        _ => Err(FunctionError::TypeMismatch {
+            expected: "DATE/TIMESTAMP".to_string(),
+            found: value_type_name(value).to_string(),
+        }),
+    }
+}
+
+/// Ceiling (round up) a temporal value to the start of the specified `DatePart` unit.
+///
+/// This implements `CEILING(date TO <unit>)` semantics.
+/// If the value is already at a unit boundary, it stays the same.
+/// Otherwise, it advances to the START of the next unit.
+pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, FunctionError> {
+    match value {
+        DataValue::Date(d) => {
+            // Check if already truncated to the given unit
+            let is_already = match part {
+                DatePart::Year => d.month() == 1 && d.day() == 1,
+                DatePart::Month => d.day() == 1,
+                DatePart::Day => true,
+                _ => return Err(FunctionError::TypeMismatch {
+                    expected: "DATE with year/month/day".to_string(),
+                    found: format!("DATE with {:?}", part),
+                }),
+            };
+            if is_already {
+                return Ok(DataValue::Date(d.clone()));
+            }
+            // Truncate to floor first, then advance
+            let floored = match date_trunc_floor(value, part) {
+                Ok(DataValue::Date(df)) => df,
+                _ => return Err(FunctionError::InvalidArgument(
+                    "Cannot compute CEILING for date".to_string()
+                )),
+            };
+            // Add the duration of one unit
+            let advanced = match part {
+                DatePart::Year => {
+                    chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
+                }
+                DatePart::Month => {
+                    if floored.month() == 12 {
+                        chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
+                    } else {
+                        chrono::NaiveDate::from_ymd_opt(floored.year(), floored.month() + 1, 1)
+                    }
+                }
+                DatePart::Day => floored.succ_opt(),
+                _ => unreachable!(),
+            };
+            Ok(DataValue::Date(advanced.ok_or_else(|| {
+                FunctionError::InvalidArgument("Invalid date after ceiling".to_string())
+            })?))
+        }
+        DataValue::Timestamp(ts) => {
+            // Check if already truncated
+            let is_already = match part {
+                DatePart::Year => ts.month() == 1 && ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0,
+                DatePart::Month => ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0,
+                DatePart::Day => ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0,
+                DatePart::Hour => ts.minute() == 0 && ts.second() == 0,
+                DatePart::Minute => ts.second() == 0,
+                DatePart::Second => true,
+            };
+            if is_already {
+                return Ok(DataValue::Timestamp(ts.clone()));
+            }
+            // Floor and advance
+            match date_trunc_floor(value, part) {
+                Ok(DataValue::Timestamp(floored)) => {
+                    let advanced_duration = match part {
+                        DatePart::Year => chrono::Duration::days(365), // approximate
+                        DatePart::Month => chrono::Duration::days(31),
+                        DatePart::Day => chrono::Duration::days(1),
+                        DatePart::Hour => chrono::Duration::hours(1),
+                        DatePart::Minute => chrono::Duration::minutes(1),
+                        DatePart::Second => chrono::Duration::seconds(1),
+                    };
+                    Ok(DataValue::Timestamp(floored + advanced_duration))
+                }
+                _ => Err(FunctionError::InvalidArgument(
+                    "Cannot compute CEILING for timestamp".to_string()
+                )),
+            }
+        }
+        _ => Err(FunctionError::TypeMismatch {
+            expected: "DATE/TIMESTAMP".to_string(),
+            found: value_type_name(value).to_string(),
+        }),
+    }
+}
+
 /// Return the largest integer value not greater than the input (floor).
 ///
 /// For `NUMERIC`, the result has scale 0. For negative values with a fractional
@@ -403,11 +613,91 @@ fn value_to_literal(value: &DataValue) -> String {
 /// representation and re-encoding it for the target type. Returns
 /// [`FunctionError::InvalidArgument`] if the conversion is not possible (e.g.
 /// casting a VARCHAR that doesn't parse as an integer to INT).
+///
+/// For `BIT(n)` targets, supports:
+/// - Integer types → BIT(n): two's complement binary representation, truncated/padded
+/// - Boolean → BIT(1): `true` → `"1"`, `false` → `"0"`
+/// - BIT(m) → BIT(n): truncates or zero-pads
+/// - String → BIT(n): uses `parse_and_encode` (requires `'0'`/`'1'` chars only)
 pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionError> {
+    // ── Special handling for BIT(n) target ───────────────────────────────
+    if let DataType::Bit(n) = target {
+        return cast_to_bit(value, *n);
+    }
+
     let literal = value_to_literal(value);
     let encoded = DataValue::parse_and_encode(target, &literal)
         .map_err(FunctionError::InvalidArgument)?;
     DataValue::from_bytes(target, &encoded).map_err(FunctionError::InvalidArgument)
+}
+
+/// Convert a value to a BIT(n) string.
+fn cast_to_bit(value: &DataValue, n: u16) -> Result<DataValue, FunctionError> {
+    let bits = match value {
+        // Integer types → two's complement: simple bitwise masking handles negatives
+        DataValue::SmallInt(v) => to_binary_string(*v as i64, n),
+        DataValue::Int(v) => to_binary_string(*v as i64, n),
+        DataValue::BigInt(v) => to_binary_string(*v, n),
+        // Boolean → BIT(n): single bit, zero-padded to n bits
+        DataValue::Bool(true) => format!("{:0>width$}", "1", width = n as usize),
+        DataValue::Bool(false) => format!("{:0>width$}", "0", width = n as usize),
+        // BIT(m) → BIT(n): truncate or zero-pad
+        DataValue::Bit(bits) => {
+            if bits.len() as u16 == n {
+                bits.clone()
+            } else if bits.len() as u16 > n {
+                bits[..n as usize].to_string()
+            } else {
+                format!("{:0>width$}", bits, width = n as usize)
+            }
+        }
+        // String types → use parse_and_encode (validates '0'/'1' chars)
+        DataValue::Varchar(s) => {
+            let encoded = DataValue::parse_and_encode(&DataType::Bit(n), s.trim())
+                .map_err(FunctionError::InvalidArgument)?;
+            let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
+                .map_err(FunctionError::InvalidArgument)?;
+            if let DataValue::Bit(bits) = dv { bits } else { unreachable!() }
+        }
+        DataValue::Char(s) => {
+            let encoded = DataValue::parse_and_encode(&DataType::Bit(n), s.trim_end_matches(' '))
+                .map_err(FunctionError::InvalidArgument)?;
+            let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
+                .map_err(FunctionError::InvalidArgument)?;
+            if let DataValue::Bit(bits) = dv { bits } else { unreachable!() }
+        }
+        // Fallback for temporal/other types
+        _ => {
+            let literal = value_to_literal(value);
+            let encoded = DataValue::parse_and_encode(&DataType::Bit(n), &literal)
+                .map_err(|e| FunctionError::InvalidArgument(
+                    format!("Cannot cast {:?} to BIT({}): {}", value, n, e)
+                ))?;
+            let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
+                .map_err(FunctionError::InvalidArgument)?;
+            if let DataValue::Bit(bits) = dv { bits } else { unreachable!() }
+        }
+    };
+
+    Ok(DataValue::Bit(bits))
+}
+
+/// Convert an i64 value to a binary string of exactly `n` bits.
+/// The result is right-padded (least significant bits) when `n` exceeds
+/// the position of the highest set bit.
+fn to_binary_string(val: i64, n: u16) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    // Use only the lowest n bits
+    let mask = if n >= 64 {
+        !0i64
+    } else {
+        (1i64 << n) - 1
+    };
+    let masked = val & mask;
+    // Format as binary, padded to n bits
+    format!("{:0>width$b}", masked as u64, width = n as usize)
 }
 
 /// Return the first non-NULL value in the slice, or `None` if all are NULL.

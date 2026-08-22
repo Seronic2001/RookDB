@@ -1,6 +1,7 @@
 pub mod load_csv;
 pub mod selection;
 pub mod seq_scan;
+pub mod physical;
 pub mod compaction_api;
 pub mod delete;
 pub mod update;

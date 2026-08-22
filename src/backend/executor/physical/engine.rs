@@ -1,0 +1,147 @@
+//! Execution Engine — Drives a `PhysicalOperator` tree and collects / displays results.
+//!
+//! The engine handles the top-level orchestration: creating the planner,
+//! building the operator tree, pulling all tuples from the root operator,
+//! and formatting the output for the CLI.
+
+use rook_ast::logical::LogicalPlan;
+
+use super::tuple::{Tuple, display_tuples};
+use super::planner::PhysicalPlanner;
+
+use crate::backend::catalog::types::Catalog;
+
+/// Execute a logical plan using the Volcano engine and display the results.
+///
+/// Returns the number of tuples produced.
+pub fn execute_plan(
+    plan: &LogicalPlan,
+    catalog: &Catalog,
+    db_name: &str,
+) -> Result<usize, String> {
+    log::info!("[Volcano] Executing logical plan...");
+    log::debug!("[Volcano] Plan: {:?}", plan);
+
+    // 1. Create physical planner
+    let planner = PhysicalPlanner::new(catalog.clone(), db_name.to_string());
+
+    // 2. Convert logical plan → physical operator tree
+    let mut root = planner.plan(plan)?;
+    log::info!("[Volcano] Built physical operator tree: root={}", root.name());
+
+    // 3. Pull all tuples from the root operator
+    let mut tuples: Vec<Tuple> = Vec::new();
+    while let Some(tuple) = root.next()? {
+        tuples.push(tuple);
+    }
+
+    // 4. Display results
+    display_tuples(&tuples);
+
+    Ok(tuples.len())
+}
+
+/// Execute a plan and collect tuples without displaying (useful for testing).
+pub fn execute_plan_collect(
+    plan: &LogicalPlan,
+    catalog: &Catalog,
+    db_name: &str,
+) -> Result<Vec<Tuple>, String> {
+    let planner = PhysicalPlanner::new(catalog.clone(), db_name.to_string());
+    let mut root = planner.plan(plan)?;
+
+    let mut tuples: Vec<Tuple> = Vec::new();
+    while let Some(tuple) = root.next()? {
+        tuples.push(tuple);
+    }
+
+    Ok(tuples)
+}
+
+/// Pretty-print the operator plan tree (for debugging).
+pub fn print_plan_tree(plan: &LogicalPlan) {
+    println!("=== Physical Plan Tree ===");
+    print_plan_recursive(plan, 0);
+    println!("==========================");
+}
+
+fn print_plan_recursive(plan: &LogicalPlan, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match plan {
+        LogicalPlan::TableScan(ts) => {
+            println!("{}└─ SeqScan on {}", indent, ts.table);
+        }
+        LogicalPlan::Filter(f) => {
+            println!("{}├─ Filter", indent);
+            print_plan_recursive(&f.child, depth + 1);
+        }
+        LogicalPlan::Project(p) => {
+            let names: Vec<&str> = p.expressions.iter().map(|ne| ne.name.as_str()).collect();
+            println!("{}├─ Project ({})", indent, names.join(", "));
+            print_plan_recursive(&p.child, depth + 1);
+        }
+        LogicalPlan::Distinct(d) => {
+            println!("{}├─ Distinct", indent);
+            print_plan_recursive(&d.child, depth + 1);
+        }
+        LogicalPlan::Sort(s) => {
+            let keys: Vec<String> = s.order_by.iter()
+                .map(|ob| {
+                    let col = format!("{:?}", ob.expr);
+                    let dir = if ob.ascending { " ASC" } else { " DESC" };
+                    format!("{}{}", col, dir)
+                })
+                .collect();
+            println!("{}├─ Sort ({})", indent, keys.join(", "));
+            print_plan_recursive(&s.child, depth + 1);
+        }
+        LogicalPlan::Limit(l) => {
+            println!("{}├─ Limit {} OFFSET {}", indent, l.limit, l.offset);
+            print_plan_recursive(&l.child, depth + 1);
+        }
+        LogicalPlan::Aggregate(a) => {
+            let gb_cols = a.group_by.len();
+            let agg_count = a.aggregates.len();
+            println!("{}├─ Aggregate (group_by={}, aggregates={})", indent, gb_cols, agg_count);
+            print_plan_recursive(&a.child, depth + 1);
+        }
+        LogicalPlan::Join(j) => {
+            let join_type = format!("{:?}", j.join_type);
+            let has_cond = if j.condition.is_some() { "ON" } else { "none" };
+            println!("{}├─ {} Join ({})", indent, join_type, has_cond);
+            print_plan_recursive(&j.left, depth + 1);
+            print_plan_recursive(&j.right, depth + 1);
+        }
+        LogicalPlan::SetOp(s) => {
+            println!("{}├─ SetOp {:?} (not yet implemented)", indent, s.op);
+            print_plan_recursive(&s.left, depth + 1);
+            print_plan_recursive(&s.right, depth + 1);
+        }
+        LogicalPlan::Subquery(sq) => {
+            println!("{}├─ Subquery", indent);
+            print_plan_recursive(&sq.subquery, depth + 1);
+        }
+        LogicalPlan::Cte(c) => {
+            println!("{}├─ CTE '{}'", indent, c.name);
+            print_plan_recursive(&c.inner, depth + 1);
+            print_plan_recursive(&c.outer, depth + 1);
+        }
+        LogicalPlan::RecursiveCte(rc) => {
+            let op = if rc.union_all { "UNION ALL" } else { "UNION" };
+            println!("{}├─ RecursiveCTE '{}' ({})", indent, rc.name, op);
+            println!("{}    non_recursive:", indent);
+            print_plan_recursive(&rc.non_recursive, depth + 2);
+            println!("{}    recursive:", indent);
+            print_plan_recursive(&rc.recursive, depth + 2);
+            println!("{}    outer:", indent);
+            print_plan_recursive(&rc.outer, depth + 2);
+        }
+        LogicalPlan::CteScan(cs) => {
+            println!("{}└─ CteScan on '{}'", indent, cs.name);
+        }
+        LogicalPlan::Insert(inp) => {
+            println!("{}├─ Insert into '{}'", indent, inp.table);
+            print_plan_recursive(&inp.child, depth + 1);
+        }
+    }
+}

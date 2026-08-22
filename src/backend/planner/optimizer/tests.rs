@@ -303,10 +303,15 @@ fn test_full_optimizer_pipeline() {
 
     let optimizer = Optimizer::new();
     let optimized = optimizer.optimize(plan);
-    assert_eq!(collect_labels(&optimized), vec!["Sort", "Project", "Filter", "TableScan"]);
+    // The sort-hoisting pass rewrites Sort(Project(Filter(scan))) into
+    // Project(Sort(Filter(scan))) so ORDER BY can use columns that the
+    // SELECT list drops; limit_pushdown then folds LIMIT 10 into the Sort.
+    assert_eq!(collect_labels(&optimized), vec!["Project", "Sort", "Filter", "TableScan"]);
 
-    if let LogicalPlan::Sort(s) = &optimized { assert_eq!(s.limit, Some(10)); }
-    else { panic!("Expected Sort as root node"); }
+    if let LogicalPlan::Project(p) = &optimized {
+        if let LogicalPlan::Sort(s) = &*p.child { assert_eq!(s.limit, Some(10)); }
+        else { panic!("Expected Sort under Project"); }
+    } else { panic!("Expected Project root"); }
 }
 
 #[test]
@@ -897,3 +902,4 @@ fn test_multiple_optimization_passes() {
     let labels_twice = collect_labels(&twice);
     assert_eq!(labels_once, labels_twice, "Optimizer should be idempotent");
 }
+

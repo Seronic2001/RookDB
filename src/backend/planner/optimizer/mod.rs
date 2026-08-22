@@ -56,17 +56,80 @@ impl Optimizer {
     /// 1. Constant folding (pre-pass to simplify expressions)
     /// 2. Predicate pushdown
     /// 3. Projection pruning
-    /// 4. Limit pushdown
-    /// 5. Join ordering (only when statistics are available)
+    /// 4. Sort hoisting (sort by columns that the projection dropped)
+    /// 5. Limit pushdown
+    /// 6. Join ordering (only when statistics are available)
     pub fn optimize(&self, plan: LogicalPlan) -> LogicalPlan {
         let plan = self.constant_folding(plan);
         let plan = self.predicate_pushdown(plan);
         let plan = self.projection_pruning(plan);
+        let plan = self.hoist_sort_below_project(plan);
         let plan = self.limit_pushdown(plan);
         if self.table_stats.is_some() {
             self.join_ordering(plan)
         } else {
             plan
+        }
+    }
+
+    // ─── Pass: Sort hoisting ─────────────────────────────────────────────
+
+    /// Rewrite `Sort(Project(X))` into `Project(Sort(X))` when every ORDER BY
+    /// column is available in the projection's input.
+    ///
+    /// The logical planner places Sort above Project (SQL evaluation order),
+    /// but sorting needs the pre-projection tuple when an ORDER BY column is
+    /// not part of the SELECT list (`SELECT name FROM t ORDER BY salary`).
+    fn hoist_sort_below_project(&self, plan: LogicalPlan) -> LogicalPlan {
+        match plan {
+            LogicalPlan::Sort(s) => match *s.child {
+                LogicalPlan::Project(p) => {
+                    let input_schema = derive_schema(&p.child);
+                    let all_keys_resolve = s.order_by.iter().all(|ob| {
+                        match sort_key_column(&ob.expr) {
+                            Some(col) => input_schema.contains(&col),
+                            None => false,
+                        }
+                    });
+                    if all_keys_resolve {
+                        let inner_sort = LogicalPlan::Sort(LogicalSort {
+                            order_by: s.order_by,
+                            child: p.child,
+                            limit: s.limit,
+                        });
+                        LogicalPlan::Project(LogicalProject {
+                            expressions: p.expressions,
+                            child: Box::new(inner_sort),
+                        })
+                    } else {
+                        LogicalPlan::Sort(LogicalSort {
+                            order_by: s.order_by,
+                            child: Box::new(LogicalPlan::Project(p)),
+                            limit: s.limit,
+                        })
+                    }
+                }
+                other => LogicalPlan::Sort(LogicalSort {
+                    order_by: s.order_by,
+                    child: Box::new(other),
+                    limit: s.limit,
+                }),
+            },
+            // Recurse through result-shaping wrappers so a buried
+            // `Sort(Project(..))` pair is still rewritten.
+            LogicalPlan::Limit(l) => LogicalPlan::Limit(LogicalLimit {
+                limit: l.limit,
+                offset: l.offset,
+                child: Box::new(self.hoist_sort_below_project(*l.child)),
+            }),
+            LogicalPlan::Distinct(d) => LogicalPlan::Distinct(LogicalDistinct {
+                child: Box::new(self.hoist_sort_below_project(*d.child)),
+            }),
+            LogicalPlan::Project(p) => LogicalPlan::Project(LogicalProject {
+                expressions: p.expressions,
+                child: Box::new(self.hoist_sort_below_project(*p.child)),
+            }),
+            other => other,
         }
     }
 
@@ -845,8 +908,7 @@ impl Optimizer {
                             child: Box::new(child),
                             limit: Some(new_limit),
                         })
-                    }
-                    LogicalPlan::Project(p) => {
+                    }                    LogicalPlan::Project(p) => {
                         let LogicalProject {
                             expressions: p_exprs,
                             child: p_child,
@@ -887,6 +949,13 @@ impl Optimizer {
             }
             LogicalPlan::Limit(l) => {
                 let child = self.limit_pushdown(*l.child);
+                // With an OFFSET the sort cannot absorb this node (it has no
+                // skip concept), but its top-k hint must cover every row the
+                // LIMIT..OFFSET window needs: `limit + offset` rows. The sort
+                // may sit beneath result-shaping wrappers (Project/Distinct),
+                // so the widening descends through those.
+                let needed = l.limit.saturating_add(l.offset);
+                let child = widen_sort_hint(child, needed);
                 LogicalPlan::Limit(LogicalLimit {
                     limit: l.limit,
                     offset: l.offset,
@@ -990,5 +1059,35 @@ impl Optimizer {
                 })
             }
         }
+    }
+}
+
+/// Return the column name referenced by a sort key, if the key is a plain
+/// column reference (`Column` or a single-part `Compound` identifier).
+fn sort_key_column(expr: &ExprNode) -> Option<String> {
+    match expr {
+        ExprNode::Column(name) => Some(name.clone()),
+        ExprNode::Compound(parts) => parts.last().cloned(),
+        _ => None,
+    }
+}
+
+/// Widen the top-k hint of the topmost sort beneath result-shaping wrappers
+/// so a `LIMIT .. OFFSET` window always has enough sorted rows to draw from.
+fn widen_sort_hint(plan: LogicalPlan, needed: u64) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Sort(s) => LogicalPlan::Sort(LogicalSort {
+            order_by: s.order_by,
+            child: s.child,
+            limit: Some(needed),
+        }),
+        LogicalPlan::Project(p) => LogicalPlan::Project(LogicalProject {
+            expressions: p.expressions,
+            child: Box::new(widen_sort_hint(*p.child, needed)),
+        }),
+        LogicalPlan::Distinct(d) => LogicalPlan::Distinct(LogicalDistinct {
+            child: Box::new(widen_sort_hint(*d.child, needed)),
+        }),
+        other => other,
     }
 }
