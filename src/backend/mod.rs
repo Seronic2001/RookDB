@@ -18,6 +18,7 @@ pub mod planner;
 pub mod system_table;
 pub mod index;
 pub mod constraint;
+pub mod name_validation;
 pub mod error;
 pub mod visibility_map;
 

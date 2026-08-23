@@ -159,6 +159,13 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
     debug_print_catalog(&format!("Creating database: '{}'", db_name));
 
     // Validate database name
+    // Validate database name (path-safety: reject separators, '..', NUL, …)
+    if let Err(e) = crate::backend::name_validation::validate_database_name(db_name) {
+        log::info!("{}", e);
+        debug_print_catalog(&e);
+        return false;
+    }
+
     if db_name.is_empty() {
         log::info!("Database name cannot be empty");
         debug_print_catalog("Database name is empty");
@@ -224,6 +231,18 @@ pub fn create_database(catalog: &mut Catalog, db_name: &str) -> bool {
 // Creates a new table, updates the catalog, and initializes its data file.
 #[allow(deprecated)]
 pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, columns: Vec<Column>) {
+    // Step 0: Validate names (path-safety: reject separators, '..', NUL, …)
+    if let Err(e) = crate::backend::name_validation::validate_table_name(table_name) {
+        log::info!("{}", e);
+        println!("{}", e);
+        return;
+    }
+    if let Err(e) = crate::backend::name_validation::validate_database_name(db_name) {
+        log::info!("{}", e);
+        println!("{}", e);
+        return;
+    }
+
     // Step 1: Validate database existence
     if !catalog.databases.contains_key(db_name) {
         log::info!(
