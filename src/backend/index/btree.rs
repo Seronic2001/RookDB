@@ -34,7 +34,7 @@
 use std::cmp::Ordering;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::table::table_file::file_identity_from_file;
@@ -67,6 +67,29 @@ const CHILD_SIZE: usize = 4; // u32
 const KEY_LEN_SIZE: usize = 2; // u16
 
 // ─── Encoded Key Helpers ────────────────────────────────────────────────────
+
+/// Sidecar file storing the current root page id (`<idx>.root`, u32 LE).
+///
+/// The index file itself has no header page, so without this every
+/// `BTree::open` assumed page 0 — the ORIGINAL leftmost leaf — and all
+/// searches degenerated to next_leaf chain walks.
+fn root_sidecar_path(idx_path: &Path) -> PathBuf {
+    let mut s = idx_path.as_os_str().to_owned();
+    s.push(".root");
+    PathBuf::from(s)
+}
+
+fn write_root_sidecar(idx_path: &Path, root_page_id: u32) -> io::Result<()> {
+    std::fs::write(root_sidecar_path(idx_path), root_page_id.to_le_bytes())
+}
+
+fn read_root_sidecar(idx_path: &Path) -> io::Result<u32> {
+    let bytes = std::fs::read(root_sidecar_path(idx_path))?;
+    if bytes.len() < 4 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "short root sidecar"));
+    }
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
 
 /// Encode a DataValue to the on-disk key format: `[u16 length][bytes]`.
 fn encode_key(key: &DataValue) -> Vec<u8> {
@@ -402,6 +425,9 @@ impl BTree {
         file.flush()?;
         file.sync_all()?;
 
+        // Persist the root pointer sidecar so reopen lands on the real root.
+        write_root_sidecar(&file_path, 0)?;
+
         log::info!("[BTree::create] Created with 1 page, root=0");
         Ok(Self {
             file_path,
@@ -433,12 +459,20 @@ impl BTree {
         // For now, use a placeholder (will be set explicitly).
         let key_types = vec![DataType::Int];
 
-        log::info!("[BTree::open] Opened with {} pages", total_pages);
+        // Restore the persisted root pointer. Without it, every reopened
+        // index descended into the original leftmost leaf and searched via
+        // the next_leaf chain — O(n) lookups on any real tree.
+        let root_page_id = read_root_sidecar(&file_path).unwrap_or(0);
+
+        log::info!(
+            "[BTree::open] Opened with {} pages, root={}",
+            total_pages, root_page_id
+        );
         Ok(Self {
             file_path,
             file,
             key_types,
-            root_page_id: 0,
+            root_page_id,
             total_pages,
         })
     }
@@ -457,6 +491,30 @@ impl BTree {
     /// Return the single-column key type (first segment for composites).
     pub fn key_type(&self) -> &DataType {
         &self.key_types[0]
+    }
+
+    /// Debug: root page id.
+    pub fn root_page_id(&self) -> u32 {
+        self.root_page_id
+    }
+
+    /// Debug: decoded separator keys stored in the root node.
+    pub fn debug_root_keys(&mut self) -> Vec<String> {
+        let node = self.read_node(self.root_page_id).expect("read root");
+        match node {
+            BTreeNode::Internal { keys, children, .. } => {
+                let _ = children;
+                keys.iter()
+                    .map(|k| {
+                        let (v, _) = decode_key(k, &self.key_types[0])
+                            .map_err(|e| format!("decode err: {}", e))
+                            .unwrap_or((DataValue::Int(-1), 0));
+                        format!("{:?}", v)
+                    })
+                    .collect()
+            }
+            BTreeNode::Leaf { keys, .. } => vec![format!("<leaf with {} keys>", keys.len())],
+        }
     }
 
     /// Return all key segment types.
@@ -873,6 +931,7 @@ impl BTree {
 
             let new_root_id = self.allocate_page(&new_root_node)?;
             self.root_page_id = new_root_id;
+            write_root_sidecar(&self.file_path, new_root_id)?;
         }
 
         Ok(())
