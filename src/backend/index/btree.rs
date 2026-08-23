@@ -92,12 +92,28 @@ fn decode_key(data: &[u8], ty: &DataType) -> io::Result<(DataValue, usize)> {
     Ok((value, KEY_LEN_SIZE + len))
 }
 
-/// Compare an encoded key (on-disk bytes) with a DataValue.
-fn encoded_key_cmp(encoded: &[u8], target: &DataValue, ty: &DataType) -> io::Result<Ordering> {
-    let (key, _) = decode_key(encoded, ty)?;
-    let cmp = key.compare(target)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    Ok(cmp)
+/// Encode a composite key as one framed entry:
+/// `[u16 total_len][seg1_len][seg1][seg2_len][seg2]…`
+///
+/// The outer envelope lets leaf serialisation/deserialisation treat the
+/// whole multi-segment key as a single opaque `[len][bytes]` entry, exactly
+/// like single-column keys (ANALYSIS.md Tier 2 #8).
+pub(crate) fn encode_key_multi(values: &[DataValue]) -> io::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    for v in values {
+        body.extend_from_slice(&encode_key(v));
+    }
+    let total = body.len();
+    if total > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Composite key too large: {} bytes", total),
+        ));
+    }
+    let mut out = Vec::with_capacity(KEY_LEN_SIZE + total);
+    out.extend_from_slice(&(total as u16).to_le_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
 }
 
 /// Calculate the byte size of an encoded key.
@@ -340,8 +356,10 @@ pub struct BTree {
     file_path: PathBuf,
     /// Open file handle.
     file: File,
-    /// The data type of the indexed column (used for key encoding/decoding).
-    key_type: DataType,
+    /// The data type(s) of the indexed column(s). A single entry is a plain
+    /// single-column index; multiple entries form a composite key where each
+    /// value contributes one `[len][bytes]` segment in order.
+    key_types: Vec<DataType>,
     /// Cached root page ID.
     root_page_id: u32,
     /// Total number of pages in the index file.
@@ -351,7 +369,19 @@ pub struct BTree {
 impl BTree {
     /// Create a new B+ Tree index file.
     pub fn create(file_path: PathBuf, key_type: DataType) -> io::Result<Self> {
-        log::info!("[BTree::create] Creating new index at {:?}", file_path);
+        Self::create_composite(file_path, vec![key_type])
+    }
+
+    /// Create a new composite-key B+ Tree index file.
+    pub fn create_composite(file_path: PathBuf, key_types: Vec<DataType>) -> io::Result<Self> {
+        log::info!("[BTree::create] Creating new index at {:?} ({} col)", file_path, key_types.len());
+
+        if key_types.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Composite index requires at least one key column",
+            ));
+        }
 
         // Remove existing file if present
         if file_path.exists() {
@@ -376,7 +406,7 @@ impl BTree {
         Ok(Self {
             file_path,
             file,
-            key_type,
+            key_types,
             root_page_id: 0,
             total_pages: 1,
         })
@@ -401,13 +431,13 @@ impl BTree {
         // The key_type is not stored in the file yet — callers must provide it
         // In a full implementation, type info would be stored in a header page.
         // For now, use a placeholder (will be set explicitly).
-        let key_type = DataType::Int;
+        let key_types = vec![DataType::Int];
 
         log::info!("[BTree::open] Opened with {} pages", total_pages);
         Ok(Self {
             file_path,
             file,
-            key_type,
+            key_types,
             root_page_id: 0,
             total_pages,
         })
@@ -415,12 +445,122 @@ impl BTree {
 
     /// Set the key type (required after opening if the placeholder was used).
     pub fn set_key_type(&mut self, ty: DataType) {
-        self.key_type = ty;
+        self.key_types = vec![ty];
     }
 
-    /// Return the key type.
+    /// Set the composite key types (required after opening).
+    pub fn set_key_types(&mut self, types: Vec<DataType>) {
+        assert!(!types.is_empty(), "key_types must not be empty");
+        self.key_types = types;
+    }
+
+    /// Return the single-column key type (first segment for composites).
     pub fn key_type(&self) -> &DataType {
-        &self.key_type
+        &self.key_types[0]
+    }
+
+    /// Return all key segment types.
+    pub fn key_types(&self) -> &[DataType] {
+        &self.key_types
+    }
+
+    // ─── Composite Key Comparison Helpers ──────────────────────────────────
+
+    /// Encode lookup/insert keys in the format this tree stores:
+    /// bare `[len][bytes]` for single-column trees (legacy on-disk
+    /// compatibility), or the framed composite envelope otherwise.
+    fn encode_key_for(&self, keys: &[DataValue]) -> io::Result<Vec<u8>> {
+        if self.key_types.len() == 1 {
+            if keys.len() != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "single-column index takes exactly one key value",
+                ));
+            }
+            Ok(encode_key(&keys[0]))
+        } else {
+            encode_key_multi(keys)
+        }
+    }
+
+
+    /// Compare two encoded keys segment-by-segment using `key_types`.
+    ///
+    /// Encoded keys are opaque `[len][bytes]` concatenations; decoding each
+    /// segment with its declared type preserves value ordering (plain byte
+    /// comparison would not — little-endian integers sort wrong as bytes).
+    ///
+    /// Single-column trees store bare segments (legacy format); composite
+    /// trees wrap the whole key in an envelope (see `encode_key_multi`).
+    fn cmp_encoded_keys(&self, a: &[u8], b: &[u8]) -> io::Result<Ordering> {
+        use std::cmp::Ordering as O;
+        if self.key_types.len() == 1 {
+            let (va, _) = decode_key(a, &self.key_types[0])?;
+            let (vb, _) = decode_key(b, &self.key_types[0])?;
+            return va
+                .compare(&vb)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
+        }
+        // Composite: strip the outer envelope from both sides, then walk
+        // inner segments in lockstep.
+        if a.len() < KEY_LEN_SIZE || b.len() < KEY_LEN_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Truncated composite key envelope"));
+        }
+        let mut ia = KEY_LEN_SIZE;
+        let mut ib = KEY_LEN_SIZE;
+        let mut seg = 0usize;
+        loop {
+            match (ia >= a.len(), ib >= b.len()) {
+                (true, true) => return Ok(O::Equal),
+                (true, false) => return Ok(O::Less),
+                (false, true) => return Ok(O::Greater),
+                (false, false) => {}
+            }
+            // Segments align positionally: type for the current segment index.
+            let ty = &self.key_types[seg % self.key_types.len()];
+            let (va, ca) = decode_key(&a[ia..], ty)?;
+            let (vb, cb) = decode_key(&b[ib..], ty)?;
+            let c = va
+                .compare(&vb)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            if c != O::Equal {
+                return Ok(c);
+            }
+            ia += ca;
+            ib += cb;
+            seg += 1;
+        }
+    }
+
+    /// Compare an encoded key against a slice of typed values (one per key
+    /// segment). Used by range bounds and lookups supplied as values.
+    fn cmp_encoded_vs_values(&self, encoded: &[u8], values: &[DataValue]) -> io::Result<Ordering> {
+        use std::cmp::Ordering as O;
+        debug_assert_eq!(values.len(), self.key_types.len(), "value/key arity mismatch");
+        if self.key_types.len() == 1 {
+            let (ev, _) = decode_key(encoded, &self.key_types[0])?;
+            return ev
+                .compare(&values[0])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
+        }
+        if encoded.len() < KEY_LEN_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Truncated composite key envelope"));
+        }
+        let mut off = KEY_LEN_SIZE;
+        for (i, v) in values.iter().enumerate() {
+            if off >= encoded.len() {
+                return Ok(O::Less);
+            }
+            let (ev, consumed) = decode_key(&encoded[off..], &self.key_types[i])?;
+            let c = ev
+                .compare(v)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            if c != O::Equal {
+                return Ok(c);
+            }
+            off += consumed;
+        }
+        Ok(O::Equal)
     }
 
     /// Scan all entries in the B+ Tree by traversing the leaf linked list.
@@ -513,7 +653,12 @@ impl BTree {
     ///
     /// Returns `Ok(Some((page_id, slot_id)))` if the key was found, or `Ok(None)` if not.
     pub fn search(&mut self, key: &DataValue) -> io::Result<Option<(u32, u32)>> {
-        let encoded = encode_key(key);
+        self.search_keys(std::slice::from_ref(key))
+    }
+
+    /// Search for a (possibly composite) key in the B+ Tree.
+    pub fn search_keys(&mut self, keys: &[DataValue]) -> io::Result<Option<(u32, u32)>> {
+        let encoded = self.encode_key_for(keys)?;
         self.search_in_tree(self.root_page_id, &encoded)
     }
 
@@ -521,7 +666,13 @@ impl BTree {
     ///
     /// Returns a vector of heap tuple identifiers.
     pub fn search_range(&mut self, low: &DataValue, high: &DataValue) -> io::Result<Vec<(u32, u32)>> {
-        let low_encoded = encode_key(low);
+        self.search_range_keys(std::slice::from_ref(low), std::slice::from_ref(high))
+    }
+
+    /// Range search over composite keys: find entries with key segments
+    /// lexicographically within `[low_parts, high_parts]`.
+    pub fn search_range_keys(&mut self, low: &[DataValue], high: &[DataValue]) -> io::Result<Vec<(u32, u32)>> {
+        let low_encoded = self.encode_key_for(low)?;
         let mut results = Vec::new();
 
         // Navigate to the leaf containing `low`
@@ -534,8 +685,8 @@ impl BTree {
             match node {
                 BTreeNode::Leaf { ref keys, ref values, next_leaf, .. } => {
                     for (i, key) in keys.iter().enumerate() {
-                        let cmp_low = encoded_key_cmp(key, low, &self.key_type)?;
-                        let cmp_high = encoded_key_cmp(key, high, &self.key_type)?;
+                        let cmp_low = self.cmp_encoded_vs_values(key, low)?;
+                        let cmp_high = self.cmp_encoded_vs_values(key, high)?;
                         if cmp_low != Ordering::Less && cmp_high != Ordering::Greater {
                             results.push(values[i]);
                         } else if cmp_high == Ordering::Greater {
@@ -560,6 +711,11 @@ impl BTree {
         self.search(key).map(|opt| opt.is_some())
     }
 
+    /// Check whether a (possibly composite) key exists in the tree.
+    pub fn contains_keys(&mut self, keys: &[DataValue]) -> io::Result<bool> {
+        self.search_keys(keys).map(|opt| opt.is_some())
+    }
+
     // ─── Public Search All API ────────────────────────────────────────────
 
     /// Search for all entries matching a key in the B+ Tree.
@@ -568,7 +724,12 @@ impl BTree {
     /// For indexes without duplicates, this returns zero or one entry.
     /// For non-unique indexes, this returns all matching entries.
     pub fn search_all(&mut self, key: &DataValue) -> io::Result<Vec<(u32, u32)>> {
-        let encoded = encode_key(key);
+        self.search_all_keys(std::slice::from_ref(key))
+    }
+
+    /// Search for all entries matching a (possibly composite) key.
+    pub fn search_all_keys(&mut self, keys: &[DataValue]) -> io::Result<Vec<(u32, u32)>> {
+        let encoded = self.encode_key_for(keys)?;
         self.search_all_in_tree(self.root_page_id, &encoded)
     }
 
@@ -577,10 +738,9 @@ impl BTree {
         let node = self.read_node(page_id)?;
         match node {
             BTreeNode::Internal { keys, children, .. } => {
-                let target = self.key_from_encoded(encoded_key);
                 let mut child_idx = children.len() - 1;
                 for (i, key) in keys.iter().enumerate() {
-                    let cmp = encoded_key_cmp(key, &target, &self.key_type)?;
+                    let cmp = self.cmp_encoded_keys(key, encoded_key)?;
                     if cmp == Ordering::Greater {
                         child_idx = i;
                         break;
@@ -589,10 +749,9 @@ impl BTree {
                 self.search_all_in_tree(children[child_idx], encoded_key)
             }
             BTreeNode::Leaf { keys, values, .. } => {
-                let target = self.key_from_encoded(encoded_key);
                 let mut results = Vec::new();
                 for (i, key) in keys.iter().enumerate() {
-                    let cmp = encoded_key_cmp(key, &target, &self.key_type)?;
+                    let cmp = self.cmp_encoded_keys(key, encoded_key)?;
                     if cmp == Ordering::Equal {
                         results.push(values[i]);
                     } else if cmp == Ordering::Greater {
@@ -619,7 +778,12 @@ impl BTree {
     ///
     /// Returns `true` if the entry was found and deleted, `false` if not found.
     pub fn delete(&mut self, key: &DataValue, page_id: u32, slot_id: u32) -> io::Result<bool> {
-        let encoded = encode_key(key);
+        self.delete_keys(std::slice::from_ref(key), page_id, slot_id)
+    }
+
+    /// Delete a (possibly composite) key from the B+ Tree.
+    pub fn delete_keys(&mut self, keys: &[DataValue], page_id: u32, slot_id: u32) -> io::Result<bool> {
+        let encoded = self.encode_key_for(keys)?;
         self.delete_from_tree(self.root_page_id, &encoded, page_id, slot_id)
     }
 
@@ -632,9 +796,8 @@ impl BTree {
             let mut node = node;
             match &mut node {
                 BTreeNode::Leaf { num_keys, keys, values, .. } => {
-                    let target = self.key_from_encoded(encoded_key);
                     for i in 0..keys.len() {
-                        let cmp = encoded_key_cmp(&keys[i], &target, &self.key_type)?;
+                        let cmp = self.cmp_encoded_keys(&keys[i], encoded_key)?;
                         if cmp == Ordering::Equal && values[i] == (value_page_id, value_slot_id) {
                             // Exact match — remove this specific entry
                             keys.remove(i);
@@ -659,10 +822,9 @@ impl BTree {
                 _ => unreachable!(),
             };
 
-            let target = self.key_from_encoded(encoded_key);
             let mut child_idx = children.len() - 1;
             for (i, key) in keys.iter().enumerate() {
-                let cmp = encoded_key_cmp(key, &target, &self.key_type)?;
+                let cmp = self.cmp_encoded_keys(key, encoded_key)?;
                 if cmp == Ordering::Greater {
                     child_idx = i;
                     break;
@@ -680,7 +842,13 @@ impl BTree {
     /// The value is a heap tuple identifier `(page_id, slot_id)`.
     /// If the key already exists, the value is overwritten.
     pub fn insert(&mut self, key: &DataValue, page_id: u32, slot_id: u32) -> io::Result<()> {
-        let encoded = encode_key(key);
+        self.insert_keys(std::slice::from_ref(key), page_id, slot_id)
+    }
+
+    /// Insert a (possibly composite) key-value pair into the B+ Tree.
+    pub fn insert_keys(&mut self, keys: &[DataValue], page_id: u32, slot_id: u32) -> io::Result<()> {
+        debug_assert_eq!(keys.len(), self.key_types.len(), "key arity must match index arity");
+        let encoded = self.encode_key_for(keys)?;
 
         // Acquire page write lock for the root
         let file_id = file_identity_from_file(&self.file)?;
@@ -720,10 +888,9 @@ impl BTree {
                 // keys[i] = min key in children[i+1]
                 // If search_key < keys[i]: go to children[i]
                 // If search_key >= keys[i]: continue (will go to children[i+1] ultimately)
-                let target = self.key_from_encoded(encoded_key);
                 let mut child_idx = children.len() - 1;
                 for (i, key) in keys.iter().enumerate() {
-                    let cmp = encoded_key_cmp(key, &target, &self.key_type)?;
+                    let cmp = self.cmp_encoded_keys(key, encoded_key)?;
                     if cmp == Ordering::Greater {
                         // key > target, so target < key → belongs in child i
                         child_idx = i;
@@ -733,9 +900,8 @@ impl BTree {
                 self.search_in_tree(children[child_idx], encoded_key)
             }
             BTreeNode::Leaf { keys, values, .. } => {
-                let target = self.key_from_encoded(encoded_key);
                 for (i, key) in keys.iter().enumerate() {
-                    let cmp = encoded_key_cmp(key, &target, &self.key_type)?;
+                    let cmp = self.cmp_encoded_keys(key, encoded_key)?;
                     if cmp == Ordering::Equal {
                         return Ok(Some(values[i]));
                     }
@@ -753,10 +919,9 @@ impl BTree {
         let node = self.read_node(page_id)?;
         match node {
             BTreeNode::Internal { keys, children, .. } => {
-                let target = self.key_from_encoded(encoded_key);
                 let mut child_idx = children.len() - 1;
                 for (i, key) in keys.iter().enumerate() {
-                    let cmp = encoded_key_cmp(key, &target, &self.key_type)?;
+                    let cmp = self.cmp_encoded_keys(key, encoded_key)?;
                     if cmp == Ordering::Greater {
                         child_idx = i;
                         break;
@@ -768,9 +933,10 @@ impl BTree {
         }
     }
 
-    /// Convert on-disk encoded key bytes to a DataValue.
+    /// Convert the first key segment from on-disk encoded bytes to a DataValue.
+    #[allow(dead_code)]
     fn key_from_encoded(&self, encoded: &[u8]) -> DataValue {
-        let (key, _) = decode_key(encoded, &self.key_type).unwrap_or_else(|_| {
+        let (key, _) = decode_key(encoded, &self.key_types[0]).unwrap_or_else(|_| {
             (DataValue::Int(0), 0)
         });
         key
@@ -805,10 +971,9 @@ impl BTree {
                 _ => unreachable!(),
             };
 
-            let target = self.key_from_encoded(encoded_key);
             let mut child_idx = children.len() - 1;
             for (i, key) in keys.iter().enumerate() {
-                let cmp = encoded_key_cmp(key, &target, &self.key_type)?;
+                let cmp = self.cmp_encoded_keys(key, encoded_key)?;
                 if cmp == Ordering::Greater {
                     child_idx = i;
                     break;
@@ -860,14 +1025,13 @@ impl BTree {
             BTreeNode::Leaf { num_keys, keys, values, .. } => {
                 let nk = *num_keys as usize;
                 let target_encoded = encoded_key.to_vec();
-                let target_key = self.key_from_encoded(encoded_key);
 
                 // Find the insertion position.
                 // For duplicate keys, insert AFTER all entries with the same key
                 // so that the sort order is: key < == == < <
                 let mut insert_pos = nk;
                 for (i, existing_key) in keys.iter().enumerate() {
-                    let cmp = encoded_key_cmp(existing_key, &target_key, &self.key_type)?;
+                    let cmp = self.cmp_encoded_keys(existing_key, encoded_key)?;
                     if cmp == Ordering::Greater {
                         insert_pos = i;
                         break;
@@ -938,7 +1102,7 @@ impl BTree {
         let target_encoded = encoded_key.to_vec();
         let mut insert_pos = all_keys.len();
         for (i, key) in all_keys.iter().enumerate() {
-            let cmp = encoded_key_cmp(key, &self.key_from_encoded(encoded_key), &self.key_type)?;
+            let cmp = self.cmp_encoded_keys(key, encoded_key)?;
             if cmp == Ordering::Greater {
                 insert_pos = i;
                 break;
@@ -1104,7 +1268,7 @@ impl BTree {
                 println!("{}[Internal] page={}, num_keys={}, children={:?}",
                     indent, page_id, num_keys, children);
                 for (i, key) in keys.iter().enumerate() {
-                    let (val, _) = decode_key(key, &self.key_type).unwrap_or((DataValue::Int(0), 0));
+                    let (val, _) = decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
                     println!("{}  key[{}] = {}", indent, i, val);
                 }
                 // Recursively print children
@@ -1116,7 +1280,7 @@ impl BTree {
                 println!("{}[Leaf] page={}, num_keys={}, next={}, prev={}",
                     indent, page_id, num_keys, next_leaf, prev_leaf);
                 for (i, (key, val)) in keys.iter().zip(values.iter()).enumerate() {
-                    let (dv, _) = decode_key(key, &self.key_type).unwrap_or((DataValue::Int(0), 0));
+                    let (dv, _) = decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
                     println!("{}  entry[{}]: key={}, tid=({},{})", indent, i, dv, val.0, val.1);
                 }
             }

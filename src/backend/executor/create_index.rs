@@ -29,7 +29,7 @@ use crate::types::DataType;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Construct the `.idx` file path for a named index.
-fn index_file_path(db_name: &str, table_name: &str, index_name: &str) -> PathBuf {
+pub(crate) fn index_file_path(db_name: &str, table_name: &str, index_name: &str) -> PathBuf {
     PathBuf::from(format!(
         "database/base/{}/{}.{}.idx",
         db_name, table_name, index_name
@@ -58,11 +58,56 @@ fn legacy_index_meta_file_path(db_name: &str, table_name: &str) -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexMeta {
     /// The name of the indexed column (for human reference).
+    ///
+    /// Legacy single-column field; kept for backward compatibility with
+    /// meta files written before composite indexes. When present alongside
+    /// `column_names`, it mirrors the first entry.
+    #[serde(default)]
     column_name: String,
     /// The ordinal position of the indexed column in the table schema.
+    #[serde(default)]
     column_idx: usize,
     /// String representation of the key type (e.g. "INT", "VARCHAR(100)").
+    #[serde(default)]
     key_type: String,
+    /// Indexed columns in key order — composite indexes have >1 entry.
+    #[serde(default)]
+    column_names: Vec<String>,
+    /// Ordinal position of each indexed column, aligned with `column_names`.
+    #[serde(default)]
+    column_idxs: Vec<usize>,
+    /// Key type per segment, aligned with `column_names`.
+    #[serde(default)]
+    key_types: Vec<String>,
+}
+
+impl IndexMeta {
+    /// Indexed column names, normalising legacy single-column files.
+    fn columns(&self) -> Vec<String> {
+        if !self.column_names.is_empty() {
+            self.column_names.clone()
+        } else {
+            vec![self.column_name.clone()]
+        }
+    }
+
+    /// Column ordinal positions, normalising legacy files.
+    fn idxs(&self) -> Vec<usize> {
+        if !self.column_idxs.is_empty() {
+            self.column_idxs.clone()
+        } else {
+            vec![self.column_idx]
+        }
+    }
+
+    /// Key types as strings, normalising legacy files.
+    fn types(&self) -> Vec<String> {
+        if !self.key_types.is_empty() {
+            self.key_types.clone()
+        } else {
+            vec![self.key_type.clone()]
+        }
+    }
 }
 
 /// Load index metadata from an `.idx.meta` file.
@@ -88,7 +133,26 @@ fn load_index_meta(meta_path: &PathBuf) -> Result<IndexMeta, String> {
 /// legacy `{table}.idx` file scanning when this function returns `Vec::new()`.
 ///
 /// Returns `Vec<(index_name, column_name, is_unique)>`.
+///
+/// For composite indexes only the FIRST column is reported; use
+/// [`load_table_indexes_multi`] when the full key layout matters.
 pub fn load_table_indexes(db_name: &str, table_name: &str) -> Result<Vec<(String, String, bool)>, String> {
+    Ok(load_table_indexes_multi(db_name, table_name)?
+        .into_iter()
+        .map(|(name, mut cols, unique)| {
+            let first = cols.drain(..).next().unwrap_or_default();
+            (name, first, unique)
+        })
+        .collect())
+}
+
+/// Load all indexes defined for a table from `sys_indexes`, preserving every
+/// key column of composite indexes.
+///
+/// The `sys_indexes.columns` field stores a comma-separated column list.
+///
+/// Returns `Vec<(index_name, Vec<column_name>, is_unique)>`.
+pub fn load_table_indexes_multi(db_name: &str, table_name: &str) -> Result<Vec<(String, Vec<String>, bool)>, String> {
     use crate::backend::system_table::SYS_INDEXES_SCHEMA;
 
     let (table_id, _) = match crate::backend::system_table::resolve_table_id(db_name, table_name) {
@@ -129,17 +193,22 @@ pub fn load_table_indexes(db_name: &str, table_name: &str) -> Result<Vec<(String
             Some(DataValue::Char(n)) => n.clone(),
             _ => continue,
         };
-        let column_name = match &decoded[5] {
+        let columns_field = match &decoded[5] {
             Some(DataValue::Varchar(c)) => c.clone(),
             Some(DataValue::Char(c)) => c.clone(),
             _ => continue,
         };
+        let columns: Vec<String> = columns_field
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         let is_unique = match &decoded[3] {
             Some(DataValue::Bool(v)) => *v,
             _ => false,
         };
 
-        indexes.push((index_name, column_name, is_unique));
+        indexes.push((index_name, columns, is_unique));
     }
 
     Ok(indexes)
@@ -152,18 +221,21 @@ pub fn legacy_index_exists(db_name: &str, table_name: &str) -> bool {
 
 // ── Create Index ──────────────────────────────────────────────────────────────
 
-/// Build a B+ Tree index on the specified column of a table.
+/// Build a B+ Tree index on the specified column(s) of a table.
 ///
 /// Each index gets its own file pair:
 ///   `database/base/{db}/{table}.{index_name}.idx`
 ///   `database/base/{db}/{table}.{index_name}.idx.meta`
+///
+/// Multiple columns form a composite key: entries whose key is the
+/// concatenation of the column values in the given order.
 ///
 /// # Arguments
 /// * `catalog` - The catalog (used to resolve the table schema).
 /// * `db_name` - The current database name.
 /// * `table_name` - The table to index.
 /// * `index_name` - The name of the index (used in the file name).
-/// * `column_name` - The column to index.
+/// * `column_names` - The column(s) to index, in key order.
 ///
 /// # Returns
 /// * `Ok(tuple_count)` on success, with the number of indexed tuples.
@@ -173,12 +245,16 @@ pub fn create_index(
     db_name: &str,
     table_name: &str,
     index_name: &str,
-    column_name: &str,
+    column_names: &[String],
 ) -> Result<usize, String> {
     log::info!(
-        "[CreateIndex] Creating index '{}.{}.{}' on column '{}'",
-        db_name, table_name, index_name, column_name
+        "[CreateIndex] Creating index '{}.{}.{}' on columns {:?}",
+        db_name, table_name, index_name, column_names
     );
+
+    if column_names.is_empty() {
+        return Err("CREATE INDEX requires at least one column".to_string());
+    }
 
     // 1. Resolve the table schema from the catalog
     let db = catalog.databases.get(db_name)
@@ -186,25 +262,23 @@ pub fn create_index(
     let table = db.tables.get(table_name)
         .ok_or_else(|| format!("Table '{}' not found in database '{}'", table_name, db_name))?;
 
-    // 2. Find the indexed column
-    let indexed_col = table.columns.iter()
-        .find(|c| c.name.eq_ignore_ascii_case(column_name))
-        .ok_or_else(|| format!("Column '{}' not found in table '{}'", column_name, table_name))?;
-
-    let indexed_col_idx = table.columns.iter()
-        .position(|c| c.name.eq_ignore_ascii_case(column_name))
-        .ok_or_else(|| format!("Column '{}' not found (index lookup)", column_name))?;
+    // 2. Resolve every indexed column
+    let mut indexed_cols: Vec<&crate::catalog::types::Column> = Vec::new();
+    let mut indexed_idxs: Vec<usize> = Vec::new();
+    for col_name in column_names {
+        let idx = table.columns.iter()
+            .position(|c| c.name.eq_ignore_ascii_case(col_name))
+            .ok_or_else(|| format!("Column '{}' not found in table '{}'", col_name, table_name))?;
+        indexed_idxs.push(idx);
+        indexed_cols.push(&table.columns[idx]);
+    }
 
     let schema_types: Vec<DataType> = table.columns.iter().map(|c| c.data_type.clone()).collect();
-
-    log::info!(
-        "[CreateIndex] Indexed column '{}' at index {}, type={}",
-        indexed_col.name, indexed_col_idx, indexed_col.data_type
-    );
+    let key_types: Vec<DataType> = indexed_cols.iter().map(|c| c.data_type.clone()).collect();
 
     // 3. Determine the actual index name (auto-generate if empty)
     let resolved_name = if index_name.is_empty() {
-        format!("idx_{}_{}", table_name, column_name)
+        format!("idx_{}_{}", table_name, column_names.join("_"))
     } else {
         index_name.to_string()
     };
@@ -218,15 +292,15 @@ pub fn create_index(
         return Err(format!("Heap file not found: {:?}", heap_path));
     }
 
-    // 4. Open the heap file for scanning
+    // 5. Open the heap file for scanning
     let heap_manager = HeapManager::open(heap_path)
         .map_err(|e| format!("Failed to open heap for table '{}': {}", table_name, e))?;
 
-    // 5. Create the B+ Tree index file
-    let mut btree = BTree::create(idx_path, indexed_col.data_type.clone())
+    // 6. Create the B+ Tree index file (composite-aware)
+    let mut btree = BTree::create_composite(idx_path, key_types.clone())
         .map_err(|e| format!("Failed to create index file: {}", e))?;
 
-    // 6. Scan all tuples and insert into the B+ Tree
+    // 7. Scan all tuples and insert into the B+ Tree
     let mut inserted_count = 0usize;
     let scan_iter = heap_manager.scan();
     for result in scan_iter {
@@ -239,27 +313,29 @@ pub fn create_index(
         let values = crate::types::deserialize_nullable_row(&schema_types, &raw_bytes)
             .map_err(|e| format!("Failed to deserialize tuple: {}", e))?;
 
-        // Extract the indexed column value
-        let key_value = match values.get(indexed_col_idx) {
-            Some(Some(dv)) => dv,
-            Some(None) => {
-                // NULL key — skip (NULLs are not indexed in simple B+ Tree)
-                log::trace!(
-                    "[CreateIndex] Skipping NULL key at (page={}, slot={})",
-                    page_id, slot_id
-                );
-                continue;
+        // Assemble the key from every indexed column; skip rows where ANY
+        // component is NULL (NULLs are not indexed).
+        let mut key_values: Vec<DataValue> = Vec::with_capacity(indexed_idxs.len());
+        let mut has_null = false;
+        for &ci in &indexed_idxs {
+            match values.get(ci) {
+                Some(Some(dv)) => key_values.push(dv.clone()),
+                _ => {
+                    has_null = true;
+                    break;
+                }
             }
-            None => {
-                return Err(format!(
-                    "Tuple at (page={}, slot={}) has fewer columns than schema",
-                    page_id, slot_id
-                ));
-            }
-        };
+        }
+        if has_null {
+            log::trace!(
+                "[CreateIndex] Skipping NULL key at (page={}, slot={})",
+                page_id, slot_id
+            );
+            continue;
+        }
 
-        // Insert into the B+ Tree: key=column_value, value=(page_id, slot_id)
-        if let Err(e) = btree.insert(key_value, page_id, slot_id) {
+        // Insert into the B+ Tree: key=column values, value=(page_id, slot_id)
+        if let Err(e) = btree.insert_keys(&key_values, page_id, slot_id) {
             return Err(format!(
                 "Failed to insert into index at (page={}, slot={}): {}",
                 page_id, slot_id, e
@@ -269,27 +345,31 @@ pub fn create_index(
         inserted_count += 1;
     }
 
-    // 7. Sync the index to disk
+    // 8. Sync the index to disk
     btree.sync()
         .map_err(|e| format!("Failed to sync index: {}", e))?;
 
-    // 8. Write index metadata file for DML integration
+    // 9. Write index metadata file for DML integration
     let meta = IndexMeta {
-        column_name: indexed_col.name.clone(),
-        column_idx: indexed_col_idx,
-        key_type: format!("{}", indexed_col.data_type),
+        column_name: indexed_cols[0].name.clone(),
+        column_idx: indexed_idxs[0],
+        key_type: format!("{}", indexed_cols[0].data_type),
+        column_names: indexed_cols.iter().map(|c| c.name.clone()).collect(),
+        column_idxs: indexed_idxs.clone(),
+        key_types: key_types.iter().map(|t| format!("{}", t)).collect(),
     };
     let meta_json = serde_json::to_string_pretty(&meta)
         .map_err(|e| format!("Failed to serialize index metadata: {}", e))?;
     std::fs::write(&meta_path, meta_json)
         .map_err(|e| format!("Failed to write index metadata: {}", e))?;
 
-    // 9. Save index metadata to sys_indexes system table
+    // 10. Save index metadata to sys_indexes system table (comma-separated
+    //     column list for composite indexes)
     if let Err(e) = crate::backend::system_table::insert_index_metadata(
         db_name,
         table_name,
         &resolved_name,
-        &indexed_col.name,
+        &indexed_cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(","),
         false, // is_unique (not tracked from CREATE INDEX yet)
         false, // is_primary (not tracked from CREATE INDEX yet)
     ) {
@@ -301,7 +381,7 @@ pub fn create_index(
 
     log::info!(
         "[CreateIndex] Index '{}' created with {} entries on {}.{}({})",
-        resolved_name, inserted_count, db_name, table_name, column_name
+        resolved_name, inserted_count, db_name, table_name, column_names.join(",")
     );
 
     Ok(inserted_count)
@@ -374,65 +454,22 @@ pub fn update_index_on_insert(
     }
 
     for (_meta_path, idx_path, meta) in &indexes {
-        // Get the indexed column's string value
-        let col_value = match values.get(meta.column_idx) {
-            Some(v) => v,
-            None => {
-                log::warn!(
-                    "[IndexInsert] Column index {} out of bounds for {}.{}, skipping this index",
-                    meta.column_idx, db_name, table_name
-                );
-                continue;
-            }
-        };
-
-        // Parse the key type string back to DataType
-        let key_type: DataType = match meta.key_type.parse() {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!(
-                    "[IndexInsert] Failed to parse key type '{}': {}, skipping",
-                    meta.key_type, e
-                );
-                continue;
-            }
-        };
-
-        // Check if value is NULL
-        if col_value.trim().eq_ignore_ascii_case("null") || col_value.trim().is_empty() {
+        // Build the (possibly composite) key from the raw string values.
+        // Rows where ANY key component is NULL are not indexed.
+        let Some(key_values) = build_key_from_strings(meta, values) else {
             log::trace!(
-                "[IndexInsert] Skipping NULL index key for {}.{}({})",
-                db_name, table_name, meta.column_name
+                "[IndexInsert] Skipping NULL/partial key for {}.{}({})",
+                db_name, table_name, meta.columns().join(",")
             );
             continue;
-        }
-
-        // Parse the string value into a DataValue for the BTree insert
-        let key_value = match parse_string_to_value(&key_type, col_value) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!(
-                    "[IndexInsert] Failed to parse value for {}.{}('{}'): {}, skipping",
-                    db_name, table_name, meta.column_name, e
-                );
-                continue;
-            }
         };
 
-        // Open the BTree and insert
-        let mut btree = match BTree::open(idx_path.clone()) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!(
-                    "[IndexInsert] Failed to open index {:?}: {}, skipping",
-                    idx_path, e
-                );
-                continue;
-            }
+        let Some(mut btree) = open_btree_for_meta(idx_path, meta) else {
+            log::warn!("[IndexInsert] Failed to open index {:?}, skipping", idx_path);
+            continue;
         };
-        btree.set_key_type(key_type);
 
-        if let Err(e) = btree.insert(&key_value, page_id, slot_id) {
+        if let Err(e) = btree.insert_keys(&key_values, page_id, slot_id) {
             log::warn!(
                 "[IndexInsert] Failed to insert into index {:?}: {}, skipping",
                 idx_path, e
@@ -448,11 +485,64 @@ pub fn update_index_on_insert(
 
         log::trace!(
             "[IndexInsert] Inserted key {:?} → (page={}, slot={}) into index on {}.{}({})",
-            key_value, page_id, slot_id, db_name, table_name, meta.column_name
+            key_values, page_id, slot_id, db_name, table_name, meta.columns().join(",")
         );
     }
 
     Ok(())
+}
+
+/// Build a composite key from a row's raw string values using `meta`'s column
+/// layout. Returns `None` when any component is missing or NULL.
+fn build_key_from_strings(meta: &IndexMeta, values: &[&str]) -> Option<Vec<DataValue>> {
+    let types = meta.types();
+    let idxs = meta.idxs();
+    let mut key = Vec::with_capacity(idxs.len());
+    for (i, &ci) in idxs.iter().enumerate() {
+        let raw = values.get(ci)?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+            return None;
+        }
+        let ty: DataType = types.get(i).and_then(|t| t.parse().ok())?;
+        key.push(parse_string_to_value(&ty, trimmed).ok()?);
+    }
+    Some(key)
+}
+
+/// Build a composite key from an already-decoded row. Returns `None` when any
+/// component is missing or NULL.
+fn build_key_from_decoded(
+    meta: &IndexMeta,
+    decoded: &[Option<DataValue>],
+) -> Option<Vec<DataValue>> {
+    let idxs = meta.idxs();
+    let mut key = Vec::with_capacity(idxs.len());
+    for &ci in &idxs {
+        match decoded.get(ci) {
+            Some(Some(dv)) => key.push(dv.clone()),
+            _ => return None,
+        }
+    }
+    Some(key)
+}
+
+/// Open the B+Tree for `meta`, configuring its key types (composite-aware).
+fn open_btree_for_meta(idx_path: &PathBuf, meta: &IndexMeta) -> Option<BTree> {
+    let mut btree = BTree::open(idx_path.clone()).ok()?;
+    let cols = meta.columns();
+    let types: Vec<DataType> = meta
+        .types()
+        .iter()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    if !cols.is_empty() && types.len() == cols.len() {
+        btree.set_key_types(types);
+    } else {
+        let t: DataType = meta.key_type.parse().ok()?;
+        btree.set_key_type(t);
+    }
+    Some(btree)
 }
 
 /// After a tuple is deleted from the heap, update all existing B+ Tree indexes
@@ -484,62 +574,33 @@ pub fn update_index_on_delete(
     let mut any_updated = false;
 
     for (_meta_path, idx_path, meta) in &indexes {
-        let key_value = match decoded.get(meta.column_idx) {
-            Some(Some(dv)) => dv.clone(),
-            Some(None) => {
-                // NULL key — not indexed
-                log::trace!(
-                    "[IndexDelete] Skipping NULL key for {}.{}({})",
-                    db_name, table_name, meta.column_name
-                );
-                continue;
-            }
-            None => {
-                log::warn!(
-                    "[IndexDelete] Column index {} out of bounds for deserialized tuple",
-                    meta.column_idx
-                );
-                continue;
-            }
+        // Build the (possibly composite) key from the deleted row. Rows with
+        // ANY NULL key component were never indexed.
+        let Some(key_values) = build_key_from_decoded(meta, &decoded) else {
+            log::trace!(
+                "[IndexDelete] Skipping NULL/partial key for {}.{}({})",
+                db_name, table_name, meta.columns().join(",")
+            );
+            continue;
         };
 
-        // Parse the key type string back to DataType
-        let key_type: DataType = match meta.key_type.parse() {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!(
-                    "[IndexDelete] Failed to parse key type '{}': {}, skipping",
-                    meta.key_type, e
-                );
-                continue;
-            }
+        let Some(mut btree) = open_btree_for_meta(idx_path, meta) else {
+            log::warn!("[IndexDelete] Failed to open index {:?}, skipping", idx_path);
+            continue;
         };
 
-        // Open the BTree and delete the specific entry (key, page_id, slot_id)
-        let mut btree = match BTree::open(idx_path.clone()) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!(
-                    "[IndexDelete] Failed to open index {:?}: {}, skipping",
-                    idx_path, e
-                );
-                continue;
-            }
-        };
-        btree.set_key_type(key_type);
-
-        match btree.delete(&key_value, page_id, slot_id) {
+        match btree.delete_keys(&key_values, page_id, slot_id) {
             Ok(true) => {
                 any_updated = true;
                 log::trace!(
                     "[IndexDelete] Removed key {:?} at (page={}, slot={}) from index on {}.{}({})",
-                    key_value, page_id, slot_id, db_name, table_name, meta.column_name
+                    key_values, page_id, slot_id, db_name, table_name, meta.columns().join(",")
                 );
             }
             Ok(false) => {
                 log::warn!(
                     "[IndexDelete] Key {:?} at (page={}, slot={}) not found in index on {}.{}({})",
-                    key_value, page_id, slot_id, db_name, table_name, meta.column_name
+                    key_values, page_id, slot_id, db_name, table_name, meta.columns().join(",")
                 );
             }
             Err(e) => {
@@ -593,65 +654,40 @@ pub fn update_index_on_update(
         .map_err(|e| format!("Failed to deserialize new tuple: {}", e))?;
 
     for (_meta_path, idx_path, meta) in &indexes {
-        let old_key = match old_decoded.get(meta.column_idx) {
-            Some(Some(dv)) => Some(dv.clone()),
-            _ => None, // NULL — not indexed
-        };
-        let new_key = match new_decoded.get(meta.column_idx) {
-            Some(Some(dv)) => Some(dv.clone()),
-            _ => None, // NULL — not indexed
-        };
+        let old_key = build_key_from_decoded(meta, &old_decoded);
+        let new_key = build_key_from_decoded(meta, &new_decoded);
 
-        // If both keys are None, skip this index
+        // If both keys are None (NULL / partial), skip this index
         if old_key.is_none() && new_key.is_none() {
             log::trace!(
                 "[IndexUpdate] Both old and new keys are NULL for {}.{}({}), skipping index.",
-                db_name, table_name, meta.column_name
+                db_name, table_name, meta.columns().join(",")
             );
             continue;
         }
 
-        // Parse the key type string back to DataType
-        let key_type: DataType = match meta.key_type.parse() {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!(
-                    "[IndexUpdate] Failed to parse key type '{}': {}, skipping",
-                    meta.key_type, e
-                );
-                continue;
-            }
+        let Some(mut btree) = open_btree_for_meta(idx_path, meta) else {
+            log::warn!("[IndexUpdate] Failed to open index {:?}, skipping", idx_path);
+            continue;
         };
-
-        let mut btree = match BTree::open(idx_path.clone()) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!(
-                    "[IndexUpdate] Failed to open index {:?}: {}, skipping",
-                    idx_path, e
-                );
-                continue;
-            }
-        };
-        btree.set_key_type(key_type);
 
         // Delete old key (if it was indexed), matching by the OLD heap location
         if let Some(ref old) = old_key {
-            let _ = btree.delete(old, old_page_id, old_slot_id)
+            let _ = btree.delete_keys(old, old_page_id, old_slot_id)
                 .map_err(|e| format!("Failed to delete old key from index: {}", e))?;
             log::trace!(
                 "[IndexUpdate] Deleted old key {:?} at (page={}, slot={}) from index on {}.{}({})",
-                old, old_page_id, old_slot_id, db_name, table_name, meta.column_name
+                old, old_page_id, old_slot_id, db_name, table_name, meta.columns().join(",")
             );
         }
 
         // Insert new key (if it's not NULL)
         if let Some(ref new) = new_key {
-            btree.insert(new, new_page_id, new_slot_id)
+            btree.insert_keys(new, new_page_id, new_slot_id)
                 .map_err(|e| format!("Failed to insert new key into index: {}", e))?;
             log::trace!(
                 "[IndexUpdate] Inserted new key {:?} → (page={}, slot={}) into index on {}.{}({})",
-                new, new_page_id, new_slot_id, db_name, table_name, meta.column_name
+                new, new_page_id, new_slot_id, db_name, table_name, meta.columns().join(",")
             );
         }
 

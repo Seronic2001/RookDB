@@ -136,6 +136,9 @@ impl PhysicalOperator for SeqScanOperator {
 pub enum IndexScanMode {
     /// Exact point lookup: only tuples matching this key.
     PointLookup(DataValue),
+    /// Exact lookup on a composite key: one value per key segment, all
+    /// matched with equality (ANALYSIS.md Tier 2 #8).
+    CompositePointLookup(Vec<DataValue>),
     /// Range scan: all tuples with keys in `[low, high]` inclusive.
     RangeLookup(DataValue, DataValue),
     /// Full scan: scan all entries in the index via the leaf linked list.
@@ -212,6 +215,11 @@ impl IndexScanOperator {
                     .map_err(|e| format!("Index scan point lookup error: {}", e))?;
                 self.results = tids;
             }
+            IndexScanMode::CompositePointLookup(keys) => {
+                let tids = self.btree.search_range_keys(keys, keys)
+                    .map_err(|e| format!("Index scan composite point lookup error: {}", e))?;
+                self.results = tids;
+            }
             IndexScanMode::RangeLookup(low, high) => {
                 let tids = self.btree.search_range(low, high)
                     .map_err(|e| format!("Index scan range lookup error: {}", e))?;
@@ -269,6 +277,7 @@ impl PhysicalOperator for IndexScanOperator {
     fn name(&self) -> &'static str {
         match self.mode {
             IndexScanMode::PointLookup(_) => "IndexScan(Point)",
+            IndexScanMode::CompositePointLookup(_) => "IndexScan(CompositePoint)",
             IndexScanMode::RangeLookup(..) => "IndexScan(Range)",
             IndexScanMode::FullScan => "IndexScan(Full)",
         }

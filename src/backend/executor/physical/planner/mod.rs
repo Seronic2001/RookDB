@@ -408,7 +408,8 @@ impl PhysicalPlanner {
             // Map info_schema column names to physical column types + positions
             let (mut column_info, column_mapping) = self.map_info_schema_columns(sys_name, info_schema, sys_schema);
             // Set the table name for each column to allow table-qualified resolution
-            let sys_table_name = sys_name.to_string();
+            // (alias takes precedence per SQL semantics).
+            let sys_table_name = ts.alias.clone().unwrap_or_else(|| sys_name.to_string());
             for ci in column_info.iter_mut() {
                 ci.table = Some(sys_table_name.clone());
             }
@@ -425,7 +426,10 @@ impl PhysicalPlanner {
 
         // ── Regular user table path ───────────────────────────────────────
         let table_schema = self.resolve_table_schema(&ts.table)?;
-        let table_name = ts.table.clone();
+        // Stamp the ALIAS (when present) as the tuple qualifier — SQL
+        // semantics: once a table is aliased, references must use the alias.
+        // This also lets self-joins disambiguate two scans of one table.
+        let table_name = ts.alias.clone().unwrap_or_else(|| ts.table.clone());
         let column_info: Vec<ColumnInfo> = table_schema.iter().map(|c| {
             ColumnInfo {
                 name: c.name.clone(),
@@ -720,17 +724,42 @@ impl PhysicalPlanner {
             return Ok(None);
         }
 
-        // Load indexes (both named and legacy)
-        let named_indexes = crate::backend::executor::create_index::load_table_indexes(
+        // Load indexes (both named and legacy), preserving composite layouts
+        let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
             &self.db_name, &ts.table,
         ).unwrap_or_default();
 
         // Try named indexes first (dynamic selection — M2)
         let mut best_idx_name: Option<String> = None;
         let mut best_col_name: Option<String> = None;
+        let mut best_key_types: Vec<DataType> = Vec::new();
         let mut best_mode: Option<IndexScanMode> = None;
 
-        for (idx_name, col_name, _is_unique) in &named_indexes {
+        for (idx_name, col_names, _is_unique) in &named_indexes {
+            // Composite index: equality on ALL key columns → exact lookup.
+            if col_names.len() > 1 {
+                if let Some(key_values) = self.extract_composite_point_key(pred_node, col_names) {
+                    let priority = 0; // most selective
+                    let should_replace = match &best_mode {
+                        Some(existing) => priority < Self::scan_mode_priority(existing),
+                        None => true,
+                    };
+                    if should_replace {
+                        best_idx_name = Some(idx_name.clone());
+                        best_col_name = Some(col_names.join(","));
+                        best_key_types = col_names.iter()
+                            .map(|cn| table_schema.iter()
+                                .find(|c| c.name.eq_ignore_ascii_case(cn))
+                                .map(|c| c.data_type.clone())
+                                .unwrap_or(DataType::Int))
+                            .collect();
+                        best_mode = Some(IndexScanMode::CompositePointLookup(key_values));
+                    }
+                }
+                continue;
+            }
+
+            let col_name = &col_names[0];
             // Look up the indexed column's DataType for sentinel bounds
             let col_type = table_schema.iter()
                 .find(|c| c.name.eq_ignore_ascii_case(col_name))
@@ -745,6 +774,7 @@ impl PhysicalPlanner {
                 if should_replace {
                     best_idx_name = Some(idx_name.clone());
                     best_col_name = Some(col_name.clone());
+                    best_key_types.clear();
                     best_mode = Some(mode);
                 }
             }
@@ -792,8 +822,10 @@ impl PhysicalPlanner {
 
             let mut btree = BTree::open(idx_path)
                 .map_err(|e| format!("Failed to open index: {}", e))?;
-            // Set key type from the INDEXED column (NOT the first table column)
-            if let Some(idx_col) = table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(col_name.as_str())) {
+            // Set key type(s) from the INDEXED column(s) (NOT the first table column)
+            if !best_key_types.is_empty() {
+                btree.set_key_types(best_key_types);
+            } else if let Some(idx_col) = table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(col_name.as_str())) {
                 btree.set_key_type(idx_col.data_type.clone());
             } else if let Some(first_col) = table_schema.first() {
                 btree.set_key_type(first_col.data_type.clone());
@@ -810,10 +842,69 @@ impl PhysicalPlanner {
         Ok(None)
     }
 
+    /// Extract an exact composite key from an AND-conjunction of equality
+    /// predicates over ALL of `col_names` (in key order).
+    ///
+    /// e.g. for index `(a, b)`: `WHERE a = 1 AND b = 'x'` → `[Int(1), Varchar(x)]`.
+    /// Returns `None` when any key column lacks an equality predicate.
+    fn extract_composite_point_key(
+        &self,
+        pred: &rook_ast::PredicateNode,
+        col_names: &[String],
+    ) -> Option<Vec<DataValue>> {
+        // Flatten the conjunction into individual comparison predicates.
+        fn flatten<'p>(pred: &'p rook_ast::PredicateNode, out: &mut Vec<&'p rook_ast::PredicateNode>) {
+            match pred {
+                rook_ast::PredicateNode::BinaryOp {
+                    left,
+                    op: rook_ast::BinaryOp::And,
+                    right,
+                } => {
+                    flatten(left, out);
+                    flatten(right, out);
+                }
+                other => out.push(other),
+            }
+        }
+
+        let mut conjuncts = Vec::new();
+        flatten(pred, &mut conjuncts);
+
+        let mut key = Vec::with_capacity(col_names.len());
+        for wanted in col_names {
+            let mut found: Option<DataValue> = None;
+            for c in &conjuncts {
+                if let rook_ast::PredicateNode::Compare { left, op: rook_ast::ComparisonOp::Eq, right } = c {
+                    let (col_expr, const_val) = match (left.as_ref(), right.as_ref()) {
+                        (rook_ast::ExprNode::Column(_), rook_ast::ExprNode::Constant(cv))
+                        | (rook_ast::ExprNode::Compound(_), rook_ast::ExprNode::Constant(cv))
+                        | (rook_ast::ExprNode::Constant(cv), rook_ast::ExprNode::Column(_))
+                        | (rook_ast::ExprNode::Constant(cv), rook_ast::ExprNode::Compound(_)) => {
+                            (left.as_ref(), cv)
+                        }
+                        _ => continue,
+                    };
+                    let leaf = match col_expr {
+                        rook_ast::ExprNode::Column(name) => name.as_str(),
+                        rook_ast::ExprNode::Compound(parts) => parts.last()?.as_str(),
+                        _ => continue,
+                    };
+                    if leaf.eq_ignore_ascii_case(wanted) {
+                        found = Some(Self::ast_constant_to_data_value(const_val));
+                        break;
+                    }
+                }
+            }
+            key.push(found?);
+        }
+        Some(key)
+    }
+
     /// Priority for dynamic index selection: lower = better.
     fn scan_mode_priority(mode: &IndexScanMode) -> u8 {
         match mode {
             IndexScanMode::PointLookup(_) => 0,
+            IndexScanMode::CompositePointLookup(_) => 0,
             IndexScanMode::RangeLookup(..) => 1,
             IndexScanMode::FullScan => 2,
         }

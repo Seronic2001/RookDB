@@ -72,7 +72,7 @@ fn unique_with_index_rejects_duplicates() {
     // session — constraint flags live in memory and in sys_constraints rows.
     insert_single_tuple(&catalog, "uq", "users", &["1", "a@x.io"]).unwrap();
 
-    let index = create_index(&catalog, "uq", "users", "by_email", "email");
+    let index = create_index(&catalog, "uq", "users", "by_email", &[String::from("email")]);
     assert!(index.is_ok(), "index build should succeed: {:?}", index);
 
     assert!(
