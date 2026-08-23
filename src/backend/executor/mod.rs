@@ -6,6 +6,7 @@ pub mod create_index;
 pub mod compaction_api;
 pub mod delete;
 pub mod update;
+pub mod vacuum;
 
 pub use load_csv::{load_csv, insert_single_tuple};
 pub use seq_scan::show_tuples;
