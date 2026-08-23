@@ -379,6 +379,7 @@ fn test_projection_pruning_through_insert_single_column() {
             }],
             child: Box::new(make_table_scan("users", &["id", "name", "age", "email"])),
         })),
+        values_rows: Vec::new(),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.projection_pruning(plan);
@@ -414,6 +415,7 @@ fn test_projection_pruning_through_insert_all_columns() {
             ],
             child: Box::new(make_table_scan("users", &["id", "name", "age", "email"])),
         })),
+        values_rows: Vec::new(),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.projection_pruning(plan);
@@ -453,6 +455,7 @@ fn test_projection_pruning_through_insert_with_filter() {
                 child: Box::new(make_table_scan("users", &["id", "name", "age", "email"])),
             })),
         })),
+        values_rows: Vec::new(),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.projection_pruning(plan);
@@ -502,6 +505,7 @@ fn test_optimizer_pipeline_preserves_insert() {
                 limit: None,
             })),
         })),
+        values_rows: Vec::new(),
     });
 
     let optimizer = Optimizer::new();

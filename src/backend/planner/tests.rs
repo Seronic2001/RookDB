@@ -655,11 +655,11 @@ fn test_plan_insert_no_source() {
     };
 
     let result = plan_insert(&insert, &catalog, "test_db");
-    assert!(result.is_err(), "plan_insert should fail without source_select");
+    assert!(result.is_err(), "plan_insert should fail with neither VALUES nor SELECT");
     let err = result.unwrap_err();
     assert!(
-        err.message.contains("requires a source SELECT"),
-        "Expected error about source SELECT, got: {}",
+        err.message.contains("VALUES clause or a SELECT source"),
+        "Expected error about missing VALUES/SELECT source, got: {}",
         err.message
     );
 }
@@ -777,25 +777,33 @@ fn test_plan_query_insert_dispatch() {
 }
 
 #[test]
-fn test_plan_query_insert_values_error() {
+fn test_plan_query_insert_values_plans_successfully() {
     use super::plan_query;
 
     let catalog = make_test_catalog();
     let query = QueryPlan::Insert(InsertPlan {
         table: "users".to_string(),
         columns: vec![],
-        values: vec![vec![constant_int(1)]],
+        values: vec![vec![
+            constant_int(1),
+            ExprNode::Constant(ConstantValue::Text("a".to_string())),
+            constant_int(30),
+            ExprNode::Constant(ConstantValue::Text("x".to_string())),
+        ]],
         source_select: None,
     });
 
-    let result = plan_query(&query, &catalog, "test_db");
-    assert!(result.is_err(), "plan_query should fail for INSERT without SELECT");
-    let err = result.unwrap_err();
-    assert!(
-        err.message.contains("INSERT ... VALUES") || err.message.contains("CLI executor"),
-        "Expected error about INSERT VALUES being handled by CLI executor, got: {}",
-        err.message
-    );
+    // Retirement step 5: INSERT ... VALUES is planned like any other
+    // statement (rows carried as constants for the insert operator).
+    let logical = plan_query(&query, &catalog, "test_db")
+        .expect("INSERT ... VALUES must plan through the pipeline");
+    match &logical {
+        LogicalPlan::Insert(inp) => {
+            assert_eq!(inp.values_rows.len(), 1, "one constant row expected");
+            assert_eq!(inp.values_rows[0].len(), 4, "full table arity preserved");
+        }
+        other => panic!("Expected LogicalPlan::Insert, got {:?}", other.label()),
+    }
 }
 
 #[test]

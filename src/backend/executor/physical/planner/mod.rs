@@ -28,6 +28,7 @@ use super::operators::{
     SubqueryExecOperator,
     SubqueryType as PhysicalSubqueryType,
     InsertOperator,
+    ValuesOperator,
 };
 
 use crate::backend::catalog::types::Catalog;
@@ -310,7 +311,34 @@ impl PhysicalPlanner {
             }
 
             LogicalPlan::Insert(inp) => {
-                let child = self.plan_internal(&inp.child, cte_registry)?;
+                // VALUES form: the logical planner already expanded rows to
+                // full table arity; feed them via a constant-producing child.
+                let child: Box<dyn PhysicalOperator> = if !inp.values_rows.is_empty() {
+                    let table_schema = self.resolve_table_schema(&inp.table)?;
+                    let schema: Vec<ColumnInfo> = table_schema
+                        .iter()
+                        .map(|c| ColumnInfo {
+                            name: c.name.clone(),
+                            data_type: c.data_type.clone(),
+                            table: Some(inp.table.clone()),
+                        })
+                        .collect();
+                    let compiled = inp
+                        .values_rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|node| {
+                                    expr_from_ast(node, &[]).map_err(|e| e.to_string())
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    Box::new(ValuesOperator::new(compiled, schema))
+                } else {
+                    self.plan_internal(&inp.child, cte_registry)?
+                };
+
                 log::info!(
                     "[Volcano] Planning Insert into '{}' with child operator '{}'",
                     inp.table,

@@ -36,7 +36,7 @@ mod tests;
 pub use trait_::PhysicalOperator;
 pub use scans::{SeqScanOperator, IndexScanOperator, IndexScanMode};
 pub use joins::{NestedLoopJoinOperator, HashJoinOperator, JoinType};
-pub use insert::InsertOperator;
+pub use insert::{InsertOperator, ValuesOperator};
 
 pub use filter_project::{
     SingleRowOperator, NullOperator, CteScanOperator,

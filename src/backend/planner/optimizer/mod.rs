@@ -207,6 +207,7 @@ impl Optimizer {
                     table: inp.table,
                     columns: inp.columns,
                     child: Box::new(child),
+                    values_rows: Vec::new(),
                 })
             }
         }
@@ -316,6 +317,7 @@ impl Optimizer {
                     table: inp.table,
                     columns: inp.columns,
                     child: Box::new(child),
+                    values_rows: Vec::new(),
                 })
             }
         }
@@ -641,6 +643,7 @@ impl Optimizer {
                     table: inp.table,
                     columns: inp.columns,
                     child: Box::new(child),
+                    values_rows: Vec::new(),
                 })
             }
         }
@@ -1056,6 +1059,7 @@ impl Optimizer {
                     table: inp.table,
                     columns: inp.columns,
                     child: Box::new(child),
+                    values_rows: Vec::new(),
                 })
             }
         }

@@ -7,6 +7,7 @@
 //! The operator returns each inserted tuple so the engine can report the count.
 
 use super::super::tuple::{Tuple, ColumnInfo};
+use super::super::expr::Expr;
 use super::PhysicalOperator;
 
 /// Function signature for the insert operation.
@@ -107,6 +108,58 @@ impl PhysicalOperator for InsertOperator {
         "Insert"
     }
 }
+
+
+// ── ValuesOperator ────────────────────────────────────────────────────────────
+
+/// A constant-producing child for `INSERT ... VALUES`.
+///
+/// Holds one row of pre-compiled expressions per VALUES tuple; each `next()`
+/// evaluates the next row against an empty tuple (VALUES may not reference
+/// columns) and emits it with the target table's schema.
+pub struct ValuesOperator {
+    rows: Vec<Vec<Expr>>,
+    schema: Vec<ColumnInfo>,
+    pos: usize,
+}
+
+impl ValuesOperator {
+    pub fn new(rows: Vec<Vec<Expr>>, schema: Vec<ColumnInfo>) -> Self {
+        Self { rows, schema, pos: 0 }
+    }
+}
+
+impl PhysicalOperator for ValuesOperator {
+    fn next(&mut self) -> Result<Option<Tuple>, String> {
+        if self.pos >= self.rows.len() {
+            return Ok(None);
+        }
+        let empty = Tuple::new(Vec::new(), Vec::new());
+        let values = self.rows[self.pos]
+            .iter()
+            .map(|e| e.evaluate(&empty))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.pos += 1;
+        Ok(Some(Tuple::new(values, self.schema.clone())))
+    }
+
+    fn schema(&self) -> &[ColumnInfo] {
+        &self.schema
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        Err("reset() not supported".to_string())
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn name(&self) -> &'static str {
+        "Values"
+    }
+}
+
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -525,6 +578,7 @@ mod tests {
             table: "test_table".to_string(),
             columns: vec![],
             child: Box::new(child),
+            values_rows: Vec::new(),
         });
 
         let catalog = Catalog { databases: HashMap::new() };
@@ -554,6 +608,7 @@ mod tests {
             table: "target".to_string(),
             columns: vec![],
             child: Box::new(child),
+            values_rows: Vec::new(),
         });
 
         let catalog = Catalog { databases: HashMap::new() };
@@ -586,6 +641,7 @@ mod tests {
             table: "users".to_string(),
             columns: vec!["name".to_string()],
             child: Box::new(project),
+            values_rows: Vec::new(),
         });
 
         let catalog = Catalog { databases: HashMap::new() };
@@ -612,6 +668,7 @@ mod tests {
             table: "test_table".to_string(),
             columns: vec![],
             child: Box::new(child),
+            values_rows: Vec::new(),
         });
 
         let catalog = Catalog { databases: HashMap::new() };

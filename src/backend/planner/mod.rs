@@ -59,23 +59,130 @@ fn load_table_statistics(db_name: &str, catalog: &Catalog) -> std::collections::
     stats
 }
 
-/// Plan an INSERT INTO ... SELECT into a LogicalPlan.
-fn plan_insert(
+/// Plan an INSERT statement into a LogicalPlan.
+///
+/// Both forms route through the same pipeline:
+/// - `INSERT INTO t SELECT …` — the SELECT becomes the child plan.
+/// - `INSERT INTO t VALUES …` — the literal rows are expanded to full table
+///   arity here (explicit-column mapping, column DEFAULTs, NULLs) and
+///   carried as `values_rows`; the physical planner feeds them to the insert
+///   operator via a constant-producing child.
+pub fn plan_insert(
     insert: &InsertPlan,
     catalog: &Catalog,
     db_name: &str,
 ) -> Result<LogicalPlan, PlanError> {
-    let source_select = insert.source_select.as_ref().ok_or_else(|| PlanError {
-        message: "plan_insert requires a source SELECT (INSERT INTO ... SELECT)".to_string(),
+    let dummy_child = || {
+        Box::new(LogicalPlan::TableScan(LogicalTableScan {
+            table: "__singlerow__".to_string(),
+            alias: None,
+            schema: ColumnSchema::empty(),
+            system_table_name: Some("__singlerow__".to_string()),
+        }))
+    };
+
+    if let Some(source_select) = &insert.source_select {
+        let child_plan = plan_select(source_select, catalog, db_name)?;
+        return Ok(LogicalPlan::Insert(LogicalInsert {
+            table: insert.table.clone(),
+            columns: insert.columns.clone(),
+            child: Box::new(child_plan),
+            values_rows: Vec::new(),
+        }));
+    }
+
+    // ── INSERT ... VALUES ────────────────────────────────────────────────
+    if insert.values.is_empty() {
+        return Err(PlanError {
+            message: "INSERT requires a VALUES clause or a SELECT source".to_string(),
+        });
+    }
+
+    let db = catalog.databases.get(db_name).ok_or_else(|| PlanError {
+        message: format!("Database '{}' not found", db_name),
+    })?;
+    let table = db.tables.get(&insert.table).ok_or_else(|| PlanError {
+        message: format!("Table '{}' not found", insert.table),
     })?;
 
-    let child_plan = plan_select(source_select, catalog, db_name)?;
+    // Expand every row to full table arity:
+    //   explicit column list → position mapping
+    //   missing column       → declared DEFAULT, else NULL
+    let mut values_rows: Vec<Vec<ExprNode>> = Vec::with_capacity(insert.values.len());
+    for row in &insert.values {
+        if !insert.columns.is_empty() {
+            let mut full: Vec<Option<&ExprNode>> = vec![None; table.columns.len()];
+            for (pos, col_name) in insert.columns.iter().enumerate() {
+                let expr = row.get(pos).ok_or_else(|| PlanError {
+                    message: format!(
+                        "INSERT row has {} value(s) but {} column(s) listed",
+                        row.len(),
+                        insert.columns.len()
+                    ),
+                })?;
+                let target = table
+                    .columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(col_name))
+                    .ok_or_else(|| PlanError {
+                        message: format!(
+                            "Column '{}' does not exist in table '{}'",
+                            col_name, insert.table
+                        ),
+                    })?;
+                full[target] = Some(expr);
+            }
+            let expanded = table
+                .columns
+                .iter()
+                .zip(full.iter())
+                .map(|(col, slot)| match slot {
+                    Some(e) => (*e).clone(),
+                    None => col
+                        .constraints
+                        .default
+                        .as_ref()
+                        .map(|dv| ExprNode::Constant(default_to_constant(dv)))
+                        .unwrap_or(ExprNode::Constant(ConstantValue::Null)),
+                })
+                .collect();
+            values_rows.push(expanded);
+        } else {
+            if row.len() != table.columns.len() {
+                return Err(PlanError {
+                    message: format!(
+                        "INSERT row has {} value(s) but table '{}' has {} column(s)",
+                        row.len(),
+                        insert.table,
+                        table.columns.len()
+                    ),
+                });
+            }
+            values_rows.push(row.clone());
+        }
+    }
 
     Ok(LogicalPlan::Insert(LogicalInsert {
         table: insert.table.clone(),
         columns: insert.columns.clone(),
-        child: Box::new(child_plan),
+        child: dummy_child(),
+        values_rows,
     }))
+}
+
+/// Render a stored DEFAULT `DataValue` back into an expression constant.
+fn default_to_constant(dv: &crate::types::DataValue) -> ConstantValue {
+    use crate::types::DataValue;
+    match dv {
+        DataValue::SmallInt(v) => ConstantValue::Int(*v as i64),
+        DataValue::Int(v) => ConstantValue::Int(*v as i64),
+        DataValue::BigInt(v) => ConstantValue::Int(*v),
+        DataValue::Real(f) => ConstantValue::Float(f.0 as f64),
+        DataValue::DoublePrecision(f) => ConstantValue::Float(f.0),
+        DataValue::Bool(b) => ConstantValue::Boolean(*b),
+        DataValue::Char(s) | DataValue::Varchar(s) => ConstantValue::Text(s.clone()),
+        other => ConstantValue::Text(format!("{}", other)),
+    }
 }
 
 /// Plan a `QueryPlan` into a `LogicalPlan` using the given catalog.
@@ -112,15 +219,7 @@ pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> Result
             };
             Ok(optimizer.optimize(plan))
         }
-        QueryPlan::Insert(ins) => {
-            if ins.source_select.is_some() {
-                plan_insert(ins, catalog, db_name)
-            } else {
-                Err(PlanError {
-                    message: "INSERT ... VALUES must be handled by the CLI executor, not the logical planner".to_string(),
-                })
-            }
-        }
+        QueryPlan::Insert(ins) => plan_insert(ins, catalog, db_name),
         QueryPlan::CreateTable(_) | QueryPlan::DropTable(_) | QueryPlan::DropDatabase(_)
         | QueryPlan::AlterTable(_) | QueryPlan::CreateView(_) | QueryPlan::DropView(_)
         | QueryPlan::CreateIndex(_) | QueryPlan::CreateDatabase(_)
