@@ -276,6 +276,7 @@ fn update_log_details(
 /// - `returning = true`       → populate `UpdateResult::returning_rows` with
 ///                              the rows **after** update.
 ///
+#[deprecated(note = "legacy DNF path - slated for removal (ANALYSIS.md retirement step 4); use row_select::select_matching_pointers + update_by_pointers")]
 pub fn update_tuples(
     catalog:           &Catalog,
     db_name:           &str,
@@ -319,6 +320,7 @@ pub fn update_tuples(
             let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
             let decoded    = decode_tuple(&tuple_data, columns);
 
+            #[allow(deprecated)]
             if !matches_condition_groups_pub(&decoded, condition_groups) {
                 continue;
             }

@@ -1,5 +1,5 @@
 pub mod load_csv;
-pub mod selection;
+pub mod row_select;
 pub mod seq_scan;
 pub mod physical;
 pub mod create_index;

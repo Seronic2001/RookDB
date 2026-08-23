@@ -9,7 +9,6 @@ pub mod instrumentation;
 pub mod layout;
 pub mod log;
 pub mod page;
-pub mod query;
 pub mod page_api;
 pub mod statistics;
 pub mod table;

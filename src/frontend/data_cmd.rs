@@ -5,17 +5,8 @@ use std::path::{Path, PathBuf};
 use storage_manager::backend::disk::read_header_page;
 use storage_manager::catalog::Column;
 use storage_manager::catalog::load_catalog;
-use storage_manager::disk::read_page;
 use storage_manager::executor::parse_set_clause;
-use storage_manager::executor::parse_where_clause_with_schema;
-use storage_manager::executor::{
-    compaction_table, delete_tuples, insert_single_tuple, load_csv,
-    selection::{SelectionExecutor, filter_tuples},
-    update_tuples,
-};
-use storage_manager::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
-use storage_manager::query::build_predicate_from_sql;
-use storage_manager::table::page_count;
+use storage_manager::executor::{compaction_table, insert_single_tuple, load_csv};
 use storage_manager::types::deserialize_nullable_row;
 
 /// Gracefully load CSV file with comprehensive validation and error handling
@@ -217,111 +208,61 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
         return Ok(());
     }
 
-    let path = format!("database/base/{}/{}.dat", db, table);
-
-    if !Path::new(&path).exists() {
-        log::warn!("Table file not found: '{}'", path);
-        println!("Make sure the table exists. Try creating the table first.");
-        return Ok(());
-    }
-
-    let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            log::error!("Failed to open table file: {}", e);
-            return Ok(());
-        }
-    };
-
-    let catalog = load_catalog();
-
-    // Step A — read SQL from user
-    print!("Enter SQL (single SELECT with WHERE): ");
+    // Optional WHERE clause — empty means show every row.
+    println!();
+    println!("Optional WHERE clause (=, !=, <, <=, >, >=, AND/OR, parentheses).");
+    println!("Leave empty to show all rows.");
+    print!("WHERE clause: ");
     io::stdout().flush()?;
-    let mut sql = String::new();
-    io::stdin().read_line(&mut sql)?;
+    let mut where_input = String::new();
+    io::stdin().read_line(&mut where_input)?;
 
-    // Step B — build predicate from SQL
-    let predicate = build_predicate_from_sql(sql.trim())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // Selection runs on the Volcano engine via a wildcard scan.
+    let catalog = load_catalog();
+    let selection =
+        storage_manager::backend::executor::row_select::parse_where_text(&where_input)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
+        &catalog, &db, table, selection,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    // Get the table schema (borrowed from catalog)
-    let table_schema = catalog
+    // Fetch and display each matching row through the heap manager.
+    let heap_path = format!("database/base/{}/{}.dat", db, table);
+    let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(
+        &heap_path,
+    ))
+    .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+
+    let columns: Vec<Column> = catalog
         .databases
         .get(&db)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Database not found"))?
-        .tables
-        .get(table)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Table not found"))?;
+        .and_then(|d| d.tables.get(table))
+        .map(|t| t.columns.clone())
+        .unwrap_or_default();
+    let schema_types: Vec<storage_manager::types::DataType> =
+        columns.iter().map(|c| c.data_type.clone()).collect();
 
-    // Step C — create SelectionExecutor
-    // table_schema is &Table; SelectionExecutor::new takes owned Table, so we clone.
-    let executor = SelectionExecutor::new(predicate, table_schema.clone())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    // Step D — read all raw tuple bytes from every data page
-    let total_pages = page_count(&mut file)?;
-    let columns = &table_schema.columns;
-    let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
-
-    println!("\n=== Tuples in '{}.{}' ===", db, table);
-    println!("Total pages: {}", total_pages);
-
-    let header: Vec<String> = columns
-        .iter()
-        .map(|c| format!("{} ({})", c.name, c.data_type))
-        .collect();
-    println!("{}", header.join(" | "));
-
-    let mut raw_tuples: Vec<Vec<u8>> = Vec::new();
-
-    // Skip page 0 (table header), iterate data pages
-    for page_num in 1..total_pages {
-        let mut page = Page::new();
-        read_page(&mut file, &mut page, page_num)?;
-
-        let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
-
-        for i in 0..num_items {
-            let base = (PAGE_HEADER_SIZE + i * ITEM_ID_SIZE) as usize;
-            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-            let length =
-                u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
-
-            let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-
-            // Skip deleted tuples
-            if (flags & storage_manager::page::SLOT_FLAG_DELETED) != 0 {
-                continue;
-            }
-            let tuple_bytes = page.data[offset as usize..(offset + length) as usize].to_vec();
-            raw_tuples.push(tuple_bytes);
-        }
-    }
-
-    // Step E — apply predicate filtering
-    let matching = filter_tuples(&executor, &raw_tuples)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-    // Step F — print only the filtered tuples
-    for (i, tuple_bytes) in matching.iter().enumerate() {
+    println!("\n=== Matching tuples in '{}.{}' ===", db, table);
+    for (i, (page_id, slot_id)) in pointers.iter().enumerate() {
         print!("Tuple {}: ", i + 1);
-        match deserialize_nullable_row(&schema_types, tuple_bytes) {
-            Ok(values) => {
-                for (col, val_opt) in columns.iter().zip(values.iter()) {
-                    match val_opt {
-                        Some(val) => print!("{}={} ", col.name, val),
-                        None => print!("{}=NULL ", col.name),
+        match heap.get_tuple(*page_id, *slot_id) {
+            Ok(raw) => match deserialize_nullable_row(&schema_types, &raw) {
+                Ok(values) => {
+                    for (col, val_opt) in columns.iter().zip(values.iter()) {
+                        match val_opt {
+                            Some(val) => print!("{}={} ", col.name, val),
+                            None => print!("{}=NULL ", col.name),
+                        }
                     }
                 }
-            }
-            Err(e) => print!("<decode-error: {}> ", e),
+                Err(e) => print!("<decode-error: {}> ", e),
+            },
+            Err(e) => print!("<read-error at ({},{}): {}> ", page_id, slot_id, e),
         }
         println!();
     }
-
-    println!("\n=== End of tuples ===\n");
+    println!("\n{} row(s) matched.\n", pointers.len());
     Ok(())
 }
 
@@ -352,56 +293,46 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     io::stdin().read_line(&mut table)?;
     let table = table.trim().to_string();
 
-    // -- resolve column schema for type-aware WHERE parsing --
     let catalog = load_catalog();
-    let columns: Vec<Column> = catalog
+    if !catalog
         .databases
         .get(&db)
-        .and_then(|d| d.tables.get(table.as_str()))
-        .map(|t| t.columns.clone())
-        .unwrap_or_default();
+        .map(|d| d.tables.contains_key(table.as_str()))
+        .unwrap_or(false)
+    {
+        println!("Table '{}' does not exist in '{}'.", table, db);
+        return Ok(());
+    }
 
-    // -- single-line WHERE clause --
+    // -- WHERE clause (parsed with the real SQL grammar) --
     println!();
-    println!("Supported operators : =  !=  <  <=  >  >=");
-    println!("Logical connectors  : AND  OR");
-    println!("Grouping            : use parentheses ( )");
+    println!("Supported operators : =  !=  <  <=  >  >=  IN  BETWEEN  LIKE");
+    println!("Logical connectors  : AND  OR  NOT (parentheses supported)");
     println!("Leave empty         : delete ALL rows");
     println!();
     print!("WHERE clause: ");
     io::stdout().flush()?;
     let mut where_input = String::new();
     io::stdin().read_line(&mut where_input)?;
-    let where_input = where_input.trim();
 
-    let condition_groups = match parse_where_clause_with_schema(where_input, &columns) {
-        Some(groups) => {
-            println!("Parsed into {} AND-group(s) connected by OR:", groups.len());
-            for (i, group) in groups.iter().enumerate() {
-                let desc: Vec<String> = group
-                    .iter()
-                    .map(|c| format!("{} {:?} {:?}", c.column, c.operator, c.value))
-                    .collect();
-                println!("  Group {}: {}", i + 1, desc.join(" AND "));
-            }
-            groups
+    let selection =
+        storage_manager::backend::executor::row_select::parse_where_text(&where_input)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+    if selection.is_none() {
+        println!(
+            "No WHERE clause \u{2013} this will delete ALL rows in '{}'.",
+            table
+        );
+        print!("Are you sure? (yes/no): ");
+        io::stdout().flush()?;
+        let mut confirm = String::new();
+        io::stdin().read_line(&mut confirm)?;
+        if !confirm.trim().eq_ignore_ascii_case("yes") {
+            println!("Aborted.");
+            return Ok(());
         }
-        None => {
-            println!(
-                "No WHERE clause – this will delete ALL rows in '{}'.",
-                table
-            );
-            print!("Are you sure? (yes/no): ");
-            io::stdout().flush()?;
-            let mut confirm = String::new();
-            io::stdin().read_line(&mut confirm)?;
-            if !confirm.trim().eq_ignore_ascii_case("yes") {
-                println!("Aborted.");
-                return Ok(());
-            }
-            vec![]
-        }
-    };
+    }
 
     // -- RETURNING --
     print!("\nPrint deleted rows? (y/n): ");
@@ -410,36 +341,45 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     io::stdin().read_line(&mut ret_input)?;
     let returning = ret_input.trim().eq_ignore_ascii_case("y");
 
-    // -- execute --
-    let path = format!("database/base/{}/{}.dat", db, table);
-    let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("Could not open table '{}': {}", table, e);
-            return Ok(());
-        }
-    };
+    // -- select matching rows on the Volcano engine, then mutate --
+    let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
+        &catalog, &db, &table, selection,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    match delete_tuples(
-        &catalog,
-        &db,
-        &table,
-        &mut file,
-        &condition_groups,
-        returning,
-    ) {
+    if returning && !pointers.is_empty() {
+        // Snapshot the rows before deletion so they can be printed.
+        let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(
+            format!("database/base/{}/{}.dat", db, table),
+        ))
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+        let columns: Vec<Column> = catalog.databases[&db].tables[&table].columns.clone();
+        let schema_types: Vec<storage_manager::types::DataType> =
+            columns.iter().map(|c| c.data_type.clone()).collect();
+        println!("\n=== Deleted rows ===");
+        for &(page_id, slot_id) in &pointers {
+            if let Ok(raw) = heap.get_tuple(page_id, slot_id) {
+                if let Ok(values) =
+                    storage_manager::types::deserialize_nullable_row(&schema_types, &raw)
+                {
+                    let cells: Vec<String> = columns
+                        .iter()
+                        .zip(values.iter())
+                        .map(|(c, v)| match v {
+                            Some(val) => format!("{}={}", c.name, val),
+                            None => format!("{}=NULL", c.name),
+                        })
+                        .collect();
+                    println!("  {}", cells.join("  |  "));
+                }
+            }
+        }
+        println!("===================");
+    }
+
+    match storage_manager::executor::delete_by_pointers(&catalog, &db, &table, &pointers) {
         Ok(result) => {
             println!("\nDeleted {} row(s).", result.deleted_count);
-
-            if returning && !result.returning_rows.is_empty() {
-                println!("\n=== Deleted rows ===");
-                for row in &result.returning_rows {
-                    let cols: Vec<String> =
-                        row.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-                    println!("  {}", cols.join("  |  "));
-                }
-                println!("===================");
-            }
         }
         Err(e) => println!("Delete failed: {}", e),
     }
@@ -471,14 +411,16 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     io::stdin().read_line(&mut table)?;
     let table = table.trim().to_string();
 
-    // -- resolve column schema for type-aware WHERE parsing --
     let catalog = load_catalog();
-    let columns: Vec<Column> = catalog
+    if !catalog
         .databases
         .get(&db)
-        .and_then(|d| d.tables.get(table.as_str()))
-        .map(|t| t.columns.clone())
-        .unwrap_or_default();
+        .map(|d| d.tables.contains_key(table.as_str()))
+        .unwrap_or(false)
+    {
+        println!("Table '{}' does not exist in '{}'.", table, db);
+        return Ok(());
+    }
 
     // -- SET clause --
     println!();
@@ -508,26 +450,31 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     io::stdout().flush()?;
     let mut where_input = String::new();
     io::stdin().read_line(&mut where_input)?;
-    let where_input = where_input.trim();
 
-    let condition_groups = match parse_where_clause_with_schema(where_input, &columns) {
-        Some(groups) => groups,
-        None => {
-            println!(
-                "No WHERE clause – this will update ALL rows in '{}'.",
-                table
-            );
-            print!("Are you sure? (yes/no): ");
-            io::stdout().flush()?;
-            let mut confirm = String::new();
-            io::stdin().read_line(&mut confirm)?;
-            if !confirm.trim().eq_ignore_ascii_case("yes") {
-                println!("Aborted.");
-                return Ok(());
-            }
-            vec![]
+    let selection =
+        storage_manager::backend::executor::row_select::parse_where_text(&where_input)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+    if selection.is_none() {
+        println!(
+            "No WHERE clause \u{2013} this will update ALL rows in '{}'.",
+            table
+        );
+        print!("Are you sure? (yes/no): ");
+        io::stdout().flush()?;
+        let mut confirm = String::new();
+        io::stdin().read_line(&mut confirm)?;
+        if !confirm.trim().eq_ignore_ascii_case("yes") {
+            println!("Aborted.");
+            return Ok(());
         }
-    };
+    }
+
+    // -- select matching rows on the Volcano engine, then mutate --
+    let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
+        &catalog, &db, &table, selection,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     // -- RETURNING --
     print!("\nPrint updated rows? (y/n): ");
@@ -536,34 +483,46 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     io::stdin().read_line(&mut ret_input)?;
     let returning = ret_input.trim().eq_ignore_ascii_case("y");
 
-    // -- execute --
-    let path = format!("database/base/{}/{}.dat", db, table);
-    let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("Could not open table '{}': {}", table, e);
-            return Ok(());
-        }
-    };
-
-    match update_tuples(
+    match storage_manager::executor::update_by_pointers(
         &catalog,
         &db,
         &table,
-        &mut file,
+        &pointers,
         &assignments,
-        &condition_groups,
-        returning,
     ) {
         Ok(result) => {
             println!("\nUpdated {} row(s).", result.updated_count);
 
-            if returning && !result.returning_rows.is_empty() {
+            if returning && !pointers.is_empty() {
+                // Show post-update contents of exactly the touched rows.
+                let mut heap =
+                    storage_manager::heap::HeapManager::open(std::path::PathBuf::from(format!(
+                        "database/base/{}/{}.dat",
+                        db, table
+                    )))
+                    .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+                let columns: Vec<Column> =
+                    catalog.databases[&db].tables[&table].columns.clone();
+                let schema_types: Vec<storage_manager::types::DataType> =
+                    columns.iter().map(|c| c.data_type.clone()).collect();
                 println!("\n=== Updated rows (after) ===");
-                for row in &result.returning_rows {
-                    let cols: Vec<String> =
-                        row.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-                    println!("  {}", cols.join("  |  "));
+                for &(page_id, slot_id) in &pointers {
+                    if let Ok(raw) = heap.get_tuple(page_id, slot_id) {
+                        if let Ok(values) = storage_manager::types::deserialize_nullable_row(
+                            &schema_types,
+                            &raw,
+                        ) {
+                            let cells: Vec<String> = columns
+                                .iter()
+                                .zip(values.iter())
+                                .map(|(c, v)| match v {
+                                    Some(val) => format!("{}={}", c.name, val),
+                                    None => format!("{}=NULL", c.name),
+                                })
+                                .collect();
+                            println!("  {}", cells.join("  |  "));
+                        }
+                    }
                 }
                 println!("========================");
             }
@@ -574,7 +533,6 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     Ok(())
 }
 
-/// Manually triggers compaction on a table, printing BEFORE/AFTER page stats.
 pub fn compact_table_cmd(current_db: &Option<String>) -> io::Result<()> {
     let db = match current_db {
         Some(db) => db.clone(),

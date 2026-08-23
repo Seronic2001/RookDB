@@ -222,6 +222,7 @@ fn like_match_inner(t: &[char], p: &[char]) -> bool {
 ///
 /// Empty `condition_groups` → matches everything (DELETE all).
 /// Public so `update.rs` can reuse the same logic.
+#[deprecated(note = "legacy DNF path - slated for removal (ANALYSIS.md retirement step 4); use row_select::select_matching_pointers + delete_by_pointers")]
 pub fn matches_condition_groups_pub(
     decoded: &[(String, ColumnValue)],
     condition_groups: &[Vec<Condition>],
@@ -372,6 +373,7 @@ fn compact_page(page: &mut Page, num_items: usize) {
 ///   WHERE a=1 AND b=2           → `[[{a=1},{b=2}]]`
 ///   WHERE a=1 OR b=2            → `[[{a=1}],[{b=2}]]`
 ///   WHERE a=1 AND b=2 OR c=3   → `[[{a=1},{b=2}],[{c=3}]]`
+#[deprecated(note = "legacy DNF path - slated for removal (ANALYSIS.md retirement step 4); use row_select::select_matching_pointers + delete_by_pointers")]
 pub fn delete_tuples(
     catalog: &Catalog,
     db_name: &str,
@@ -759,6 +761,7 @@ fn parse_between_condition(s: &str, columns: &[Column]) -> Option<(Condition, Co
 ///   `col >= val` etc.     → standard operators
 ///
 /// Single quotes around text values are stripped automatically.
+#[deprecated(note = "legacy DNF path - slated for removal (ANALYSIS.md retirement step 4); use row_select::select_matching_pointers + delete_by_pointers")]
 pub fn parse_condition(input: &str, columns: &[Column]) -> Option<Condition> {
     let input = input.trim();
     let upper = input.to_uppercase();
@@ -1072,6 +1075,8 @@ fn to_dnf(expr: BoolExpr) -> Vec<Vec<Condition>> {
 /// Schema-aware WHERE parser.  Values are typed according to the column's
 /// declared type in `columns`.  Pass `&[]` to fall back to the try-parse-as-i32
 /// heuristic (used by tests and any caller without schema info).
+#[deprecated(note = "legacy DNF path - slated for removal (ANALYSIS.md retirement step 4); use row_select::select_matching_pointers + delete_by_pointers")]
+#[allow(deprecated)] // internally dispatches to parse_condition
 pub fn parse_where_clause_with_schema(
     input: &str,
     columns: &[Column],
@@ -1090,7 +1095,10 @@ pub fn parse_where_clause_with_schema(
 
 /// Convenience wrapper — schema-less, falls back to try-parse heuristic.
 /// Kept for backward compatibility with tests and callers that don't supply schema.
+#[deprecated(note = "legacy DNF path - slated for removal (ANALYSIS.md retirement step 4); use row_select::select_matching_pointers + delete_by_pointers")]
+#[allow(deprecated)] // thin wrapper over parse_where_clause_with_schema
 pub fn parse_where_clause(input: &str) -> Option<Vec<Vec<Condition>>> {
+    #[allow(deprecated)]
     parse_where_clause_with_schema(input, &[])
 }
 
