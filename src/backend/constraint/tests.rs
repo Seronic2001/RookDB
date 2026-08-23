@@ -62,34 +62,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_decode_values_for_constraint_with_int() {
-        let columns = vec![
-            Column {
-                name: "age".to_string(),
-                data_type: DataType::Int,
-                nullable: true,
-                constraints: Constraints::default(),
-            },
-            Column {
-                name: "name".to_string(),
-                data_type: DataType::Varchar(100),
-                nullable: true,
-                constraints: Constraints::default(),
-            },
-        ];
-        let decoded = validation::decode_values_for_constraint(&columns, &["25", "Alice"]);
-
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].0, "age");
-        match &decoded[0].1 {
-            crate::backend::executor::delete::ColumnValue::Int(n) => assert_eq!(*n, 25),
-            _ => panic!("Expected Int(25)"),
-        }
-        assert_eq!(decoded[1].0, "name");
-        match &decoded[1].1 {
-            crate::backend::executor::delete::ColumnValue::Text(s) => assert_eq!(s, "Alice"),
-            _ => panic!("Expected Text(Alice)"),
-        }
-    }
 }

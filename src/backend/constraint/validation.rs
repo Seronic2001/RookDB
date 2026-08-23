@@ -4,7 +4,7 @@
 //! and CHECK constraints, called by the public API functions.
 
 use crate::catalog::types::Column;
-use crate::types::DataType;
+use crate::types::{DataValue, DataType};
 
 use super::loaders;
 use super::value_lookup;
@@ -286,9 +286,14 @@ pub(crate) fn check_foreign_key_insert(
 
 /// Check CHECK constraints loaded from `sys_constraints`.
 ///
-/// Each CHECK constraint's expression (stored in the `columns` field of the
-/// constraint row) is parsed as a WHERE-style predicate and evaluated against
-/// the new row values using the existing DNF condition matching infrastructure.
+/// Each CHECK expression (stored in the `columns` field of the constraint
+/// row) is parsed with the real SQL grammar and evaluated against the new
+/// row using the Volcano expression evaluator — full expression support
+/// (arithmetic, AND/OR/NOT, IN, BETWEEN, LIKE, functions), replacing the
+/// retired legacy DNF matcher.
+///
+/// Semantics follow SQL: the row passes when the predicate is TRUE;
+/// NULL results are UNKNOWN and therefore pass.
 pub(crate) fn check_constraints(
     db_name: &str,
     table_name: &str,
@@ -311,68 +316,88 @@ pub(crate) fn check_constraints(
         return Ok(());
     }
 
-    // Convert the raw string values to a decoded tuple format for
-    // `matches_condition_groups_pub`
-    let decoded = decode_values_for_constraint(columns, values);
+    // Build the candidate row once: a physical Tuple over the table's
+    // columns, with values type-parsed from their raw string form.
+    let tuple = build_check_tuple(columns, values);
 
-    // Evaluate each CHECK constraint
     for expr in &check_exprs {
-        // Parse the CHECK expression as a WHERE clause
-        let condition_groups = crate::backend::executor::delete::parse_where_clause_with_schema(expr, columns)
-            .ok_or_else(|| {
-                format!("Failed to parse CHECK constraint expression: '{}'", expr)
-            })?;
-
-        // Evaluate against the decoded row
-        if !crate::backend::executor::delete::matches_condition_groups_pub(&decoded, &condition_groups) {
-            return Err(RookError::constraint(
-                ConstraintKind::Check,
-                table_name,
-                None,
-                format!("CHECK constraint violated: '{}'", expr),
-            ));
+        let pred = compile_check_predicate(expr, columns)?;
+        match crate::backend::executor::physical::expr::evaluate_predicate(&pred, &tuple) {
+            Ok(Some(true)) => {}                       // satisfied
+            Ok(Some(false)) => {
+                return Err(RookError::constraint(
+                    ConstraintKind::Check,
+                    table_name,
+                    None,
+                    format!("CHECK constraint violated: '{}'", expr),
+                ));
+            }
+            Ok(None) => {}                             // UNKNOWN (NULL) → pass, per SQL
+            Err(e) => {
+                return Err(RookError::Internal(format!(
+                    "Failed to evaluate CHECK constraint '{}': {}", expr, e
+                )));
+            }
         }
     }
 
     Ok(())
 }
 
-/// Convert raw string values to the decoded tuple format used by
-/// `matches_condition_groups_pub`.
-///
-/// Each value is mapped to a `ColumnValue::Int(i32)` if it parses as an
-/// integer, or `ColumnValue::Text(String)` otherwise.  This mirrors the
-/// `decode_tuple` logic in `delete.rs`.
-pub(crate) fn decode_values_for_constraint(
+/// Parse a CHECK expression with the real SQL grammar by embedding it in a
+/// synthetic SELECT, then compile it into a physical `Predicate`.
+fn compile_check_predicate(
+    expr: &str,
     columns: &[Column],
-    values: &[&str],
-) -> Vec<(String, crate::backend::executor::delete::ColumnValue)> {
-    let mut result = Vec::new();
+) -> Result<crate::backend::executor::physical::expr::Predicate, RookError> {
+    use crate::backend::executor::physical::expr::predicate_from_ast;
 
-    for (i, col) in columns.iter().enumerate() {
-        let raw = values.get(i).unwrap_or(&"");
+    let sql = format!("SELECT * FROM __check__ WHERE {}", expr);
+    let select = rook_parser::parse_sql(&sql)
+        .map_err(|e| RookError::Internal(format!(
+            "Failed to parse CHECK constraint expression '{}': {}", expr, e
+        )))?;
+    let selection = match select {
+        rook_ast::QueryPlan::Select(select) => select.selection,
+        _ => None,
+    };
+    let node = selection.ok_or_else(|| RookError::Internal(format!(
+        "CHECK constraint expression '{}' did not yield a predicate", expr
+    )))?;
+
+    let column_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+    predicate_from_ast(&node, &column_names)
+        .map_err(|e| RookError::Internal(format!(
+            "Failed to compile CHECK constraint '{}': {}", expr, e
+        )))
+}
+
+/// Build a physical Tuple from raw insert/update strings, typed per column.
+///
+/// NULL (empty or literal "null", case-insensitive) becomes `None`, which
+/// makes comparisons evaluate to UNKNOWN under three-valued logic.
+fn build_check_tuple(columns: &[Column], values: &[&str]) -> crate::backend::executor::physical::tuple::Tuple {
+    use crate::backend::executor::physical::tuple::{ColumnInfo as PhysColInfo, Tuple};
+
+    let mut vals: Vec<Option<crate::types::DataValue>> = Vec::with_capacity(columns.len());
+    let mut info: Vec<PhysColInfo> = Vec::with_capacity(columns.len());
+
+    for (col, raw) in columns.iter().zip(values.iter()) {
         let trimmed = raw.trim();
-
-        // Check for NULL
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") || trimmed.eq_ignore_ascii_case("NULL") {
-            result.push((col.name.clone(), crate::backend::executor::delete::ColumnValue::Text("NULL".to_string())));
-            continue;
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+            vals.push(None);
+        } else {
+            vals.push(DataValue::parse_and_encode(&col.data_type, trimmed).ok().and_then(|bytes| {
+                DataValue::from_bytes(&col.data_type, &bytes).ok()
+            }));
         }
-
-        // Try to preserve the original type for better comparison
-        let value = match &col.data_type {
-            DataType::SmallInt | DataType::Int | DataType::BigInt => {
-                if let Ok(n) = trimmed.parse::<i32>() {
-                    crate::backend::executor::delete::ColumnValue::Int(n)
-                } else {
-                    crate::backend::executor::delete::ColumnValue::Text(trimmed.to_string())
-                }
-            }
-            _ => crate::backend::executor::delete::ColumnValue::Text(trimmed.to_string()),
-        };
-
-        result.push((col.name.clone(), value));
+        info.push(PhysColInfo {
+            name: col.name.clone(),
+            data_type: col.data_type.clone(),
+            table: None,
+        });
     }
 
-    result
+    Tuple::new(vals, info)
 }
+
