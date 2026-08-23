@@ -16,6 +16,26 @@ use storage_manager::catalog::{
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
 
+
+/// Parse a WHERE string with the real SQL grammar, select matching rows on
+/// the Volcano engine, then delete them by pointer.
+fn exec_delete(
+    catalog: &Catalog,
+    db: &str,
+    table: &str,
+    where_text: &str,
+) -> storage_manager::backend::executor::DeleteResult {
+    let selection =
+        storage_manager::backend::executor::row_select::parse_where_text(where_text)
+            .expect("parse WHERE");
+    let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
+        catalog, db, table, selection,
+    )
+    .expect("select pointers");
+    storage_manager::executor::delete_by_pointers(catalog, db, table, &pointers)
+        .expect("delete_by_pointers")
+}
+
 fn col(name: &str, ty: DataType) -> Column {
     Column {
         name: name.to_string(),
@@ -75,29 +95,13 @@ fn vacuum_reclaims_dead_tuples_and_preserves_live_rows() {
             .unwrap();
     }
 
-    // Delete even ids → 20 dead tuples.
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("database/base/vdb/events.dat")
-        .unwrap();
-    // Delete ids 0..10 and 20..30 (the legacy DNF parser handles ranges,
-    // not modulo).
-    let groups = storage_manager::backend::executor::delete::parse_where_clause_with_schema(
-        "id >= 0 AND id < 10 OR id >= 20 AND id < 30",
-        &catalog.databases["vdb"].tables["events"].columns,
-    )
-    .expect("parse WHERE");
-    let result = storage_manager::backend::executor::delete::delete_tuples(
+    // Delete ids 0..10 and 20..30.
+    let result = exec_delete(
         &catalog,
         "vdb",
         "events",
-        &mut file,
-        &groups,
-        false,
-    )
-    .unwrap();
-    drop(file);
+        "id >= 0 AND id < 10 OR id >= 20 AND id < 30",
+    );
     assert_eq!(result.deleted_count, 20);
 
     assert!(dead_count("vdb", "events") >= 20, "dead counter must track deletes");
@@ -151,21 +155,7 @@ fn vacuum_rebuilds_indexes_for_renumbered_slots() {
     assert_eq!(n, 30);
 
     // Delete a contiguous middle chunk so surviving slots renumber.
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("database/base/idb/events.dat")
-        .unwrap();
-    let groups = storage_manager::backend::executor::delete::parse_where_clause_with_schema(
-        "id >= 10 AND id < 20",
-        &catalog.databases["idb"].tables["events"].columns,
-    )
-    .unwrap();
-    let result = storage_manager::backend::executor::delete::delete_tuples(
-        &catalog, "idb", "events", &mut file, &groups, false,
-    )
-    .unwrap();
-    drop(file);
+    let result = exec_delete(&catalog, "idb", "events", "id >= 10 AND id < 20");
     assert_eq!(result.deleted_count, 10);
 
     let stats = vacuum_table(&catalog, "idb", "events").unwrap();
@@ -233,21 +223,7 @@ fn vacuum_enables_space_reuse_without_page_growth() {
     }
 
     // Delete everything.
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("database/base/sdb/events.dat")
-        .unwrap();
-    let groups = storage_manager::backend::executor::delete::parse_where_clause_with_schema(
-        "id >= 0",
-        &catalog.databases["sdb"].tables["events"].columns,
-    )
-    .unwrap();
-    let result = storage_manager::backend::executor::delete::delete_tuples(
-        &catalog, "sdb", "events", &mut file, &groups, false,
-    )
-    .unwrap();
-    drop(file);
+    let result = exec_delete(&catalog, "sdb", "events", "id >= 0");
     assert_eq!(result.deleted_count, 25);
 
     vacuum_table(&catalog, "sdb", "events").unwrap();

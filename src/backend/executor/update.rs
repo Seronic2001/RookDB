@@ -9,27 +9,19 @@
 //! UPDATE is implemented using delete + insert semantics for latest-version wins.
 //! Rows with the SLOT_FLAG_DELETED bit set are invisible and are never updated.
 
-use std::fs::File;
 use std::io;
 
 use crate::catalog::types::Catalog;
-use crate::disk::{read_page, write_page};
-use crate::backend::executor::compaction_api as heap_api;
-use crate::backend::log::operation_log::log_update;
 use crate::backend::log::operation_log::current_timestamp_iso;
 use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, SLOT_FLAG_DELETED};
 use crate::backend::page::page_lock::PageWriteLock;
-use crate::table::page_count;
-use crate::table::increment_dead_tuple_count;
-use crate::backend::visibility_map::vm_clear_page;
 use serde_json::{Value, json};
 use crate::types::row::deserialize_nullable_row;
 use crate::types::value::{DataValue, OrderedF32, OrderedF64};
 use crate::types::datatype::DataType;
 use crate::types::row::serialize_nullable_typed_row;
 
-use super::create_index::update_index_on_update;
-use super::delete::{Condition, ColumnValue, condition_to_json, matches_condition_groups_pub};
+use super::delete::ColumnValue;
 
 /// (page_num, slot_index) pair that uniquely identifies a stored tuple.
 #[derive(Debug, Clone, Copy)]
@@ -80,7 +72,7 @@ pub struct SetAssignment {
     pub expr:   SetExpr,
 }
 
-/// Result returned by `update_tuples`.
+/// Result returned by the UPDATE entry points.
 pub struct UpdateResult {
     /// How many rows were modified.
     pub updated_count:   usize,
@@ -243,23 +235,11 @@ struct PendingUpdate {
 }
 
 fn update_log_details(
-    condition_groups: &[Vec<Condition>],
-    returning: bool,
     updated_count: Option<usize>,
     error: Option<&str>,
 ) -> Value {
-    let groups_json: Vec<Value> = condition_groups
-        .iter()
-        .map(|group| {
-            let conds: Vec<Value> = group.iter().map(condition_to_json).collect();
-            json!(conds)
-        })
-        .collect();
-
     json!({
         "timestamp": current_timestamp_iso(),
-        "condition_groups": groups_json,
-        "returning": returning,
         "updated_count": updated_count,
         "error": error,
     })
@@ -268,199 +248,6 @@ fn update_log_details(
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-
-/// Update every live tuple in `table_name` that satisfies `condition_groups`,
-/// applying each `SetAssignment`.
-///
-/// - `condition_groups` empty → UPDATE all rows (no WHERE clause).
-/// - `returning = true`       → populate `UpdateResult::returning_rows` with
-///                              the rows **after** update.
-///
-#[deprecated(note = "legacy DNF path - slated for removal (ANALYSIS.md retirement step 4); use row_select::select_matching_pointers + update_by_pointers")]
-pub fn update_tuples(
-    catalog:           &Catalog,
-    db_name:           &str,
-    table_name:        &str,
-    file:              &mut File,
-    assignments:       &[SetAssignment],
-    condition_groups:  &[Vec<Condition>],
-    returning:         bool,
-) -> io::Result<UpdateResult> {
-    let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
-    })?;
-    let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
-    })?;
-    let columns = &table.columns;
-
-    let total_pages = page_count(file)?;
-    let file_identity = crate::table::file_identity_from_file(file)?;
-    let mut updated_count  = 0usize;
-    let mut returning_rows: Vec<Vec<(String, String)>> = Vec::new();
-    let mut pending_updates: Vec<PendingUpdate> = Vec::new();
-
-    for page_num in 1..total_pages {
-        let mut page = Page::new();
-        read_page(file, &mut page, page_num)?;
-
-        let lower     = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        let num_items = ((lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE) as usize;
-
-        for i in 0..num_items {
-            let base   = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
-            let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
-            let length = u16::from_le_bytes(page.data[base + 4..base + 6].try_into().unwrap()) as u32;
-            let flags  = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-
-            if (offset == 0 && length == 0) || (flags & SLOT_FLAG_DELETED != 0) {
-                continue;
-            }
-
-            let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
-            let decoded    = decode_tuple(&tuple_data, columns);
-
-            #[allow(deprecated)]
-            if !matches_condition_groups_pub(&decoded, condition_groups) {
-                continue;
-            }
-
-            let updated_decoded = apply_assignments(decoded.clone(), assignments);
-            let new_bytes       = encode_tuple(&updated_decoded, columns);
-
-            // Constraint validation: NOT NULL, UNIQUE, CHECK on the new values
-            let new_strings: Vec<String> = updated_decoded.iter().map(|(_name, val)| {
-                match val {
-                    ColumnValue::Int(n) => n.to_string(),
-                    ColumnValue::Text(s) => s.clone(),
-                    ColumnValue::List(_) => "[list]".to_string(),
-                }
-            }).collect();
-            let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
-            if let Err(e) = crate::backend::constraint::validate_row_update(
-                catalog, db_name, table_name, &new_values,
-                Some((page_num, i as u32)),
-            ) {
-                log::warn!(
-                    "[Update] Skipping row due to constraint violation on '{}.{}': {}",
-                    db_name, table_name, e
-                );
-                continue;
-            }
-
-            pending_updates.push(PendingUpdate {
-                pointer: TuplePointer {
-                    page_id: page_num,
-                    slot_index: i as u16,
-                },
-                old_tuple_data: tuple_data,
-                new_bytes,
-                old_decoded: decoded,
-                updated_decoded,
-            });
-
-            updated_count += 1;
-        }
-    }
-
-    if !pending_updates.is_empty() {
-        for update in &pending_updates {
-            let _page_lock = PageWriteLock::acquire(file_identity, update.pointer.page_id);
-            // Soft-delete: set SLOT_FLAG_DELETED on the original slot.
-            let mut page = Page::new();
-            read_page(file, &mut page, update.pointer.page_id)?;
-            let base = (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
-            let mut flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
-            flags |= SLOT_FLAG_DELETED;
-            page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
-            write_page(file, &mut page, update.pointer.page_id)?;
-            // Mark the page dirty in the Visibility Map: it now has dead tuples.
-            let _ = vm_clear_page(db_name, table_name, update.pointer.page_id);
-        }
-        increment_dead_tuple_count(file, pending_updates.len() as u32)?;
-    }
-
-    if !pending_updates.is_empty() {
-        for update in &pending_updates {
-            // Insert the updated tuple via the heap API.
-            let (new_page_id, new_slot_id) = heap_api::insert_raw_tuple(db_name, table_name, &update.new_bytes)?;
-
-            // Update any existing B+ Tree index (delete old key, insert new key)
-            if let Err(e) = update_index_on_update(
-                db_name,
-                table_name,
-                columns,
-                &update.old_tuple_data,
-                &update.new_bytes,
-                update.pointer.page_id,
-                update.pointer.slot_index as u32,
-                new_page_id,
-                new_slot_id,
-            ) {
-                log::warn!("Failed to update index for updated tuple: {}", e);
-            }
-
-            if returning {
-                let row: Vec<(String, String)> = update
-                    .updated_decoded
-                    .iter()
-                    .map(|(col, val)| {
-                        let s = match val {
-                            ColumnValue::Int(n) => n.to_string(),
-                            ColumnValue::Text(t) => t.clone(),
-                            ColumnValue::List(_) => String::from("[list]"),
-                        };
-                        (col.clone(), s)
-                    })
-                    .collect();
-                returning_rows.push(row);
-            }
-        }
-    }
-
-    // ── ON UPDATE CASCADE / SET NULL propagation ─────────────────────────────
-    // After all old tuples have been deleted and new tuples inserted, propagate
-    // the changes to child tables via the constraint validator.
-    if !pending_updates.is_empty() {
-        for update in &pending_updates {
-            if let Err(e) = crate::backend::constraint::propagate_update_to_children(
-                catalog, db_name, table_name,
-                &update.old_decoded, &update.updated_decoded,
-            ) {
-                log::warn!(
-                    "[Update] Failed to propagate FK cascade for '{}.{}': {}",
-                    db_name, table_name, e
-                );
-            }
-        }
-    }
-
-
-    let result: io::Result<UpdateResult> = Ok(UpdateResult { updated_count, returning_rows });
-
-    match &result {
-        Ok(update_result) => {
-            let details = update_log_details(
-                condition_groups,
-                returning,
-                Some(update_result.updated_count),
-                None,
-            );
-            let _ = log_update(db_name, table_name, details, "success");
-        }
-        Err(err) => {
-            let details = update_log_details(
-                condition_groups,
-                returning,
-                None,
-                Some(&err.to_string()),
-            );
-            let _ = log_update(db_name, table_name, details, "failed");
-        }
-    }
-
-    result
-}
 
 // ---------------------------------------------------------------------------
 // SET clause parser
@@ -560,16 +347,13 @@ fn try_parse_arith_expr(rhs: &str) -> Option<(String, ArithOp, String)> {
     None
 }
 
-// Re-export parse_where_clause so callers only need to import from this module.
-pub use super::delete::parse_where_clause as parse_where_clause_update;
 
 /// Update rows identified by explicit heap pointers (page_id, slot_id).
 ///
 /// This is the Volcano-aware UPDATE path: instead of scanning the heap and
 /// evaluating WHERE conditions here, the caller (Volcano engine) has already
 /// identified the matching rows. This function applies the SET assignments to
-/// the rows at the given pointers using the same delete+insert semantics as
-/// `update_tuples`.
+/// the rows at the given pointers (soft-delete + rewrite).
 pub fn update_by_pointers(
     catalog: &Catalog,
     db_name: &str,
@@ -706,7 +490,7 @@ pub fn update_by_pointers(
     }
 
     let result = UpdateResult { updated_count, returning_rows };
-    let details = update_log_details(&[], false, Some(result.updated_count), None);
+    let details = update_log_details(Some(result.updated_count), None);
     let _ = crate::backend::log::operation_log::log_update(db_name, table_name, details, "success");
 
     Ok(result)

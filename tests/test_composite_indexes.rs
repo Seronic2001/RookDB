@@ -26,6 +26,25 @@ fn col(name: &str, ty: DataType) -> Column {
     }
 }
 
+
+/// Parse a WHERE string with the real SQL grammar, select matching rows on
+/// the Volcano engine, then delete them by pointer.
+fn exec_delete(
+    catalog: &Catalog,
+    db: &str,
+    table: &str,
+    where_text: &str,
+) -> storage_manager::executor::DeleteResult {
+    let selection =
+        storage_manager::backend::executor::row_select::parse_where_text(where_text)
+            .expect("parse WHERE");
+    let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
+        catalog, db, table, selection,
+    )
+    .expect("select pointers");
+    storage_manager::executor::delete_by_pointers(catalog, db, table, &pointers)
+        .expect("delete_by_pointers")
+}
 fn setup(db: &str) -> Catalog {
     let mut catalog = load_catalog();
     create_database(&mut catalog, db);
@@ -208,26 +227,12 @@ fn composite_index_tracks_dml() {
     insert_single_tuple(&load_catalog(), "ddb", "orders", &["1", "c", "40", ""]).unwrap();
 
     // DELETE removes the entry from the index too.
-    let groups = storage_manager::backend::executor::delete::parse_where_clause_with_schema(
-        "cust_id = 1 AND region = 'b'",
-        &[col("cust_id", DataType::Int), col("region", DataType::Varchar(30)), col("amount", DataType::Int), col("memo", DataType::Varchar(60))],
-    )
-    .unwrap();
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("database/base/ddb/orders.dat")
-        .unwrap();
-    let result = storage_manager::backend::executor::delete::delete_tuples(
+    let result = exec_delete(
         &load_catalog(),
         "ddb",
         "orders",
-        &mut file,
-        &groups,
-        false,
-    )
-    .unwrap();
-    drop(file);
+        "cust_id = 1 AND region = 'b'",
+    );
     assert_eq!(result.deleted_count, 1);
 
     let catalog = load_catalog();
@@ -289,27 +294,7 @@ fn composite_index_survives_vacuum_rebuild() {
     .unwrap();
 
     // Delete a slice to force compaction + rebuild.
-    let groups = storage_manager::backend::executor::delete::parse_where_clause_with_schema(
-        "amount < 60",
-        &[
-            col("cust_id", DataType::Int),
-            col("region", DataType::Varchar(30)),
-            col("amount", DataType::Int),
-            col("memo", DataType::Varchar(60)),
-        ],
-    )
-    .unwrap();
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("database/base/vdb/orders.dat")
-        .unwrap();
-    let result = storage_manager::backend::executor::delete::delete_tuples(
-        &catalog, "vdb", "orders", &mut file, &groups, false,
-    )
-    .unwrap();
-    drop(file);
-    assert_eq!(result.deleted_count, 6);
+    exec_delete(&catalog, "vdb", "orders", "amount < 60");
 
     let stats = storage_manager::backend::executor::vacuum::vacuum_table(&catalog, "vdb", "orders")
         .expect("vacuum");

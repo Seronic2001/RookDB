@@ -10,16 +10,15 @@
 //! Run with:
 //!   cargo test --test test_fk_actions -- --test-threads=1
 
-use std::fs;
 use std::sync::Mutex;
 
 use storage_manager::catalog::{
     create_database, create_table, init_catalog, load_catalog,
 };
 use storage_manager::catalog::types::{Catalog, Column, Constraints};
-use storage_manager::executor::delete::{delete_tuples, parse_where_clause};
+use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::executor::load_csv::insert_single_tuple;
-use storage_manager::executor::update::{parse_set_clause, update_tuples};
+use storage_manager::executor::update::parse_set_clause;
 use storage_manager::heap::HeapManager;
 use storage_manager::types::datatype::DataType;
 use storage_manager::types::row::deserialize_nullable_row;
@@ -60,6 +59,37 @@ impl Drop for TestWorkspace {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+/// Parse a WHERE string with the real SQL grammar, select matching rows on
+/// the Volcano engine, then delete them by pointer.
+fn exec_delete_where(
+    catalog: &Catalog,
+    db_name: &str,
+    table: &str,
+    where_text: &str,
+) -> storage_manager::executor::DeleteResult {
+    let selection = parse_where_text(where_text).expect("parse WHERE");
+    let pointers =
+        select_matching_pointers(catalog, db_name, table, selection).expect("select pointers");
+    storage_manager::executor::delete_by_pointers(catalog, db_name, table, &pointers)
+        .expect("delete_by_pointers")
+}
+
+/// Volcano-selected UPDATE by pointer.
+fn exec_update_where(
+    catalog: &Catalog,
+    db_name: &str,
+    table: &str,
+    where_text: &str,
+    assignments: &[storage_manager::executor::SetAssignment],
+) -> storage_manager::executor::UpdateResult {
+    let selection = parse_where_text(where_text).expect("parse WHERE");
+    let pointers =
+        select_matching_pointers(catalog, db_name, table, selection).expect("select pointers");
+    storage_manager::executor::update_by_pointers(catalog, db_name, table, &pointers, assignments)
+        .expect("update_by_pointers")
+}
 
 /// Create the standard 3-table schema used by most FK action tests:
 ///   users(id:INT PK, name:VARCHAR(50))
@@ -259,12 +289,7 @@ fn test_minimal_delete_cascade() {
     assert!(insert_single_tuple(&catalog, db_name, "orders", &["1", "1", "100"]).unwrap(), "insert into orders");
 
     // Execute: DELETE FROM users WHERE id = 1
-    let path = format!("database/base/{}/{}.dat", db_name, "users");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open users.dat");
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = delete_tuples(&catalog, db_name, "users", &mut file, &groups, false).unwrap();
+    let result = exec_delete_where(&catalog, db_name, "users", "id = 1");
 
     assert_eq!(result.deleted_count, 1, "Should delete 1 user");
     assert_eq!(count_tuples(db_name, "users"), 0, "users should be empty");
@@ -321,12 +346,7 @@ fn test_recursive_delete_cascade() {
     assert_eq!(count_tuples(db_name, "order_items"), 3);
 
     // Execute: DELETE FROM users WHERE id = 1
-    let path = format!("database/base/{}/{}.dat", db_name, "users");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open users.dat");
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = delete_tuples(&catalog, db_name, "users", &mut file, &groups, false).unwrap();
+    let result = exec_delete_where(&catalog, db_name, "users", "id = 1");
     assert_eq!(result.deleted_count, 1, "Should delete 1 user");
 
     // Verify cascade: all 3 tables should be empty
@@ -378,12 +398,7 @@ fn test_recursive_delete_set_null() {
     assert_eq!(count_tuples(db_name, "order_items"), 3);
 
     // DELETE FROM users WHERE id = 1
-    let path = format!("database/base/{}/{}.dat", db_name, "users");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open users.dat");
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = delete_tuples(&catalog, db_name, "users", &mut file, &groups, false).unwrap();
+    let result = exec_delete_where(&catalog, db_name, "users", "id = 1");
     assert_eq!(result.deleted_count, 1);
 
     // Verify: users deleted, children/grandchildren still exist with NULL FK columns
@@ -446,13 +461,8 @@ fn test_recursive_update_cascade() {
     assert!(insert_single_tuple(&catalog, db_name, "order_items", &["3", "2", "Doohickey"]).unwrap(), "insert into order_items");
 
     // UPDATE users SET id = 10 WHERE id = 1
-    let path = format!("database/base/{}/{}.dat", db_name, "users");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open users.dat");
     let assignments = parse_set_clause("id = 10").unwrap();
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = update_tuples(&catalog, db_name, "users", &mut file, &assignments, &groups, false).unwrap();
+    let result = exec_update_where(&catalog, db_name, "users", "id = 1", &assignments);
     assert_eq!(result.updated_count, 1);
 
     // Verify: orders.user_id = 10 (cascaded), but order_items.order_id unchanged
@@ -556,13 +566,8 @@ fn test_recursive_update_cascade_same_column_chain() {
     assert!(insert_single_tuple(&catalog, db_name, "order_items", &["3", "1"]).unwrap(), "insert into order_items (3, 1)");
 
     // UPDATE users SET id = 10 WHERE id = 1
-    let path = format!("database/base/{}/{}.dat", db_name, "users");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open users.dat");
     let assignments = parse_set_clause("id = 10").unwrap();
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = update_tuples(&catalog, db_name, "users", &mut file, &assignments, &groups, false).unwrap();
+    let result = exec_update_where(&catalog, db_name, "users", "id = 1", &assignments);
     assert_eq!(result.updated_count, 1);
 
     // Verify recursive CASCADE through entire chain (all 3 order_items have fk_user_id=1):
@@ -616,13 +621,8 @@ fn test_recursive_update_set_null() {
     assert!(insert_single_tuple(&catalog, db_name, "order_items", &["3", "2", "Doohickey"]).unwrap(), "insert into order_items");
 
     // UPDATE users SET id = 10 WHERE id = 1
-    let path = format!("database/base/{}/{}.dat", db_name, "users");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open users.dat");
     let assignments = parse_set_clause("id = 10").unwrap();
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = update_tuples(&catalog, db_name, "users", &mut file, &assignments, &groups, false).unwrap();
+    let result = exec_update_where(&catalog, db_name, "users", "id = 1", &assignments);
     assert_eq!(result.updated_count, 1);
 
     // Verify: orders.user_id = NULL, order_items.order_id unchanged (different column chain)
@@ -722,13 +722,8 @@ fn test_recursive_update_set_null_same_column_chain() {
     assert!(insert_single_tuple(&catalog, db_name, "order_items", &["3", "1"]).unwrap(), "insert into order_items (3, 1)");
 
     // UPDATE users SET id = 10 WHERE id = 1
-    let path = format!("database/base/{}/{}.dat", db_name, "users");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open users.dat");
     let assignments = parse_set_clause("id = 10").unwrap();
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = update_tuples(&catalog, db_name, "users", &mut file, &assignments, &groups, false).unwrap();
+    let result = exec_update_where(&catalog, db_name, "users", "id = 1", &assignments);
     assert_eq!(result.updated_count, 1);
 
     // Verify recursive SET NULL through entire chain (all 3 order_items have fk_user_id=1):
@@ -812,27 +807,15 @@ fn test_cycle_detection_delete_cascade() {
     assert!(insert_single_tuple(&catalog, db_name, "table_b", &["2", "1"]).unwrap(), "insert into table_b as (2, 1)");
 
     // Update A(1, NULL) to A(1, 2)
-    let path = format!("database/base/{}/{}.dat", db_name, "table_a");
-    {
-        let mut file = fs::OpenOptions::new()
-            .read(true).write(true)
-            .open(&path).expect("Failed to open table_a.dat");
-        let assignments = parse_set_clause("a_ref = 2").unwrap();
-        let groups = parse_where_clause("id = 1").unwrap();
-        let _ = update_tuples(&catalog, db_name, "table_a", &mut file, &assignments, &groups, false).unwrap();
-    }
+    let assignments = parse_set_clause("a_ref = 2").unwrap();
+    let _ = exec_update_where(&catalog, db_name, "table_a", "id = 1", &assignments);
 
     assert_eq!(count_tuples(db_name, "table_a"), 1);
     assert_eq!(count_tuples(db_name, "table_b"), 1);
 
     // DELETE FROM table_a WHERE id = 1
     // This should NOT infinite-loop thanks to cycle detection.
-    let path = format!("database/base/{}/{}.dat", db_name, "table_a");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open table_a.dat");
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = delete_tuples(&catalog, db_name, "table_a", &mut file, &groups, false).unwrap();
+    let result = exec_delete_where(&catalog, db_name, "table_a", "id = 1");
     assert_eq!(result.deleted_count, 1, "Should delete 1 row from table_a");
 
     // Verify no crash and data is consistent
@@ -900,12 +883,7 @@ fn test_fk_restrict_blocks_delete() {
     assert_eq!(count_tuples(db_name, "children"), 1);
 
     // DELETE FROM parents WHERE id = 1 → should be blocked by RESTRICT
-    let path = format!("database/base/{}/{}.dat", db_name, "parents");
-    let mut file = fs::OpenOptions::new()
-        .read(true).write(true)
-        .open(&path).expect("Failed to open parents.dat");
-    let groups = parse_where_clause("id = 1").unwrap();
-    let result = delete_tuples(&catalog, db_name, "parents", &mut file, &groups, false).unwrap();
+    let result = exec_delete_where(&catalog, db_name, "parents", "id = 1");
 
     assert_eq!(result.deleted_count, 0, "RESTRICT should block DELETE");
     assert_eq!(count_tuples(db_name, "parents"), 1, "parents row should still exist");

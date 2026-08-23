@@ -232,24 +232,18 @@ fn fk_set_null_detaches_children() {
 
 // ── Helpers to observe effects ────────────────────────────────────────────────
 
-/// Run DELETE FROM customers WHERE id = <id> through the real executor.
+/// Run DELETE FROM customers WHERE id = <id> through the Volcano selection
+/// path plus pointer-based deletion.
 fn delete_customers_by_id(
     catalog: &Catalog,
     db: &str,
     id: i32,
 ) -> storage_manager::executor::delete::DeleteResult {
-    use std::fs::OpenOptions;
+    use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 
-    let path = format!("database/base/{}/customers.dat", db);
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .unwrap();
-    let groups =
-        storage_manager::executor::parse_where_clause(&format!("id = {}", id)).unwrap();
-    storage_manager::executor::delete_tuples(catalog, db, "customers", &mut file, &groups, false)
-        .unwrap()
+    let selection = parse_where_text(&format!("id = {}", id)).unwrap();
+    let pointers = select_matching_pointers(catalog, db, "customers", selection).unwrap();
+    storage_manager::executor::delete_by_pointers(catalog, db, "customers", &pointers).unwrap()
 }
 
 /// Build the decoded-row representation `validate_row_delete` expects.
