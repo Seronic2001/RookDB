@@ -14,8 +14,10 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::MutexGuard;
 
 use crate::backend::buffer_manager::buffer_pool::BufferPool;
+use crate::backend::buffer_manager::shared_pool::{self, SharedPool};
 use crate::backend::fsm::FSM;
 use crate::backend::page::{Page, PAGE_SIZE, PAGE_HEADER_SIZE, ITEM_ID_SIZE,
                             SLOT_FLAG_DELETED, init_page, page_free_space, get_tuple_count, get_slot_entry};
@@ -212,16 +214,32 @@ impl Iterator for HeapScanIterator {
 /// High-level heap file manager with FSM-guided insertion.
 ///
 /// All page I/O is routed through a CLOCK BufferPool for efficient caching.
+///
+/// The pool is **shared process-wide per file** (see `buffer_manager::shared_pool`):
+/// two `HeapManager`s opened on the same `.dat` file — e.g. a scan operator and
+/// an insert operator in one query — see each other's dirty pages immediately
+/// instead of holding independent caches over the same inode. The lock is held
+/// only for individual page operations; pins keep frames stable between them.
 pub struct HeapManager {
     file_path: PathBuf,
-    /// The buffer pool manages all page caching and I/O.
-    pub pool: BufferPool,
+    /// Shared buffer pool (one per underlying file, process-wide).
+    pub pool: SharedPool,
     fsm: FSM,
     #[doc(hidden)]
     pub header: HeaderMetadata,
 }
 
 impl HeapManager {
+    /// Lock the shared buffer pool for a page operation.
+    ///
+    /// Takes the pool by field reference so the returned guard borrows only
+    /// `self.pool`, leaving `self.fsm` / `self.header` free for mutation
+    /// while pages are accessed (disjoint field borrows).
+    fn lock_pool(pool: &SharedPool) -> MutexGuard<'_, BufferPool> {
+        pool.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Vacuum update to expose vacuuming logic internally
     pub fn vacuum_page(&mut self, page_id: u32, absolute_free_bytes: u32) -> io::Result<()> {
         self.fsm.fsm_vacuum_update(page_id, absolute_free_bytes)
@@ -275,8 +293,14 @@ impl HeapManager {
 
         log::trace!("[HeapManager::create] Heap file created, initializing BufferPool");
 
-        // Create BufferPool with the opened file (default 64-frame capacity)
-        let pool = BufferPool::with_file(64, file, file_path.clone())?;
+        // Register a brand-new shared pool for this (re-created) file,
+        // replacing any registry entry left over from a previous file.
+        let pool = BufferPool::with_file(
+            shared_pool::SHARED_POOL_CAPACITY,
+            file,
+            file_path.clone(),
+        )?;
+        let pool = shared_pool::register_pool(&file_path, pool);
 
         // Derive FSM path
         let fsm_path = PathBuf::from(format!(
@@ -328,17 +352,15 @@ impl HeapManager {
             ));
         }
 
-        // Open heap file
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&file_path)?;
-
-        // Create BufferPool with the opened file (default 64-frame capacity)
-        let mut pool = BufferPool::with_file(64, file, file_path.clone())?;
+        // Get the process-wide shared pool for this file (opens it if this
+        // is the first manager on the file).
+        let pool = shared_pool::get_or_create(&file_path)?;
 
         // Read header via buffer pool
-        let header = read_header_via_pool(&mut pool)?;
+        let header = {
+            let mut guard = pool.lock().unwrap_or_else(|p| p.into_inner());
+            read_header_via_pool(&mut guard)?
+        };
         log::trace!(
             "[HeapManager::open] Read header: page_count={}, fsm_page_count={}, total_tuples={}",
             header.page_count, header.fsm_page_count, header.total_tuples
@@ -354,14 +376,15 @@ impl HeapManager {
         let fsm = if !fsm_path.exists() || std::fs::metadata(&fsm_path)?.len() == 0 {
             log::trace!("[HeapManager::open] FSM missing or empty, rebuilding...");
             // For FSM rebuild, we need the file handle. Use the pool's file.
-            // Temporarily take ownership of the file for FSM rebuild
-            let mut file = pool.file.take().ok_or_else(|| {
+            // Temporarily take ownership of the file for FSM rebuild.
+            let mut guard = pool.lock().unwrap_or_else(|p| p.into_inner());
+            let mut file = guard.file.take().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no file")
             })?;
             file.seek(SeekFrom::Start(0))?;
             let fsm = FSM::build_from_heap(&mut file, fsm_path.clone())?;
             // Return file to the pool
-            pool.file = Some(file);
+            guard.file = Some(file);
             fsm
         } else {
             FSM::open(fsm_path.clone(), header.page_count)?
@@ -377,7 +400,10 @@ impl HeapManager {
                 header.fsm_page_count, calculated_fsm_pages
             );
             header.fsm_page_count = calculated_fsm_pages;
-            write_header_via_pool(&mut pool, &header)?;
+            {
+                let mut guard = pool.lock().unwrap_or_else(|p| p.into_inner());
+                write_header_via_pool(&mut guard, &header)?;
+            }
             log::trace!("[HeapManager::open] Updated and persisted fsm_page_count to {}", calculated_fsm_pages);
         }
 
@@ -484,47 +510,57 @@ impl HeapManager {
                 ));
             }
 
-            // Read the target page via buffer pool
-            let frame_id = match self.pool.fetch_page(page_id) {
-                Ok(fid) => fid,
-                Err(e) => {
-                    log::error!("[ERROR] Failed to read page {}: {}", page_id, e);
-                    return Err(e);
-                }
-            };
-
-            // Get current free space and verify
-            let current_free = {
-                let page = self.pool.get_page(frame_id);
-                page_free_space(page)?
-            };
-
-            if current_free < required_bytes {
-                log::trace!(
-                    "[HeapManager::insert_tuple] Page {} has only {} bytes free, needs {} - will retry",
-                    page_id, current_free, required_bytes
-                );
-                // Unpin without dirty (we didn't modify)
-                self.pool.unpin(frame_id, false);
-                failed_pages.push(page_id);
-                self.fsm.fsm_set_avail(page_id, current_free, fsm_page_opt.as_mut())?;
-                continue;
-            }
-
-            // Insert tuple into slotted page (via buffer pool)
+            // Read the target page via buffer pool (lock held for the whole
+            // page access; released before FSM/header updates below).
             let slot_id = {
-                let page = self.pool.get_page_mut(frame_id);
-                Self::insert_into_page(page, tuple_data)?
+                let mut pool = Self::lock_pool(&self.pool);
+                let frame_id = match pool.fetch_page(page_id) {
+                    Ok(fid) => fid,
+                    Err(e) => {
+                        log::error!("[ERROR] Failed to read page {}: {}", page_id, e);
+                        return Err(e);
+                    }
+                };
+
+                // Get current free space and verify
+                let current_free = {
+                    let page = pool.get_page(frame_id);
+                    page_free_space(page)?
+                };
+
+                if current_free < required_bytes {
+                    log::trace!(
+                        "[HeapManager::insert_tuple] Page {} has only {} bytes free, needs {} - will retry",
+                        page_id, current_free, required_bytes
+                    );
+                    // Unpin without dirty (we didn't modify)
+                    pool.unpin(frame_id, false);
+                    failed_pages.push(page_id);
+                    self.fsm.fsm_set_avail(page_id, current_free, fsm_page_opt.as_mut())?;
+                    continue;
+                }
+
+                // Insert tuple into slotted page (via buffer pool)
+                let slot_id = {
+                    let page = pool.get_page_mut(frame_id);
+                    Self::insert_into_page(page, tuple_data)?
+                };
+
+                // Unpin page (dirty — modifications need to be written back)
+                pool.unpin(frame_id, true);
+                slot_id
             };
 
-            // Calculate new free space after insertion
             let new_free = {
-                let page = self.pool.get_page(frame_id);
-                page_free_space(page)?
+                let mut pool = Self::lock_pool(&self.pool);
+                // Calculate new free space after insertion
+                // (re-fetch: frame stays cached, pin is transient)
+                let frame_id = pool.fetch_page(page_id)?;
+                let page = pool.get_page(frame_id);
+                let free = page_free_space(page)?;
+                pool.unpin(frame_id, false);
+                free
             };
-
-            // Unpin page (dirty — modifications need to be written back)
-            self.pool.unpin(frame_id, true);
 
             // Update FSM with new free space
             self.fsm.fsm_set_avail(page_id, new_free, fsm_page_opt.as_mut())?;
@@ -533,9 +569,12 @@ impl HeapManager {
             self.header.total_tuples += 1;
             
             // Sync updated header to disk via buffer pool
-            match write_header_via_pool(&mut self.pool, &self.header) {
-                Ok(_) => log::trace!("[HeapManager::insert_tuple] Header updated on disk"),
-                Err(e) => log::warn!("[WARN] Failed to update header on disk: {}", e),
+            {
+                let mut pool = Self::lock_pool(&self.pool);
+                match write_header_via_pool(&mut pool, &self.header) {
+                    Ok(_) => log::trace!("[HeapManager::insert_tuple] Header updated on disk"),
+                    Err(e) => log::warn!("[WARN] Failed to update header on disk: {}", e),
+                }
             }
 
             log::trace!(
@@ -571,11 +610,12 @@ impl HeapManager {
         }
 
         // Fetch page via buffer pool
-        let frame_id = self.pool.fetch_page(page_id)?;
-
-        // Validate slot_id and extract tuple
         let result = {
-            let page = self.pool.get_page(frame_id);
+            let mut pool = Self::lock_pool(&self.pool);
+            let frame_id = pool.fetch_page(page_id)?;
+
+            // Validate slot_id and extract tuple
+            let page = pool.get_page(frame_id);
             let tuple_count = get_tuple_count(page)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
@@ -602,11 +642,11 @@ impl HeapManager {
                 ));
             }
 
-            page.data[offset as usize..(offset + length) as usize].to_vec()
+            let data = page.data[offset as usize..(offset + length) as usize].to_vec();
+            // Unpin (not dirty — we only read)
+            pool.unpin(frame_id, false);
+            data
         };
-
-        // Unpin (not dirty — we only read)
-        self.pool.unpin(frame_id, false);
 
         log::trace!(
             "[HeapManager::get_tuple] Retrieved {} bytes",
@@ -636,58 +676,64 @@ impl HeapManager {
             ));
         }
 
-        // Fetch page via buffer pool
-        let frame_id = self.pool.fetch_page(page_id)?;
-
-        let freed_bytes;
+        // Fetch page via buffer pool and mark the slot deleted
+        let freed_bytes: u32;
         {
-            let page = self.pool.get_page_mut(frame_id);
+            let mut pool = Self::lock_pool(&self.pool);
+            let frame_id = pool.fetch_page(page_id)?;
 
-            // Get the tuple data to calculate freed bytes
-            let (offset, length) = get_slot_entry(page, slot_id)?;
-            freed_bytes = (length + ITEM_ID_SIZE) as u32;
+            let freed;
+            {
+                let page = pool.get_page_mut(frame_id);
 
-            log::trace!(
-                "[HeapManager::delete_tuple] Marked slot {} as deleted, freed {} bytes",
-                slot_id, freed_bytes
-            );
+                // Get the tuple data to calculate freed bytes
+                let (offset, length) = get_slot_entry(page, slot_id)?;
+                freed = (length + ITEM_ID_SIZE) as u32;
 
-            // Update the slot directory entry to mark as deleted
-            let slot_offset = PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE;
-            page.data[slot_offset as usize..slot_offset as usize + 4].copy_from_slice(&0u32.to_le_bytes()); // offset = 0
-            page.data[slot_offset as usize + 4..slot_offset as usize + 8].copy_from_slice(&0u32.to_le_bytes()); // length = 0
+                log::trace!(
+                    "[HeapManager::delete_tuple] Marked slot {} as deleted, freed {} bytes",
+                    slot_id, freed
+                );
 
-            // Optimization: Roll back pointers if this is the last tuple
-            let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-            let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+                // Update the slot directory entry to mark as deleted
+                let slot_offset = PAGE_HEADER_SIZE + slot_id * ITEM_ID_SIZE;
+                page.data[slot_offset as usize..slot_offset as usize + 4].copy_from_slice(&0u32.to_le_bytes()); // offset = 0
+                page.data[slot_offset as usize + 4..slot_offset as usize + 8].copy_from_slice(&0u32.to_le_bytes()); // length = 0
 
-            let tuple_count = get_tuple_count(page)?;
+                // Optimization: Roll back pointers if this is the last tuple
+                let mut lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+                let mut upper = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
 
-            if offset == upper {
-                upper += length;
-                page.data[4..8].copy_from_slice(&upper.to_le_bytes());
-                log::trace!("[HeapManager::delete_tuple] Reclaimed data space, upper moved to {}", upper);
+                let tuple_count = get_tuple_count(page)?;
+
+                if offset == upper {
+                    upper += length;
+                    page.data[4..8].copy_from_slice(&upper.to_le_bytes());
+                    log::trace!("[HeapManager::delete_tuple] Reclaimed data space, upper moved to {}", upper);
+                }
+
+                if slot_id == tuple_count - 1 && lower == slot_offset + ITEM_ID_SIZE {
+                    lower -= ITEM_ID_SIZE;
+                    page.data[0..4].copy_from_slice(&lower.to_le_bytes());
+                    log::trace!("[HeapManager::delete_tuple] Reclaimed slot space, lower moved to {}", lower);
+                }
             }
 
-            if slot_id == tuple_count - 1 && lower == slot_offset + ITEM_ID_SIZE {
-                lower -= ITEM_ID_SIZE;
-                page.data[0..4].copy_from_slice(&lower.to_le_bytes());
-                log::trace!("[HeapManager::delete_tuple] Reclaimed slot space, lower moved to {}", lower);
+            // Unpin dirty (we modified the page)
+            pool.unpin(frame_id, true);
+
+            // We DO NOT update the FSM — dead slots are hidden until compaction
+
+            // Decrement tuple counter
+            if self.header.total_tuples > 0 {
+                self.header.total_tuples -= 1;
             }
+
+            // Sync header to disk via buffer pool
+            write_header_via_pool(&mut pool, &self.header)?;
+
+            freed_bytes = freed;
         }
-
-        // Unpin dirty (we modified the page)
-        self.pool.unpin(frame_id, true);
-
-        // We DO NOT update the FSM — dead slots are hidden until compaction
-
-        // Decrement tuple counter
-        if self.header.total_tuples > 0 {
-            self.header.total_tuples -= 1;
-        }
-
-        // Sync header to disk via buffer pool
-        write_header_via_pool(&mut self.pool, &self.header)?;
 
         Ok(freed_bytes)
     }
@@ -711,11 +757,14 @@ impl HeapManager {
     pub fn flush(&mut self) -> io::Result<()> {
         log::trace!("[HeapManager::flush] Flushing all changes");
 
-        // Write header via buffer pool
-        write_header_via_pool(&mut self.pool, &self.header)?;
+        {
+            let mut pool = Self::lock_pool(&self.pool);
+            // Write header via buffer pool
+            write_header_via_pool(&mut pool, &self.header)?;
 
-        // Flush all dirty pages in the pool
-        self.pool.flush_all()?;
+            // Flush all dirty pages in the pool
+            pool.flush_all()?;
+        }
 
         // Sync FSM fork
         self.fsm.sync()?;
@@ -735,13 +784,16 @@ impl HeapManager {
         HEAP_METRICS.allocate_page_calls.fetch_add(1, Ordering::Relaxed);
         let new_page_id = self.header.page_count;
 
-        // Create new page via buffer pool (this writes it to disk and brings it into cache)
-        let (_page_id, frame_id) = self.pool.new_page()?;
-        // Unpin immediately since we just need it registered, not kept in cache
-        self.pool.unpin(frame_id, false);
+        {
+            let mut pool = Self::lock_pool(&self.pool);
+            // Create new page via buffer pool (this writes it to disk and brings it into cache)
+            let (_page_id, frame_id) = pool.new_page()?;
+            // Unpin immediately since we just need it registered, not kept in cache
+            pool.unpin(frame_id, false);
 
-        // Update header
-        self.header.page_count = self.pool.total_pages();
+            // Update header
+            self.header.page_count = pool.total_pages();
+        }
         self.fsm.set_heap_page_count(self.header.page_count);
 
         // Calculate FSM pages needed

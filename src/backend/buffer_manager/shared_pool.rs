@@ -1,0 +1,151 @@
+//! Process-wide shared buffer pools (ANALYSIS.md Tier 2 #9).
+//!
+//! Every `HeapManager::open()` used to allocate a private 128/64-frame
+//! [`BufferPool`]. Two managers opened on the same `.dat` file therefore held
+//! independent caches over the same inode — stale-cache and lost-write
+//! hazards between them (e.g. a seq-scan operator and an insert operator in
+//! one query each open their own manager).
+//!
+//! This module keeps a global registry mapping canonical file paths to
+//! `Weak` references to a single shared pool. The first manager registers
+//! the pool; later managers on the same file receive clones of the same
+//! `Arc`, so cached pages (including dirty state) stay coherent. When the
+//! last manager drops its handle, the pool itself drops — flushing dirty
+//! pages via its own `Drop` impl — and the expired registry entry is swept
+//! on the next lookup.
+
+use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+use super::buffer_pool::BufferPool;
+
+/// Frames per shared pool (matches the previous per-instance default).
+pub const SHARED_POOL_CAPACITY: usize = 64;
+
+/// A pool handle shared between every HeapManager on one file.
+pub type SharedPool = Arc<Mutex<BufferPool>>;
+
+type Registry = HashMap<PathBuf, Weak<Mutex<BufferPool>>>;
+
+fn registry() -> &'static Mutex<Registry> {
+    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Canonical identity for a heap file.
+///
+/// Relative paths are resolved against the current directory so that
+/// `"database/base/t.dat"` and `"./database/base/t.dat"` map to one pool.
+fn canonical_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+    let mut reg = registry().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut reg)
+}
+
+/// Return the shared pool for `file_path`, opening the file if no live pool
+/// exists yet.
+pub fn get_or_create(file_path: &Path) -> io::Result<SharedPool> {
+    let key = canonical_key(file_path);
+
+    // Sweep expired entries, then reuse a live pool when present.
+    if let Some(shared) = with_registry(|reg| {
+        reg.retain(|_, weak| weak.upgrade().is_some());
+        reg.get(&key).and_then(Weak::upgrade)
+    }) {
+        return Ok(shared);
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(file_path)?;
+    let pool = BufferPool::with_file(SHARED_POOL_CAPACITY, file, file_path.to_path_buf())?;
+    Ok(register_pool(file_path, pool))
+}
+
+/// Register an already-constructed pool for `file_path`, replacing any stale
+/// entry (used by `HeapManager::create`, which builds a brand-new file).
+pub fn register_pool(file_path: &Path, pool: BufferPool) -> SharedPool {
+    let key = canonical_key(file_path);
+    let shared = Arc::new(Mutex::new(pool));
+    with_registry(|reg| {
+        reg.insert(key, Arc::downgrade(&shared));
+    });
+    shared
+}
+
+/// Forget the cached pool for `file_path`.
+///
+/// Used after external (direct-I/O) rewrites such as VACUUM: subsequent
+/// opens construct a fresh pool that reads the new on-disk state instead of
+/// serving frames cached before the rewrite. A pool still held live by
+/// another manager cannot be dropped; callers should ensure quiescence
+/// (single-user engine) before performing external rewrites.
+pub fn invalidate(file_path: &Path) {
+    let key = canonical_key(file_path);
+    with_registry(|reg| {
+        reg.remove(&key);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_path_shares_one_pool() {
+        let dir = std::env::temp_dir().join(format!(
+            "rookdb_shared_p{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file_a = dir.join("a.dat");
+        let file_b = dir.join("./sub/../a.dat");
+
+        // Create a valid empty heap-ish file (header page).
+        std::fs::write(&file_a, vec![0u8; 8192]).unwrap();
+
+        let p1 = get_or_create(&file_a).unwrap();
+        let p2 = get_or_create(&file_b).unwrap();
+        assert!(
+            Arc::ptr_eq(&p1, &p2),
+            "two paths resolving to the same file must share one pool"
+        );
+
+        // Drop both handles → entry expires → next call creates fresh.
+        let weak = Arc::downgrade(&p1);
+        drop(p1);
+        drop(p2);
+        let _p3 = get_or_create(&file_a).unwrap();
+        assert!(
+            weak.upgrade().is_none(),
+            "expired entry must be swept, not resurrected"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn canonical_key_handles_missing_files() {
+        let k1 = canonical_key(Path::new("definitely/not/here.dat"));
+        assert!(k1.is_absolute());
+    }
+}
