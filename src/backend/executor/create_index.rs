@@ -153,6 +153,14 @@ pub fn load_table_indexes(db_name: &str, table_name: &str) -> Result<Vec<(String
 ///
 /// Returns `Vec<(index_name, Vec<column_name>, is_unique)>`.
 pub fn load_table_indexes_multi(db_name: &str, table_name: &str) -> Result<Vec<(String, Vec<String>, bool)>, String> {
+    // Hot path: serve from the process-cached table metadata (populated once
+    // per (db, table), invalidated on DDL). Physical planning calls this for
+    // every query — a full sys_indexes scan per SELECT was the dominant
+    // fixed cost of point lookups.
+    if let Some(meta) = crate::backend::cache::metadata(db_name, table_name) {
+        return Ok(meta.named_indexes.clone());
+    }
+
     use crate::backend::system_table::SYS_INDEXES_SCHEMA;
 
     let (table_id, _) = match crate::backend::system_table::resolve_table_id(db_name, table_name) {
@@ -297,7 +305,7 @@ pub fn create_index(
         .map_err(|e| format!("Failed to open heap for table '{}': {}", table_name, e))?;
 
     // 6. Create the B+ Tree index file (composite-aware)
-    let mut btree = BTree::create_composite(idx_path, key_types.clone())
+    let mut btree = BTree::create_composite(idx_path.clone(), key_types.clone())
         .map_err(|e| format!("Failed to create index file: {}", e))?;
 
     // 7. Scan all tuples and insert into the B+ Tree
@@ -379,6 +387,12 @@ pub fn create_index(
         );
     }
 
+    // DDL landed: forget memoised metadata/discovery for this table and any
+    // stale handle for the freshly rewritten index file.
+    invalidate_discovery(db_name, Some(table_name));
+    crate::backend::cache::invalidate_metadata();
+    crate::backend::cache::evict_btree(&idx_path);
+
     log::info!(
         "[CreateIndex] Index '{}' created with {} entries on {}.{}({})",
         resolved_name, inserted_count, db_name, table_name, column_names.join(",")
@@ -434,11 +448,58 @@ fn discover_indexes_for_table(
     discovered
 }
 
+/// Memoised [`discover_indexes_for_table`] — one sys_indexes scan per
+/// `(db, table)` instead of one per row. Invalidated on CREATE INDEX and
+/// wherever system tables are rewritten (DDL).
+fn discovery_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn discover_cached(
+    db_name: &str,
+    table_name: &str,
+) -> std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>> {
+    let key = (db_name.to_string(), table_name.to_string());
+    if let Ok(map) = discovery_cache().lock() {
+        if let Some(hit) = map.get(&key) {
+            return std::sync::Arc::clone(hit);
+        }
+    }
+
+    let discovered = std::sync::Arc::new(discover_indexes_for_table(db_name, table_name));
+    if let Ok(mut map) = discovery_cache().lock() {
+        map.insert(key, std::sync::Arc::clone(&discovered));
+    }
+    discovered
+}
+
+/// Forget memoised index discovery for a table (or all tables when `None`).
+///
+/// Call after any DDL that changes a table's index set.
+pub fn invalidate_discovery(db_name: &str, table_name: Option<&str>) {
+    let mut cleared_all = false;
+    if let Ok(mut map) = discovery_cache().lock() {
+        match table_name {
+            Some(t) => {
+                map.remove(&(db_name.to_string(), t.to_string()));
+            }
+            None => {
+                map.clear();
+                cleared_all = true;
+            }
+        }
+    }
+    let _ = cleared_all;
+}
+
 /// After a tuple is inserted into the heap, update all existing B+ Tree indexes
 /// for the table.
 ///
-/// Discovers all indexes (named and legacy) via `sys_indexes` and file scanning,
-/// then updates each one with the new tuple's key value.
+/// Index discovery is memoised per `(db, table)` and B+ Tree handles are
+/// process-cached with fsync batching (`backend::cache`), so the per-row cost
+/// is just the key build + tree descent.
 ///
 /// Returns `Ok(())` on success or if no indexes exist (no-op).
 pub fn update_index_on_insert(
@@ -448,12 +509,12 @@ pub fn update_index_on_insert(
     page_id: u32,
     slot_id: u32,
 ) -> Result<(), String> {
-    let indexes = discover_indexes_for_table(db_name, table_name);
+    let indexes = discover_cached(db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
     }
 
-    for (_meta_path, idx_path, meta) in &indexes {
+    for (_meta_path, idx_path, meta) in indexes.iter() {
         // Build the (possibly composite) key from the raw string values.
         // Rows where ANY key component is NULL are not indexed.
         let Some(key_values) = build_key_from_strings(meta, values) else {
@@ -464,23 +525,24 @@ pub fn update_index_on_insert(
             continue;
         };
 
-        let Some(mut btree) = open_btree_for_meta(idx_path, meta) else {
-            log::warn!("[IndexInsert] Failed to open index {:?}, skipping", idx_path);
-            continue;
-        };
+        let res = crate::backend::cache::with_btree(
+            idx_path,
+            || {
+                open_btree_for_meta(idx_path, meta)
+                    .ok_or_else(|| format!("Failed to open index {:?}", idx_path))
+            },
+            |bt| {
+                bt.insert_keys(&key_values, page_id, slot_id)
+                    .map_err(|e| format!("{}", e))
+            },
+        );
 
-        if let Err(e) = btree.insert_keys(&key_values, page_id, slot_id) {
+        if let Err(e) = res {
             log::warn!(
                 "[IndexInsert] Failed to insert into index {:?}: {}, skipping",
                 idx_path, e
             );
             continue;
-        }
-        if let Err(e) = btree.sync() {
-            log::warn!(
-                "[IndexInsert] Failed to sync index {:?}: {}, skipping",
-                idx_path, e
-            );
         }
 
         log::trace!(
@@ -561,7 +623,7 @@ pub fn update_index_on_delete(
     page_id: u32,
     slot_id: u32,
 ) -> Result<bool, String> {
-    let indexes = discover_indexes_for_table(db_name, table_name);
+    let indexes = discover_cached(db_name, table_name);
     if indexes.is_empty() {
         return Ok(false); // No indexes to update
     }
@@ -573,7 +635,7 @@ pub fn update_index_on_delete(
 
     let mut any_updated = false;
 
-    for (_meta_path, idx_path, meta) in &indexes {
+    for (_meta_path, idx_path, meta) in indexes.iter() {
         // Build the (possibly composite) key from the deleted row. Rows with
         // ANY NULL key component were never indexed.
         let Some(key_values) = build_key_from_decoded(meta, &decoded) else {
@@ -584,12 +646,19 @@ pub fn update_index_on_delete(
             continue;
         };
 
-        let Some(mut btree) = open_btree_for_meta(idx_path, meta) else {
-            log::warn!("[IndexDelete] Failed to open index {:?}, skipping", idx_path);
-            continue;
-        };
+        let del = crate::backend::cache::with_btree(
+            idx_path,
+            || {
+                open_btree_for_meta(idx_path, meta)
+                    .ok_or_else(|| format!("Failed to open index {:?}", idx_path))
+            },
+            |bt| {
+                bt.delete_keys(&key_values, page_id, slot_id)
+                    .map_err(|e| format!("{}", e))
+            },
+        );
 
-        match btree.delete_keys(&key_values, page_id, slot_id) {
+        match del {
             Ok(true) => {
                 any_updated = true;
                 log::trace!(
@@ -610,13 +679,6 @@ pub fn update_index_on_delete(
                 );
                 continue;
             }
-        }
-
-        if let Err(e) = btree.sync() {
-            log::warn!(
-                "[IndexDelete] Failed to sync index {:?}: {}, skipping",
-                idx_path, e
-            );
         }
     }
 
@@ -640,7 +702,7 @@ pub fn update_index_on_update(
     new_page_id: u32,
     new_slot_id: u32,
 ) -> Result<(), String> {
-    let indexes = discover_indexes_for_table(db_name, table_name);
+    let indexes = discover_cached(db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
     }
@@ -653,7 +715,7 @@ pub fn update_index_on_update(
     let new_decoded = crate::types::deserialize_nullable_row(&schema_types, new_tuple_data)
         .map_err(|e| format!("Failed to deserialize new tuple: {}", e))?;
 
-    for (_meta_path, idx_path, meta) in &indexes {
+    for (_meta_path, idx_path, meta) in indexes.iter() {
         let old_key = build_key_from_decoded(meta, &old_decoded);
         let new_key = build_key_from_decoded(meta, &new_decoded);
 
@@ -666,36 +728,38 @@ pub fn update_index_on_update(
             continue;
         }
 
-        let Some(mut btree) = open_btree_for_meta(idx_path, meta) else {
-            log::warn!("[IndexUpdate] Failed to open index {:?}, skipping", idx_path);
-            continue;
-        };
+        let res = crate::backend::cache::with_btree(
+            idx_path,
+            || {
+                open_btree_for_meta(idx_path, meta)
+                    .ok_or_else(|| format!("Failed to open index {:?}", idx_path))
+            },
+            |btree| -> Result<(), String> {
+                // Delete old key (if it was indexed), matching by the OLD heap location
+                if let Some(ref old) = old_key {
+                    btree.delete_keys(old, old_page_id, old_slot_id)
+                        .map_err(|e| format!("Failed to delete old key from index: {}", e))?;
+                    log::trace!(
+                        "[IndexUpdate] Deleted old key {:?} at (page={}, slot={}) from index on {}.{}({})",
+                        old, old_page_id, old_slot_id, db_name, table_name, meta.columns().join(",")
+                    );
+                }
 
-        // Delete old key (if it was indexed), matching by the OLD heap location
-        if let Some(ref old) = old_key {
-            let _ = btree.delete_keys(old, old_page_id, old_slot_id)
-                .map_err(|e| format!("Failed to delete old key from index: {}", e))?;
-            log::trace!(
-                "[IndexUpdate] Deleted old key {:?} at (page={}, slot={}) from index on {}.{}({})",
-                old, old_page_id, old_slot_id, db_name, table_name, meta.columns().join(",")
-            );
-        }
+                // Insert new key (if it's not NULL)
+                if let Some(ref new) = new_key {
+                    btree.insert_keys(new, new_page_id, new_slot_id)
+                        .map_err(|e| format!("Failed to insert new key into index: {}", e))?;
+                    log::trace!(
+                        "[IndexUpdate] Inserted new key {:?} → (page={}, slot={}) into index on {}.{}({})",
+                        new, new_page_id, new_slot_id, db_name, table_name, meta.columns().join(",")
+                    );
+                }
+                Ok(())
+            },
+        );
 
-        // Insert new key (if it's not NULL)
-        if let Some(ref new) = new_key {
-            btree.insert_keys(new, new_page_id, new_slot_id)
-                .map_err(|e| format!("Failed to insert new key into index: {}", e))?;
-            log::trace!(
-                "[IndexUpdate] Inserted new key {:?} → (page={}, slot={}) into index on {}.{}({})",
-                new, new_page_id, new_slot_id, db_name, table_name, meta.columns().join(",")
-            );
-        }
-
-        if let Err(e) = btree.sync() {
-            log::warn!(
-                "[IndexUpdate] Failed to sync index {:?}: {}",
-                idx_path, e
-            );
+        if let Err(e) = res {
+            log::warn!("[IndexUpdate] Failed to update index {:?}: {}", idx_path, e);
         }
     }
 

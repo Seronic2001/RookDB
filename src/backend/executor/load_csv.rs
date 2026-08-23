@@ -245,6 +245,12 @@ pub fn load_csv(
 }
 
 /// Insert a single tuple manually using HeapManager (FSM-aware)
+///
+/// Hot-path notes: the HeapManager for the table is process-cached
+/// (`backend::cache::with_heap`) so repeated calls do not re-open files, and
+/// index maintenance goes through the cached B+ Tree registry with batched
+/// fsyncs. Callers that need data on disk should hit a checkpoint
+/// (`backend::cache::checkpoint`) — heap scans do this automatically.
 pub fn insert_single_tuple(
     catalog: &Catalog,
     db_name: &str,
@@ -288,7 +294,7 @@ pub fn insert_single_tuple(
         }
     }
 
-    // Constraint validation: NOT NULL, UNIQUE, CHECK
+    // Constraint validation: NOT NULL, UNIQUE, FK, CHECK
     if let Err(e) = crate::backend::constraint::validate_row_insert(
         catalog, db_name, table_name, values,
     ) {
@@ -346,34 +352,32 @@ pub fn insert_single_tuple(
         }
     };
 
-    // Open HeapManager and insert tuple
+    // Open HeapManager and insert tuple — via the process-cached manager
+    // (no per-row file open / pool flush churn).
     let table_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
 
-    match HeapManager::open(table_path) {
-        Ok(mut heap_manager) => match heap_manager.insert_tuple(&tuple_bytes) {
-            Ok((page_id, slot_id)) => {
-                log::info!(
-                    " Successfully inserted at (page={}, slot={})",
-                    page_id,
-                    slot_id
-                );
+    let inserted =
+        crate::backend::cache::with_heap(&table_path, |hm| hm.insert_tuple(&tuple_bytes));
 
-                // Update any existing B+ Tree index
-                if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
-                    db_name, table_name, values, page_id, slot_id,
-                ) {
-                    log::warn!(" Failed to update index: {}", e);
-                }
+    match inserted {
+        Ok((page_id, slot_id)) => {
+            log::info!(
+                " Successfully inserted at (page={}, slot={})",
+                page_id,
+                slot_id
+            );
 
-                Ok(true)
+            // Update any existing B+ Tree index (cached handles + batched sync)
+            if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
+                db_name, table_name, values, page_id, slot_id,
+            ) {
+                log::warn!(" Failed to update index: {}", e);
             }
-            Err(e) => {
-                log::info!(" Failed to insert tuple: {}", e);
-                Ok(false)
-            }
-        },
+
+            Ok(true)
+        }
         Err(e) => {
-            log::info!(" Failed to open HeapManager: {}", e);
+            log::info!(" Failed to insert tuple: {}", e);
             Ok(false)
         }
     }

@@ -164,6 +164,8 @@ pub fn compaction_table(db_name: &str, table_name: &str) -> io::Result<usize> {
 
     let result = (|| -> io::Result<usize> {
         let path = format!("database/base/{}/{}.dat", db_name, table_name);
+        // Compaction rewrites pages via direct I/O — flush cached state first.
+        crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))?;
         let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
         let file_identity = crate::table::file_identity_from_file(&file)?;
 
@@ -263,6 +265,9 @@ pub fn delete_by_pointers(
     let columns = &table.columns;
 
     let path = format!("database/base/{}/{}.dat", db_name, table_name);
+    // DELETE rewrites pages via direct I/O — flush cached state first.
+    crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to flush cache: {}", e)))?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

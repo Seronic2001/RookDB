@@ -18,7 +18,7 @@ use rook_ast::logical::*;
 use rook_ast::*;
 
 use crate::catalog::Catalog;
-use crate::statistics::collect_table_statistics;
+// statistics collection now routed through backend::cache (size-validated)
 
 use self::helpers::*;
 
@@ -52,8 +52,12 @@ fn load_table_statistics(db_name: &str, catalog: &Catalog) -> std::collections::
 
     let mut stats = std::collections::HashMap::new();
     for table_name in db.tables.keys() {
-        if let Ok(table_stats) = collect_table_statistics(db_name, table_name) {
-            stats.insert(table_name.clone(), table_stats);
+        // Process-cached (file-size validated): collection reads every heap
+        // page and would otherwise dominate per-query planning latency.
+        if let Ok(table_stats) = crate::backend::cache::table_statistics(db_name, table_name) {
+            let cloned: crate::statistics::TableStatistics =
+                (*table_stats).clone();
+            stats.insert(table_name.clone(), cloned);
         }
     }
     stats

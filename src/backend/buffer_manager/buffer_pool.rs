@@ -375,17 +375,29 @@ impl BufferPool {
         Ok(())
     }
 
+    /// Whether any frame holds unflushed modifications.
+    ///
+    /// Lets callers skip flush cycles entirely when the pool is clean —
+    /// repeated checkpoints during read workloads stay free.
+    pub fn has_dirty(&self) -> bool {
+        self.frames.iter().any(|f| f.occupied && f.is_dirty)
+    }
+
     /// Flush all dirty pages to disk.
     pub fn flush_all(&mut self) -> io::Result<()> {
         // Write all dirty, occupied frames back to disk.
+        let mut wrote_any = false;
         for i in 0..self.capacity {
             if self.frames[i].occupied && self.frames[i].is_dirty {
                 self.write_page_to_disk(i)?;
+                wrote_any = true;
             }
         }
-        if let Some(ref mut file) = self.file {
-            file.flush()?;
-            file.sync_all()?;
+        if wrote_any {
+            if let Some(ref mut file) = self.file {
+                file.flush()?;
+                file.sync_all()?;
+            }
         }
         Ok(())
     }

@@ -40,6 +40,11 @@ fn read_header_via_pool(pool: &mut BufferPool) -> io::Result<HeaderMetadata> {
 }
 
 /// Write the header metadata to page 0 via the buffer pool.
+///
+/// The page is only marked dirty; persistence happens through the normal
+/// flush paths (checkpoint, pool eviction, `HeapManager::flush`). Forcing an
+/// 8 KiB header write on every tuple was the dominant write-amplification
+/// cost of bulk loads.
 fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> io::Result<()> {
     let frame_id = pool.fetch_page(0)?;
     {
@@ -51,7 +56,6 @@ fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> io::
         page.data[0..4].copy_from_slice(&header.page_count.to_le_bytes());
     }
     pool.unpin(frame_id, true);
-    pool.flush_page(0)?;
     Ok(())
 }
 
@@ -227,6 +231,8 @@ pub struct HeapManager {
     fsm: FSM,
     #[doc(hidden)]
     pub header: HeaderMetadata,
+    /// Set when the in-memory header changed and needs persisting on flush.
+    header_dirty: bool,
 }
 
 impl HeapManager {
@@ -255,10 +261,22 @@ impl HeapManager {
     pub fn create(file_path: PathBuf) -> io::Result<Self> {
         log::trace!("[HeapManager::create] Creating new heap file at {:?}", file_path);
 
-        // Remove existing file if present
+        // Remove existing file if present — and its FSM sidecar: a stale
+        // .fsm from a previous file at this path advertises free-space
+        // categories for pages that no longer exist, which the search
+        // would otherwise hand out as phantom targets (observed under
+        // stress: "Invalid page_id 491 >= 2" on freshly created tables).
         if file_path.exists() {
             std::fs::remove_file(&file_path)?;
         }
+        let fsm_sidecar = PathBuf::from(format!("{}.fsm", file_path.to_string_lossy()));
+        if fsm_sidecar.exists() {
+            std::fs::remove_file(&fsm_sidecar)?;
+        }
+
+        // A cached manager on this path would hold the OLD shared pool and
+        // FSM handle; evict it so subsequent opens bind to the new file.
+        crate::backend::cache::evict_heap(&file_path)?;
 
         // Create new file
         let mut file = OpenOptions::new()
@@ -296,7 +314,7 @@ impl HeapManager {
         // Register a brand-new shared pool for this (re-created) file,
         // replacing any registry entry left over from a previous file.
         let pool = BufferPool::with_file(
-            shared_pool::SHARED_POOL_CAPACITY,
+            shared_pool::shared_pool_capacity(),
             file,
             file_path.clone(),
         )?;
@@ -316,6 +334,7 @@ impl HeapManager {
             pool,
             fsm,
             header,
+            header_dirty: true,
         };
 
         // Set heap page count to 2 (Page 0 + Page 1)
@@ -414,6 +433,7 @@ impl HeapManager {
             pool,
             fsm,
             header,
+            header_dirty: false,
         })
     }
 
@@ -467,8 +487,26 @@ impl HeapManager {
             // Get a page to try
             let (page_id, mut fsm_page_opt) = match self.fsm.fsm_search_avail(min_category)? {
                 Some((pid, fsm_page)) => {
+                    // Harden against phantom FSM hits: a stale/garbage FSM
+                    // leaf can advertise a page beyond the heap's real page
+                    // count (observed on freshly created tables under stress).
+                    // Treat such hits as a miss so the normal retry logic
+                    // allocates a genuine new page instead of erroring out.
+                    if pid >= self.header.page_count {
+                        log::warn!(
+                            "[HeapManager::insert_tuple] FSM returned phantom page {} (page_count={}); treating as miss",
+                            pid,
+                            self.header.page_count
+                        );
+                        failed_pages.push(pid);
+                        if attempt < 2 {
+                            continue;
+                        } else {
+                            (self.allocate_new_page()?, None)
+                        }
+                    }
                     // Check if this page failed before
-                    if failed_pages.contains(&pid) {
+                    else if failed_pages.contains(&pid) {
                         log::trace!(
                             "[HeapManager::insert_tuple] Page {} previously failed for this insert, allocating new",
                             pid
@@ -567,6 +605,7 @@ impl HeapManager {
 
             // Increment tuple counter
             self.header.total_tuples += 1;
+            self.header_dirty = true;
             
             // Sync updated header to disk via buffer pool
             {
@@ -727,6 +766,7 @@ impl HeapManager {
             // Decrement tuple counter
             if self.header.total_tuples > 0 {
                 self.header.total_tuples -= 1;
+                self.header_dirty = true;
             }
 
             // Sync header to disk via buffer pool
@@ -741,8 +781,11 @@ impl HeapManager {
     /// Start a sequential scan iterator over all pages.
     /// 
     /// Uses direct disk I/O (read-only sequential scan doesn't benefit from caching).
+    /// Before scanning, the executor-tier caches are checkpointed so any rows
+    /// still dirty in a cached buffer pool are visible to this raw read.
     pub fn scan(&self) -> HeapScanIterator {
         log::trace!("[HeapManager::scan] Creating scan iterator");
+        crate::backend::cache::checkpoint();
         HeapScanIterator::new(self.file_path.clone(), self.header.page_count)
     }
 
@@ -757,10 +800,17 @@ impl HeapManager {
     pub fn flush(&mut self) -> io::Result<()> {
         log::trace!("[HeapManager::flush] Flushing all changes");
 
+        // Fast path: nothing dirty in the header, the pool or the FSM —
+        // skip the whole cycle so repeated checkpoints stay free.
+        let mut pool = Self::lock_pool(&self.pool);
+        if !self.header_dirty && !pool.has_dirty() && !self.fsm.has_pending() {
+            return Ok(());
+        }
+
         {
-            let mut pool = Self::lock_pool(&self.pool);
             // Write header via buffer pool
             write_header_via_pool(&mut pool, &self.header)?;
+            self.header_dirty = false;
 
             // Flush all dirty pages in the pool
             pool.flush_all()?;
@@ -771,6 +821,21 @@ impl HeapManager {
 
         log::trace!("[HeapManager::flush] Flush complete");
 
+        Ok(())
+    }
+
+    /// Refresh the in-memory header from the buffer pool.
+    ///
+    /// Used by the heap cache before reusing a resident manager so page
+    /// counts reflect allocations made through other manager instances
+    /// (they share the same underlying shared pool, so this is a cheap
+    /// cached-page read).
+    pub fn reload_header(&mut self) -> io::Result<()> {
+        let fresh = {
+            let mut pool = Self::lock_pool(&self.pool);
+            read_header_via_pool(&mut pool)?
+        };
+        self.header = fresh;
         Ok(())
     }
 
@@ -799,6 +864,7 @@ impl HeapManager {
         // Calculate FSM pages needed
         let new_fsm_page_count = FSM::calculate_fsm_page_count(self.header.page_count);
         self.header.fsm_page_count = new_fsm_page_count;
+        self.header_dirty = true;
 
         // Register new page with FSM (full free space)
         let initial_free = PAGE_SIZE as u32 - PAGE_HEADER_SIZE;

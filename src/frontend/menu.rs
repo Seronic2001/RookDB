@@ -85,7 +85,12 @@ pub fn run() -> io::Result<()> {
             }
             _ => println!(" Invalid option. Please enter a number between 1 and 11."),
         }
+
+        // Statement/action boundary: flush executor-tier caches so every
+        // menu action's writes are durable before the next prompt.
+        storage_manager::backend::cache::checkpoint();
     }
 
+    storage_manager::backend::cache::checkpoint();
     Ok(())
 }

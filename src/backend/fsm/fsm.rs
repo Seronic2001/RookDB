@@ -134,6 +134,9 @@ pub struct FSM {
     fsm_path: PathBuf,
     fsm_file: File,
     heap_page_count: u32,  // Tracks total heap pages for growth detection
+    /// Set when in-memory changes were written to the OS but not yet
+    /// `sync()`ed. Lets callers skip fsync cycles when the FSM is clean.
+    dirty: bool,
 }
 
 impl FSM {
@@ -154,6 +157,7 @@ impl FSM {
             fsm_path,
             fsm_file,
             heap_page_count,
+            dirty: false,
         })
     }
 
@@ -478,8 +482,14 @@ impl FSM {
 
         let page_bytes = page.serialize();
         self.fsm_file.write_all(&page_bytes)?;
+        self.dirty = true;
 
         Ok(())
+    }
+
+    /// Whether unsynced FSM writes exist.
+    pub fn has_pending(&self) -> bool {
+        self.dirty
     }
 
     /// Sync all changes to disk.

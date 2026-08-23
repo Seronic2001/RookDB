@@ -17,7 +17,7 @@
 //! 4. **Header stamping** — `last_vacuum` is recorded in the table header.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::backend::buffer_manager::shared_pool;
 use crate::backend::executor::create_index::{index_file_path, load_table_indexes_multi};
@@ -71,8 +71,11 @@ pub fn vacuum_table(
     let dead_before = read_dead_tuple_count(&heap_path).map_err(|e| e.to_string())?;
 
     // 2. Compaction rewrites pages underneath the buffer pool — drop any
-    //    cached view of this file first.
+    //    cached view of this file first (both the shared pool and the
+    //    executor-tier cached HeapManager).
     shared_pool::invalidate(PathBuf::from(&heap_path).as_path());
+    crate::backend::cache::evict_heap(Path::new(&heap_path))
+        .map_err(|e| format!("VACUUM: failed to flush cached heap: {}", e))?;
 
     // 3. Compact pages with dead slots (+ FSM rebuild + counter reset).
     let pages_compacted =

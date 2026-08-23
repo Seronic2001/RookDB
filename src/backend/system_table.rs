@@ -558,6 +558,10 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     // Create fresh files and populate
     create_system_table_files();
     populate_system_tables(catalog, fk_rows);
+    // System tables rewritten wholesale: table_ids may have changed and
+    // constraint/index rows were rebuilt — forget all memoised metadata.
+    crate::backend::cache::invalidate_metadata();
+    crate::backend::executor::create_index::invalidate_discovery("", None);
     Ok(())
 }
 
@@ -710,7 +714,11 @@ pub fn insert_constraint_metadata(
         Some(ref_table.unwrap_or("").to_string()),
         Some(ref_columns.unwrap_or("").to_string()),
     ];
-    insert_system_rows("constraints", SYS_CONSTRAINTS_SCHEMA, &[constr_row])
+    let res = insert_system_rows("constraints", SYS_CONSTRAINTS_SCHEMA, &[constr_row]);
+    if res.is_ok() {
+        crate::backend::cache::invalidate_metadata();
+    }
+    res
 }
 
 /// Insert metadata for a newly created index into `sys_indexes`.
@@ -794,7 +802,12 @@ pub fn insert_index_metadata(
         Some(if is_primary { "true" } else { "false" }.to_string()), // is_primary
         Some(column_name.to_string()),           // columns
     ];
-    insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &[idx_row])
+    let res = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &[idx_row]);
+    if res.is_ok() {
+        crate::backend::cache::invalidate_metadata();
+        crate::backend::executor::create_index::invalidate_discovery(db_name, Some(table_name));
+    }
+    res
 }
 
 /// Delete a specific index entry from sys_indexes by index name and table.

@@ -1,4 +1,5 @@
 pub mod buffer_manager;
+pub mod cache;
 pub mod catalog;
 pub mod disk;
 pub mod error_handler;

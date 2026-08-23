@@ -21,8 +21,23 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use super::buffer_pool::BufferPool;
 
-/// Frames per shared pool (matches the previous per-instance default).
-pub const SHARED_POOL_CAPACITY: usize = 64;
+/// Frames per shared pool.
+///
+/// The historical default was 64 frames (512 KiB) — far too small for
+/// million-row tables, where every append stream evicted the whole pool
+/// thousands of times per second. The default is now 4096 frames (32 MiB)
+/// and can be overridden with `ROOK_POOL_FRAMES` (e.g. 16384 = 128 MiB).
+pub fn shared_pool_capacity() -> usize {
+    const DEFAULT: usize = 4096;
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("ROOK_POOL_FRAMES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n >= 8 && n <= (1 << 20))
+            .unwrap_or(DEFAULT)
+    })
+}
 
 /// A pool handle shared between every HeapManager on one file.
 pub type SharedPool = Arc<Mutex<BufferPool>>;
@@ -72,7 +87,7 @@ pub fn get_or_create(file_path: &Path) -> io::Result<SharedPool> {
         .read(true)
         .write(true)
         .open(file_path)?;
-    let pool = BufferPool::with_file(SHARED_POOL_CAPACITY, file, file_path.to_path_buf())?;
+    let pool = BufferPool::with_file(shared_pool_capacity(), file, file_path.to_path_buf())?;
     Ok(register_pool(file_path, pool))
 }
 

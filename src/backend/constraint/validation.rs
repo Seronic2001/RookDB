@@ -6,9 +6,9 @@
 use crate::catalog::types::Column;
 use crate::types::{DataValue, DataType};
 
-use super::loaders;
 use super::value_lookup;
 use super::{ConstraintKind, RookError};
+use crate::backend::cache::TableMeta;
 
 /// Check that no NOT NULL column receives a NULL value.
 pub(crate) fn check_not_null(
@@ -36,39 +36,31 @@ pub(crate) fn check_not_null(
     Ok(())
 }
 
-/// Check UNIQUE constraints by looking up values in the B+ Tree index.
+
+
+/// Metadata-driven UNIQUE check — the hot path used by row inserts/updates.
 ///
-/// Scans `sys_indexes` for unique indexes on this table, then for each
-/// indexed column, opens the B+ Tree and searches for the corresponding
-/// value.  If found, the insert/update is rejected.
-///
-/// `exclude` names the row's own heap location; matches pointing at that
-/// exact tuple are ignored so an UPDATE does not collide with itself (a row
-/// always trivially equals its own UNIQUE values).
-///
-/// If no B+ Tree index exists for a UNIQUE column, falls back to a
-/// sequential heap scan to check for duplicate values (SQL standard
-/// requires UNIQUE enforcement regardless of index existence).
-pub(crate) fn check_unique_insert(
+/// Identical semantics to [`check_unique_insert`], but the unique-index list
+/// comes from the process-cached [`TableMeta`] and B+ Tree handles are reused
+/// across rows (fsync batched in the cache layer). When `meta` is `None`
+/// (table absent from system tables) only column-level UNIQUE flags apply,
+/// via the heap-scan fallback.
+pub(crate) fn check_unique_insert_meta(
     db_name: &str,
     table_name: &str,
     columns: &[Column],
     values: &[&str],
     exclude: Option<(u32, u32)>,
+    meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
-    // Load unique indexes from sys_indexes for this table
-    // (load_unique_indexes internally resolves the table_id)
-    let unique_indexes = match loaders::load_unique_indexes(db_name, table_name) {
-        Ok(indexes) => indexes,
-        Err(_) => return Ok(()),
+    let unique_indexes: Vec<(String, String)> = match meta {
+        Some(m) => m.unique_indexes.clone(),
+        None => Vec::new(),
     };
 
     for (col_pos, col) in columns.iter().enumerate() {
-        // Check if this column has a UNIQUE constraint (either via index or column definition)
         let has_unique_via_index = unique_indexes.iter().any(|(_, idx_col)| idx_col.eq_ignore_ascii_case(&col.name));
-        let has_unique_via_constraint = col.constraints.unique;
-        let is_unique = has_unique_via_index || has_unique_via_constraint;
-
+        let is_unique = has_unique_via_index || col.constraints.unique;
         if !is_unique {
             continue;
         }
@@ -81,16 +73,13 @@ pub(crate) fn check_unique_insert(
             continue;
         }
 
-        // Try B+ Tree index first (fast path)
-        // Find the index file that indexes this column
         let col_type = columns[col_pos].data_type.clone();
         let key_value = crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
             .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
 
-        // Try to find a named index for this column
         let mut found_via_index = false;
 
-        // Check if we have a named index on this column
+        // Named unique indexes on this column (cached B+ Tree handles).
         for (idx_name, idx_col) in &unique_indexes {
             if !idx_col.eq_ignore_ascii_case(&col.name) {
                 continue;
@@ -101,60 +90,52 @@ pub(crate) fn check_unique_insert(
             if !idx_path.exists() {
                 continue;
             }
-            match crate::backend::index::btree::BTree::open(idx_path) {
-                Ok(mut btree) => {
-                    btree.set_key_type(col_type.clone());
-                    match btree.search_all(&key_value) {
-                        Ok(tids) => {
-                            // A row never collides with itself: ignore the
-                            // tuple this UPDATE is rewriting.
-                            if tids.iter().any(|tid| Some(*tid) != exclude) {
-                                found_via_index = true;
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "[Constraint] BTree search error for UNIQUE check on '{}.{}': {}",
-                                db_name, table_name, e
-                            );
-                        }
+            match crate::backend::cache::with_btree(
+                &idx_path,
+                || -> std::io::Result<crate::backend::index::btree::BTree> {
+                    let mut bt = crate::backend::index::btree::BTree::open(idx_path.clone())?;
+                    bt.set_key_type(col_type.clone());
+                    Ok(bt)
+                },
+                |bt| bt.search_all(&key_value),
+            ) {
+                Ok(tids) => {
+                    if tids.iter().any(|tid| Some(*tid) != exclude) {
+                        found_via_index = true;
+                        break;
                     }
                 }
                 Err(e) => {
                     log::warn!(
-                        "[Constraint] Failed to open index for UNIQUE check on '{}.{}': {}",
+                        "[Constraint] BTree search error for UNIQUE check on '{}.{}': {}",
                         db_name, table_name, e
                     );
                 }
             }
         }
 
-        // Fallback to legacy single-index file
+        // Fallback to legacy single-index file (cached handle as well).
         if !found_via_index {
             let legacy_idx_path = std::path::PathBuf::from(format!(
                 "database/base/{}/{}.idx", db_name, table_name
             ));
             if legacy_idx_path.exists() {
-                match crate::backend::index::btree::BTree::open(legacy_idx_path) {
-                    Ok(mut btree) => {
-                        btree.set_key_type(col_type.clone());
-                        match btree.search_all(&key_value) {
-                            Ok(tids) if tids.iter().any(|tid| Some(*tid) != exclude) => {
-                                found_via_index = true
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                log::warn!(
-                                    "[Constraint] Legacy BTree search error for UNIQUE check on '{}.{}': {}",
-                                    db_name, table_name, e
-                                );
-                            }
-                        }
+                match crate::backend::cache::with_btree(
+                    &legacy_idx_path,
+                    || -> std::io::Result<crate::backend::index::btree::BTree> {
+                        let mut bt = crate::backend::index::btree::BTree::open(legacy_idx_path.clone())?;
+                        bt.set_key_type(col_type.clone());
+                        Ok(bt)
+                    },
+                    |bt| bt.search_all(&key_value),
+                ) {
+                    Ok(tids) if tids.iter().any(|tid| Some(*tid) != exclude) => {
+                        found_via_index = true
                     }
+                    Ok(_) => {}
                     Err(e) => {
                         log::warn!(
-                            "[Constraint] Failed to open legacy index for UNIQUE check on '{}.{}': {}",
+                            "[Constraint] Legacy BTree search error for UNIQUE check on '{}.{}': {}",
                             db_name, table_name, e
                         );
                     }
@@ -174,46 +155,46 @@ pub(crate) fn check_unique_insert(
             ));
         }
 
-        // If no index was available OR the index lookup didn't find a match,
-        // but this column has a UNIQUE constraint, do a fallback heap scan
-        // to ensure the value is truly unique.
-        let heap_path = std::path::PathBuf::from(format!(
-            "database/base/{}/{}.dat", db_name, table_name
-        ));
-        if !heap_path.exists() {
-            continue;
-        }
+        // No usable index match → heap-scan fallback so UNIQUE still holds
+        // (original semantics: run whenever the index path found nothing).
+        {
+            let heap_path = std::path::PathBuf::from(format!(
+                "database/base/{}/{}.dat", db_name, table_name
+            ));
+            if !heap_path.exists() {
+                continue;
+            }
 
-        if let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path) {
-            let schema_types: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
-            for result in heap.scan() {
-                let (page_id, slot_id, raw_bytes) = match result {
-                    Ok(triple) => triple,
-                    Err(_) => continue,
-                };
-                // Skip the row's own location (self-match on UPDATE).
-                if exclude == Some((page_id, slot_id)) {
-                    continue;
-                }
+            if let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path) {
+                let schema_types: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
+                for result in heap.scan() {
+                    let (page_id, slot_id, raw_bytes) = match result {
+                        Ok(triple) => triple,
+                        Err(_) => continue,
+                    };
+                    if exclude == Some((page_id, slot_id)) {
+                        continue;
+                    }
 
-                let decoded = match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
+                    let decoded = match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
 
-                if let Some(Some(existing_val)) = decoded.get(col_pos) {
-                    use crate::types::Comparable;
-                    if let Ok(cmp) = existing_val.compare(&key_value) {
-                        if cmp == std::cmp::Ordering::Equal {
-                            return Err(RookError::constraint(
-                                ConstraintKind::Unique,
-                                table_name,
-                                Some(&col.name),
-                                format!(
-                                    "UNIQUE constraint violated: value '{}' already exists for column '{}'",
-                                    trimmed, col.name
-                                ),
-                            ));
+                    if let Some(Some(existing_val)) = decoded.get(col_pos) {
+                        use crate::types::Comparable;
+                        if let Ok(cmp) = existing_val.compare(&key_value) {
+                            if cmp == std::cmp::Ordering::Equal {
+                                return Err(RookError::constraint(
+                                    ConstraintKind::Unique,
+                                    table_name,
+                                    Some(&col.name),
+                                    format!(
+                                        "UNIQUE constraint violated: value '{}' already exists for column '{}'",
+                                        trimmed, col.name
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
@@ -224,31 +205,32 @@ pub(crate) fn check_unique_insert(
     Ok(())
 }
 
-/// Check FOREIGN KEY constraints — verify referenced keys exist in parent tables.
-pub(crate) fn check_foreign_key_insert(
+/// Metadata-driven FOREIGN KEY check (hot path).
+///
+/// FK definitions come from the process-cached [`TableMeta`] instead of
+/// re-resolving table ids and rescanning `sys_constraints` on every row.
+pub(crate) fn check_foreign_key_insert_meta(
     catalog: &crate::catalog::types::Catalog,
     db_name: &str,
     table_name: &str,
     columns: &[Column],
     values: &[&str],
+    meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
-    let (table_id, _) = match crate::backend::system_table::resolve_table_id(db_name, table_name) {
-        Ok(ids) => ids,
-        Err(_) => return Ok(()),
+    let foreign_keys: Vec<(String, String, String)> = match meta {
+        Some(m) => m.foreign_keys.clone(),
+        None => Vec::new(),
     };
 
-    let foreign_keys = match loaders::load_foreign_keys(table_id) {
-        Ok(fks) => fks,
-        Err(_) => return Ok(()),
-    };
+    if foreign_keys.is_empty() {
+        return Ok(());
+    }
 
     for fk in &foreign_keys {
-        // fk: (child_col, parent_table, parent_col)
         let child_col = &fk.0;
         let parent_table = &fk.1;
         let parent_col = &fk.2;
 
-        // Find child column value
         let col_pos = columns.iter().position(|c| c.name.eq_ignore_ascii_case(child_col))
             .ok_or_else(|| format!("FK column '{}' not found in table schema", child_col))?;
 
@@ -260,14 +242,12 @@ pub(crate) fn check_foreign_key_insert(
             continue;
         }
 
-        // Look up parent column type from catalog
         let parent_col_type = catalog.databases.get(db_name)
             .and_then(|db| db.tables.get(parent_table))
             .and_then(|t| t.columns.iter().find(|c| c.name.eq_ignore_ascii_case(parent_col)))
             .map(|c| c.data_type.clone())
             .unwrap_or(DataType::Varchar(255));
 
-        // Check if the referenced value exists in the parent table
         if !value_lookup::value_exists_in_table(db_name, parent_table, parent_col, &parent_col_type, trimmed)? {
             return Err(RookError::constraint(
                 ConstraintKind::ForeignKey,
@@ -284,6 +264,8 @@ pub(crate) fn check_foreign_key_insert(
     Ok(())
 }
 
+
+
 /// Check CHECK constraints loaded from `sys_constraints`.
 ///
 /// Each CHECK expression (stored in the `columns` field of the constraint
@@ -294,30 +276,27 @@ pub(crate) fn check_foreign_key_insert(
 ///
 /// Semantics follow SQL: the row passes when the predicate is TRUE;
 /// NULL results are UNKNOWN and therefore pass.
-pub(crate) fn check_constraints(
-    db_name: &str,
+/// Metadata-driven CHECK constraint check (hot path).
+///
+/// Expressions come from the process-cached [`TableMeta`]; each expression is
+/// still compiled per row (SQL parse + predicate build) — memoising compiled
+/// predicates is future work.
+pub(crate) fn check_constraints_meta(
+    _db_name: &str,
     table_name: &str,
     columns: &[Column],
     values: &[&str],
+    meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
-    // Resolve table_id from system tables
-    let (table_id, _) = match crate::backend::system_table::resolve_table_id(db_name, table_name) {
-        Ok(ids) => ids,
-        Err(_) => return Ok(()), // not in system tables yet
-    };
-
-    // Load CHECK constraints from sys_constraints
-    let check_exprs = match loaders::load_check_constraints(table_id) {
-        Ok(exprs) => exprs,
-        Err(_) => return Ok(()),
+    let check_exprs: Vec<String> = match meta {
+        Some(m) => m.check_exprs.clone(),
+        None => Vec::new(),
     };
 
     if check_exprs.is_empty() {
         return Ok(());
     }
 
-    // Build the candidate row once: a physical Tuple over the table's
-    // columns, with values type-parsed from their raw string form.
     let tuple = build_check_tuple(columns, values);
 
     for expr in &check_exprs {
@@ -343,6 +322,8 @@ pub(crate) fn check_constraints(
 
     Ok(())
 }
+
+
 
 /// Parse a CHECK expression with the real SQL grammar by embedding it in a
 /// synthetic SELECT, then compile it into a physical `Predicate`.

@@ -370,6 +370,10 @@ pub fn update_by_pointers(
     let columns = &table.columns;
 
     let path = format!("database/base/{}/{}.dat", db_name, table_name);
+    // UPDATE rewrites pages via direct I/O — flush/evict cached pool state
+    // first so the raw reads observe every prior insert.
+    crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to flush cache: {}", e)))?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

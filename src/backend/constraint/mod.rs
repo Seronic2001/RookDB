@@ -54,14 +54,18 @@ pub fn validate_row_insert(
     // 1. NOT NULL
     validation::check_not_null(table_name, columns, values)?;
 
+    // Load constraint/index metadata once (process-cached; a miss does one
+    // pass over sys_tables/sys_indexes/sys_constraints instead of five).
+    let meta = crate::backend::cache::metadata(db_name, table_name);
+
     // 2. UNIQUE (via B+ Tree if index exists) — inserts have no self-row
-    validation::check_unique_insert(db_name, table_name, columns, values, None)?;
+    validation::check_unique_insert_meta(db_name, table_name, columns, values, None, meta.as_deref())?;
 
     // 3. FOREIGN KEY (parent key must exist)
-    validation::check_foreign_key_insert(catalog, db_name, table_name, columns, values)?;
+    validation::check_foreign_key_insert_meta(catalog, db_name, table_name, columns, values, meta.as_deref())?;
 
-    // 4. CHECK constraints (loaded from sys_constraints)
-    validation::check_constraints(db_name, table_name, columns, values)?;
+    // 4. CHECK constraints
+    validation::check_constraints_meta(db_name, table_name, columns, values, meta.as_deref())?;
 
     Ok(())
 }
@@ -82,17 +86,14 @@ pub fn validate_row_delete(
     table_name: &str,
     column_values: &[(String, crate::backend::executor::delete::ColumnValue)],
 ) -> Result<(), RookError> {
-    // Load FK constraints where OUR table is the parent (ref_table == our_name)
-    let foreign_keys = match loaders::load_referencing_foreign_keys(db_name, table_name) {
-        Ok(fks) => fks,
-        Err(_) => return Ok(()),
-    };
+    // Load FK constraints where OUR table is the parent (process-cached).
+    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
 
     if foreign_keys.is_empty() {
         return Ok(());
     }
 
-    for fk in &foreign_keys {
+    for fk in foreign_keys.iter() {
         // fk: (child_table, child_col, parent_col, parent_table, action_type)
         let child_table = &fk.0;
         let child_col = &fk.1;
@@ -161,16 +162,13 @@ pub fn propagate_update_to_children(
     old_decoded: &[(String, crate::backend::executor::delete::ColumnValue)],
     new_decoded: &[(String, crate::backend::executor::delete::ColumnValue)],
 ) -> Result<(), RookError> {
-    let foreign_keys = match loaders::load_referencing_foreign_keys(db_name, table_name) {
-        Ok(fks) => fks,
-        Err(_) => return Ok(()),
-    };
+    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
 
     if foreign_keys.is_empty() {
         return Ok(());
     }
 
-    for fk in &foreign_keys {
+    for fk in foreign_keys.iter() {
         let child_table = &fk.0;
         let child_col = &fk.1;
         let parent_col = &fk.2;
@@ -266,17 +264,20 @@ pub fn validate_row_update(
 
     let columns = &table.columns;
 
+    // Load constraint/index metadata once (process-cached).
+    let meta = crate::backend::cache::metadata(db_name, table_name);
+
     // 1. NOT NULL (new values must not violate)
     validation::check_not_null(table_name, columns, new_values)?;
 
     // 2. UNIQUE — self-match excluded via `exclude`
-    validation::check_unique_insert(db_name, table_name, columns, new_values, exclude)?;
+    validation::check_unique_insert_meta(db_name, table_name, columns, new_values, exclude, meta.as_deref())?;
 
     // 3. FOREIGN KEY (parent key must exist)
-    validation::check_foreign_key_insert(catalog, db_name, table_name, columns, new_values)?;
+    validation::check_foreign_key_insert_meta(catalog, db_name, table_name, columns, new_values, meta.as_deref())?;
 
     // 4. CHECK constraints
-    validation::check_constraints(db_name, table_name, columns, new_values)?;
+    validation::check_constraints_meta(db_name, table_name, columns, new_values, meta.as_deref())?;
 
     Ok(())
 }
