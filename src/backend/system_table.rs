@@ -42,7 +42,7 @@ fn sys_path(table: &str) -> PathBuf {
 // These match the physical column order used for serialisation.
 
 /// Schema for `sys_databases`: db_id:INT, name:VARCHAR(255)
-const SYS_DATABASES_SCHEMA: &[DataType] = &[DataType::Int, DataType::Varchar(255)];
+pub const SYS_DATABASES_SCHEMA: &[DataType] = &[DataType::Int, DataType::Varchar(255)];
 
 /// Schema for `sys_tables`: table_id:INT, db_id:INT, name:VARCHAR(255), file_path:VARCHAR(512)
 pub const SYS_TABLES_SCHEMA: &[DataType] = &[
@@ -207,6 +207,51 @@ pub fn load_catalog_from_system() -> Catalog {
         }
     };
 
+    // Scan sys_constraints so per-column flags (NOT NULL / UNIQUE / CHECK)
+    // can be restored onto the rebuilt `Column` structs below.
+    //
+    // CRITICAL FIX (see ANALYSIS.md Tier 1 #1): without this mapping every
+    // Column was rebuilt with `Constraints::default()`, silently disabling
+    // NOT NULL/UNIQUE validation after any process restart.
+    let constraints = match scan_system_table("constraints", SYS_CONSTRAINTS_SCHEMA) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::error!("[SystemCatalog] Failed to read sys_constraints: {}", e);
+            Vec::new()
+        }
+    };
+    // table_id → [(constraint_type, columns_field)]
+    let mut constraints_by_table: std::collections::HashMap<i32, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for row in &constraints {
+        if row.len() < 4 {
+            continue;
+        }
+        let table_id = match &row[1] {
+            Some(crate::types::DataValue::Int(id)) => *id,
+            _ => continue,
+        };
+        let constr_type = match &row[2] {
+            Some(crate::types::DataValue::Varchar(s)) => s.to_ascii_uppercase(),
+            Some(crate::types::DataValue::Char(s)) => s.to_ascii_uppercase(),
+            _ => continue,
+        };
+        let columns_field = match &row[3] {
+            Some(crate::types::DataValue::Varchar(s)) => s.clone(),
+            Some(crate::types::DataValue::Char(s)) => s.clone(),
+            _ => continue,
+        };
+        // FOREIGN KEY rows are loaded live by the constraint module and are
+        // not represented as column flags — skip them here.
+        if constr_type.contains("FOREIGN KEY") {
+            continue;
+        }
+        constraints_by_table
+            .entry(table_id)
+            .or_default()
+            .push((constr_type, columns_field));
+    }
+
     // Build the in-memory catalog
     for db_row in &databases {
         // db_row columns: db_id, name
@@ -278,17 +323,102 @@ pub fn load_catalog_from_system() -> Catalog {
                     _ => true,
                 };
 
+                // Restore DEFAULT metadata (sys_columns idx 6/7 are written
+                // during save but were never read back on load).
+                let has_default = match &col_row.get(6) {
+                    Some(Some(crate::types::DataValue::Bool(v))) => *v,
+                    _ => false,
+                };
+                let default_value_str = match &col_row.get(7) {
+                    Some(Some(crate::types::DataValue::Varchar(s))) => s.clone(),
+                    Some(Some(crate::types::DataValue::Char(s))) => s.clone(),
+                    _ => String::new(),
+                };
+                let parsed_default = if has_default && !default_value_str.is_empty() {
+                    crate::backend::executor::create_index::parse_string_to_value(
+                        &col_type,
+                        &default_value_str,
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+
+                // Restore per-column constraint flags from sys_constraints.
+                let mut constraints = Constraints {
+                    not_null: false,
+                    unique: false,
+                    default: parsed_default,
+                    check: None,
+                };
+                if let Some(rows) = constraints_by_table.get(&table_id) {
+                    for (constr_type, columns_field) in rows {
+                        // NOT NULL / UNIQUE / PRIMARY KEY store the column
+                        // name (possibly comma-separated) in the columns
+                        // field; match this column case-insensitively.
+                        let applies = columns_field
+                            .split(',')
+                            .map(|s| s.trim())
+                            .any(|c| c.eq_ignore_ascii_case(&col_name));
+                        if !applies {
+                            continue;
+                        }
+                        if constr_type.contains("PRIMARY KEY") {
+                            constraints.not_null = true;
+                            constraints.unique = true;
+                        } else if constr_type.contains("NOT NULL") {
+                            constraints.not_null = true;
+                        } else if constr_type == "UNIQUE" {
+                            constraints.unique = true;
+                        }
+                    }
+                }
+
+                // NOT NULL is enforced via the `nullable` flag; keep both in
+                // sync so validation works identically before/after reload.
+                let effective_nullable = col_nullable && !constraints.not_null;
+
                 col_with_ordinals.push((
                     col_ordinal,
                     Column {
                         name: col_name,
                         data_type: col_type,
-                        nullable: col_nullable,
-                        constraints: Constraints::default(),
+                        nullable: effective_nullable,
+                        constraints,
                     },
                 ));
             }
             col_with_ordinals.sort_by_key(|(ord, _)| *ord);
+
+            // Attach CHECK constraints to their owning column.
+            //
+            // The stored format ("CHECK(expr)") does not record which column
+            // the constraint was declared on, so re-attach each expression to
+            // the first column whose name appears in it (falling back to the
+            // table's first column).  `Constraints.check` is only used to
+            // re-emit sys_constraints rows on save — actual CHECK validation
+            // reads sys_constraints live — so the attachment choice is stable
+            // across save/load cycles.
+            if let Some(rows) = constraints_by_table.get(&table_id) {
+                for (constr_type, columns_field) in rows {
+                    if constr_type != "CHECK" {
+                        continue;
+                    }
+                    let Some(expr) = strip_check_wrapper(columns_field) else {
+                        continue;
+                    };
+                    let owner = col_with_ordinals
+                        .iter()
+                        .position(|(_, c)| expr.contains(&c.name))
+                        .unwrap_or(0);
+                    if let Some((_, col)) = col_with_ordinals.get_mut(owner) {
+                        if col.constraints.check.is_none() {
+                            col.constraints.check = Some(expr);
+                        }
+                    }
+                }
+            }
+
             let table_cols: Vec<Column> = col_with_ordinals.into_iter().map(|(_, c)| c).collect();
 
             database
@@ -1065,6 +1195,34 @@ fn insert_system_rows(
     Ok(())
 }
 
+/// Iterate a catalog's databases in deterministic (sorted-by-name) order.
+///
+/// HashMap iteration order is randomised per process; sorting by name keeps
+/// generated IDs stable across save/load cycles and process restarts.
+fn sorted_databases(catalog: &Catalog) -> Vec<(&String, &Database)> {
+    let mut entries: Vec<(&String, &Database)> = catalog.databases.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+}
+
+/// Strip the `CHECK(...)` wrapper from a sys_constraints `columns` field.
+///
+/// Handles both `"CHECK(expr)"` and bare `"expr"` formats (matching the
+/// parser used by the constraint loaders).
+fn strip_check_wrapper(columns_field: &str) -> Option<String> {
+    if let Some(inner) = columns_field.strip_prefix("CHECK(") {
+        if let Some(end) = inner.rfind(')') {
+            return Some(inner[..end].to_string());
+        }
+        return Some(inner.to_string());
+    }
+    if columns_field.is_empty() {
+        None
+    } else {
+        Some(columns_field.to_string())
+    }
+}
+
 /// Populate all system tables from an in-memory Catalog.
 ///
 /// Writes databases, tables, columns, constraints, and (where possible)
@@ -1083,8 +1241,15 @@ fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec<Option<Str
     // First pass: collect table names and assign table_ids (needed for FK
     // name resolution).  The iteration order matches the main loop below
     // because no HashMap mutations happen between passes.
-    for (_db_name, database) in &catalog.databases {
-        for (tbl_name, _table) in &database.tables {
+    //
+    // DETERMINISM: databases and tables are iterated in sorted-name order so
+    // that db_id/table_id assignment is stable across processes.  HashMap
+    // iteration order is randomised per process, which previously produced
+    // nondeterministic IDs (breaking FK resolution and reproducibility).
+    for (_db_name, database) in sorted_databases(catalog) {
+        let mut tbl_names: Vec<&String> = database.tables.keys().collect();
+        tbl_names.sort();
+        for tbl_name in tbl_names {
             let table_id = next_table_id;
             table_name_to_new_id.insert(tbl_name.clone(), table_id);
             next_table_id += 1;
@@ -1118,7 +1283,7 @@ fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec<Option<Str
     let mut tbl_rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut col_rows: Vec<Vec<Option<String>>> = Vec::new();
 
-    for (db_name, database) in &catalog.databases {
+    for (db_name, database) in sorted_databases(catalog) {
         let db_id = next_db_id;
         next_db_id += 1;
 
@@ -1127,7 +1292,10 @@ fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec<Option<Str
             Some(db_name.clone()),
         ]);
 
-        for (tbl_name, table) in &database.tables {
+        let mut tbl_names: Vec<&String> = database.tables.keys().collect();
+        tbl_names.sort();
+        for tbl_name in tbl_names {
+            let table = &database.tables[tbl_name];
             let table_id = next_table_id;
             next_table_id += 1;
 
@@ -1258,7 +1426,7 @@ fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec<Option<Str
     // ── Populate sys_views ──────────────────────────────────────────────
     let mut view_rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut next_view_id = 1i32;
-    for (db_name, database) in &catalog.databases {
+    for (db_name, database) in sorted_databases(catalog) {
         let db_id = db_rows.iter().find_map(|row| {
             match (&row[0], &row[1]) {
                 (Some(id_str), Some(name)) if name == db_name => id_str.parse::<i32>().ok(),
@@ -1266,7 +1434,10 @@ fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec<Option<Str
             }
         }).unwrap_or(1);
 
-        for (view_name, view_def) in &database.views {
+        let mut view_names: Vec<&String> = database.views.keys().collect();
+        view_names.sort();
+        for view_name in view_names {
+            let view_def = &database.views[view_name];
             view_rows.push(vec![
                 Some(next_view_id.to_string()), // view_id
                 Some(db_id.to_string()),        // db_id
