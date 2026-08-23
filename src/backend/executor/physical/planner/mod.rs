@@ -848,11 +848,11 @@ impl PhysicalPlanner {
                 mode, ts.table
             );
 
-            let mut btree = BTree::open(idx_path)
+            let mut btree = BTree::open(idx_path.clone())
                 .map_err(|e| format!("Failed to open index: {}", e))?;
             // Set key type(s) from the INDEXED column(s) (NOT the first table column)
             if !best_key_types.is_empty() {
-                btree.set_key_types(best_key_types);
+                btree.set_key_types(best_key_types.clone());
             } else if let Some(idx_col) = table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(col_name.as_str())) {
                 btree.set_key_type(idx_col.data_type.clone());
             } else if let Some(first_col) = table_schema.first() {
