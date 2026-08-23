@@ -228,7 +228,12 @@ impl PhysicalOperator for ProjectionOperator {
                     let val = expr.evaluate(&child_tuple)?;
                     values.push(val);
                 }
-                Ok(Some(Tuple::new(values, self.output_schema.clone())))
+                // Each output row derives from exactly one input row: carry
+                // its heap location through so pointer-based UPDATE/DELETE
+                // can still address the row (a synthetic source — aggregate
+                // output — stays location-less).
+                Ok(Some(Tuple::new(values, self.output_schema.clone())
+                    .with_location_from(&child_tuple)))
             }
             None => Ok(None),
         }

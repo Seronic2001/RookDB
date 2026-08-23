@@ -55,6 +55,20 @@ impl Tuple {
         Self { values, column_info, page_id: Some(page_id), slot_id: Some(slot_id) }
     }
 
+    /// Attach the source tuple's heap location (if any) to this derived
+    /// tuple.
+    ///
+    /// Operators that build NEW tuples from one input row per output row
+    /// (e.g. Projection) must carry the row's `(page_id, slot_id)` through,
+    /// otherwise pointer-based UPDATE/DELETE cannot address the row. A
+    /// synthetic source (aggregate output, single-row stub) simply stays
+    /// location-less.
+    pub fn with_location_from(mut self, src: &Tuple) -> Self {
+        self.page_id = src.page_id;
+        self.slot_id = src.slot_id;
+        self
+    }
+
     /// How many columns this tuple has.
     pub fn arity(&self) -> usize {
         self.values.len()
