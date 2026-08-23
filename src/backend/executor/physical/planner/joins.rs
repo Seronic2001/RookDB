@@ -7,6 +7,7 @@ use super::super::expr::{Predicate, Expr, ComparisonOp, expr_from_ast, predicate
 use super::super::operators::{
     PhysicalOperator,
     NestedLoopJoinOperator,
+    HashJoinOperator,
     JoinType as PhysicalJoinType,
     AggregateOperator,
     AggregateInfo,
@@ -94,6 +95,35 @@ impl PhysicalPlanner {
             join_type,
             if predicate.is_some() { "yes" } else { "no" }
         );
+
+        // Use a hash join when the condition contains at least one
+        // cross-side equality conjunct (INNER joins only) — turns O(n·m)
+        // nested-loop joins into O(n+m). Remaining non-equality conjuncts are
+        // evaluated as a post-join filter by HashJoinOperator.
+        if matches!(join_type, PhysicalJoinType::Inner) {
+            if let Some(pred) = &predicate {
+                let left_schema = left.schema().to_vec();
+                let right_schema = right.schema().to_vec();
+                if let Some((build_keys, probe_keys, residual)) =
+                    extract_equi_join_keys(pred, &left_schema, &right_schema)
+                {
+                    if !build_keys.is_empty() {
+                        log::info!(
+                            "[Volcano] Using HashJoin: {} equi-key pair(s), residual predicate: {}",
+                            build_keys.len(),
+                            residual.is_some()
+                        );
+                        return Ok(Box::new(HashJoinOperator::new(
+                            left,
+                            right,
+                            build_keys,
+                            probe_keys,
+                            residual,
+                        )));
+                    }
+                }
+            }
+        }
 
         // Use NestedLoopJoin for all join types
         Ok(Box::new(NestedLoopJoinOperator::new(
@@ -519,4 +549,79 @@ fn render_agg_args(agg: &rook_ast::logical::AggregateExpr) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+// ── Equi-join key extraction ─────────────────────────────────────────────────
+
+/// Does `expr` reference only columns from `schema`?
+fn expr_bound_to(expr: &Expr, schema: &[ColumnInfo]) -> bool {
+    match expr {
+        Expr::Column { table, column } => schema.iter().any(|c| {
+            c.name.eq_ignore_ascii_case(column)
+                && match table {
+                    Some(t) => c.table.as_deref().map(|ct| ct.eq_ignore_ascii_case(t)).unwrap_or(true),
+                    None => true,
+                }
+        }),
+        Expr::Constant(_) | Expr::Null => true,
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) => {
+            expr_bound_to(a, schema) && expr_bound_to(b, schema)
+        }
+        // Conservative: anything else (CASE, CAST over unknown, correlated
+        // params…) stays out of hash keys.
+        _ => false,
+    }
+}
+
+/// Split an equality join predicate into (build_keys, probe_keys, residual).
+///
+/// A conjunct `L = R` becomes a hash-key pair when one side references only
+/// left-operator columns and the other only right-operator columns. Equality
+/// conjuncts that don't qualify (same-side or non-column expressions) and all
+/// non-equality conjuncts are returned as the residual predicate.
+fn extract_equi_join_keys(
+    pred: &Predicate,
+    left_schema: &[ColumnInfo],
+    right_schema: &[ColumnInfo],
+) -> Option<(Vec<Expr>, Vec<Expr>, Option<Predicate>)> {
+    let mut build_keys = Vec::new();
+    let mut probe_keys = Vec::new();
+    let mut residual: Vec<&Predicate> = Vec::new();
+
+    fn walk<'p>(
+        p: &'p Predicate,
+        l: &[ColumnInfo],
+        r: &[ColumnInfo],
+        bk: &mut Vec<Expr>,
+        pk: &mut Vec<Expr>,
+        res: &mut Vec<&'p Predicate>,
+    ) {
+        match p {
+            Predicate::And(a, b) => {
+                walk(a, l, r, bk, pk, res);
+                walk(b, l, r, bk, pk, res);
+            }
+            Predicate::Compare(lhs, ComparisonOp::Equals, rhs) => {
+                let l_has_lhs = expr_bound_to(lhs, l);
+                let r_has_lhs = expr_bound_to(lhs, r);
+                let l_has_rhs = expr_bound_to(rhs, l);
+                let r_has_rhs = expr_bound_to(rhs, r);
+                if l_has_lhs && r_has_rhs && !r_has_lhs {
+                    bk.push(lhs.clone());
+                    pk.push(rhs.clone());
+                } else if l_has_rhs && r_has_lhs && !l_has_lhs {
+                    bk.push(rhs.clone());
+                    pk.push(lhs.clone());
+                } else {
+                    res.push(p);
+                }
+            }
+            other => res.push(other),
+        }
+    }
+
+    walk(pred, left_schema, right_schema, &mut build_keys, &mut probe_keys, &mut residual);
+
+    let residual_pred = residual.into_iter().cloned().reduce(|a, b| Predicate::and(a, b));
+    Some((build_keys, probe_keys, residual_pred))
 }
