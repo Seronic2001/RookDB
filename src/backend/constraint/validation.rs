@@ -8,17 +8,27 @@ use crate::types::DataType;
 
 use super::loaders;
 use super::value_lookup;
+use super::{ConstraintKind, RookError};
 
 /// Check that no NOT NULL column receives a NULL value.
-pub(crate) fn check_not_null(columns: &[Column], values: &[&str]) -> Result<(), String> {
+pub(crate) fn check_not_null(
+    table_name: &str,
+    columns: &[Column],
+    values: &[&str],
+) -> Result<(), RookError> {
     for (i, col) in columns.iter().enumerate() {
         if !col.nullable {
             let val = values.get(i).unwrap_or(&"");
             let trimmed = val.trim();
             if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") || trimmed.eq_ignore_ascii_case("NULL") {
-                return Err(format!(
-                    "NOT NULL constraint violated: column '{}' cannot be null",
-                    col.name
+                return Err(RookError::constraint(
+                    ConstraintKind::NotNull,
+                    table_name,
+                    Some(&col.name),
+                    format!(
+                        "NOT NULL constraint violated: column '{}' cannot be null",
+                        col.name
+                    ),
                 ));
             }
         }
@@ -32,6 +42,10 @@ pub(crate) fn check_not_null(columns: &[Column], values: &[&str]) -> Result<(), 
 /// indexed column, opens the B+ Tree and searches for the corresponding
 /// value.  If found, the insert/update is rejected.
 ///
+/// `exclude` names the row's own heap location; matches pointing at that
+/// exact tuple are ignored so an UPDATE does not collide with itself (a row
+/// always trivially equals its own UNIQUE values).
+///
 /// If no B+ Tree index exists for a UNIQUE column, falls back to a
 /// sequential heap scan to check for duplicate values (SQL standard
 /// requires UNIQUE enforcement regardless of index existence).
@@ -40,7 +54,8 @@ pub(crate) fn check_unique_insert(
     table_name: &str,
     columns: &[Column],
     values: &[&str],
-) -> Result<(), String> {
+    exclude: Option<(u32, u32)>,
+) -> Result<(), RookError> {
     // Load unique indexes from sys_indexes for this table
     // (load_unique_indexes internally resolves the table_id)
     let unique_indexes = match loaders::load_unique_indexes(db_name, table_name) {
@@ -89,12 +104,15 @@ pub(crate) fn check_unique_insert(
             match crate::backend::index::btree::BTree::open(idx_path) {
                 Ok(mut btree) => {
                     btree.set_key_type(col_type.clone());
-                    match btree.search(&key_value) {
-                        Ok(Some(_)) => {
-                            found_via_index = true;
-                            break;
+                    match btree.search_all(&key_value) {
+                        Ok(tids) => {
+                            // A row never collides with itself: ignore the
+                            // tuple this UPDATE is rewriting.
+                            if tids.iter().any(|tid| Some(*tid) != exclude) {
+                                found_via_index = true;
+                                break;
+                            }
                         }
-                        Ok(None) => {}
                         Err(e) => {
                             log::warn!(
                                 "[Constraint] BTree search error for UNIQUE check on '{}.{}': {}",
@@ -121,9 +139,11 @@ pub(crate) fn check_unique_insert(
                 match crate::backend::index::btree::BTree::open(legacy_idx_path) {
                     Ok(mut btree) => {
                         btree.set_key_type(col_type.clone());
-                        match btree.search(&key_value) {
-                            Ok(Some(_)) => found_via_index = true,
-                            Ok(None) => {}
+                        match btree.search_all(&key_value) {
+                            Ok(tids) if tids.iter().any(|tid| Some(*tid) != exclude) => {
+                                found_via_index = true
+                            }
+                            Ok(_) => {}
                             Err(e) => {
                                 log::warn!(
                                     "[Constraint] Legacy BTree search error for UNIQUE check on '{}.{}': {}",
@@ -143,9 +163,14 @@ pub(crate) fn check_unique_insert(
         }
 
         if found_via_index {
-            return Err(format!(
-                "UNIQUE constraint violated: value '{}' already exists for column '{}'",
-                trimmed, col.name
+            return Err(RookError::constraint(
+                ConstraintKind::Unique,
+                table_name,
+                Some(&col.name),
+                format!(
+                    "UNIQUE constraint violated: value '{}' already exists for column '{}'",
+                    trimmed, col.name
+                ),
             ));
         }
 
@@ -162,10 +187,14 @@ pub(crate) fn check_unique_insert(
         if let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path) {
             let schema_types: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
             for result in heap.scan() {
-                let (_page_id, _slot_id, raw_bytes) = match result {
+                let (page_id, slot_id, raw_bytes) = match result {
                     Ok(triple) => triple,
                     Err(_) => continue,
                 };
+                // Skip the row's own location (self-match on UPDATE).
+                if exclude == Some((page_id, slot_id)) {
+                    continue;
+                }
 
                 let decoded = match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
                     Ok(d) => d,
@@ -176,9 +205,14 @@ pub(crate) fn check_unique_insert(
                     use crate::types::Comparable;
                     if let Ok(cmp) = existing_val.compare(&key_value) {
                         if cmp == std::cmp::Ordering::Equal {
-                            return Err(format!(
-                                "UNIQUE constraint violated: value '{}' already exists for column '{}'",
-                                trimmed, col.name
+                            return Err(RookError::constraint(
+                                ConstraintKind::Unique,
+                                table_name,
+                                Some(&col.name),
+                                format!(
+                                    "UNIQUE constraint violated: value '{}' already exists for column '{}'",
+                                    trimmed, col.name
+                                ),
                             ));
                         }
                     }
@@ -197,7 +231,7 @@ pub(crate) fn check_foreign_key_insert(
     table_name: &str,
     columns: &[Column],
     values: &[&str],
-) -> Result<(), String> {
+) -> Result<(), RookError> {
     let (table_id, _) = match crate::backend::system_table::resolve_table_id(db_name, table_name) {
         Ok(ids) => ids,
         Err(_) => return Ok(()),
@@ -235,9 +269,14 @@ pub(crate) fn check_foreign_key_insert(
 
         // Check if the referenced value exists in the parent table
         if !value_lookup::value_exists_in_table(db_name, parent_table, parent_col, &parent_col_type, trimmed)? {
-            return Err(format!(
-                "FOREIGN KEY constraint violated: value '{}' in column '{}' not found in parent table '{}' (column '{}')",
-                trimmed, child_col, parent_table, parent_col
+            return Err(RookError::constraint(
+                ConstraintKind::ForeignKey,
+                table_name,
+                Some(child_col),
+                format!(
+                    "FOREIGN KEY constraint violated: value '{}' in column '{}' not found in parent table '{}' (column '{}')",
+                    trimmed, child_col, parent_table, parent_col
+                ),
             ));
         }
     }
@@ -255,7 +294,7 @@ pub(crate) fn check_constraints(
     table_name: &str,
     columns: &[Column],
     values: &[&str],
-) -> Result<(), String> {
+) -> Result<(), RookError> {
     // Resolve table_id from system tables
     let (table_id, _) = match crate::backend::system_table::resolve_table_id(db_name, table_name) {
         Ok(ids) => ids,
@@ -286,9 +325,11 @@ pub(crate) fn check_constraints(
 
         // Evaluate against the decoded row
         if !crate::backend::executor::delete::matches_condition_groups_pub(&decoded, &condition_groups) {
-            return Err(format!(
-                "CHECK constraint violated: '{}'",
-                expr
+            return Err(RookError::constraint(
+                ConstraintKind::Check,
+                table_name,
+                None,
+                format!("CHECK constraint violated: '{}'", expr),
             ));
         }
     }

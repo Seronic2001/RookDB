@@ -23,7 +23,7 @@ mod tests {
             },
         ];
         let values = &["1", "Alice"];
-        assert!(validation::check_not_null(&columns, values).is_ok());
+        assert!(validation::check_not_null("t", &columns, values).is_ok());
     }
 
     #[test]
@@ -37,11 +37,11 @@ mod tests {
             },
         ];
         assert!(
-            validation::check_not_null(&columns, &["null"]).is_err(),
+            validation::check_not_null("t", &columns, &["null"]).is_err(),
             "Should reject NULL for NOT NULL column"
         );
         assert!(
-            validation::check_not_null(&columns, &[""]).is_err(),
+            validation::check_not_null("t", &columns, &[""]).is_err(),
             "Should reject empty string for NOT NULL column"
         );
     }
@@ -57,7 +57,7 @@ mod tests {
             },
         ];
         assert!(
-            validation::check_not_null(&columns, &["null"]).is_ok(),
+            validation::check_not_null("t", &columns, &["null"]).is_ok(),
             "Should accept NULL for nullable column"
         );
     }

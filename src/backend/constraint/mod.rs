@@ -20,6 +20,8 @@ pub mod fk_actions;
 #[cfg(test)]
 pub mod tests;
 
+pub use crate::backend::error::{ConstraintKind, RookError, RookResult};
+
 /// Validate all constraints before inserting a new row.
 ///
 /// Checks (in order):
@@ -30,26 +32,30 @@ pub mod tests;
 /// 4. CHECK — any CHECK constraints registered in `sys_constraints` must
 ///    evaluate to `true` against the new row.
 ///
-/// Returns `Ok(())` if all constraints pass, or `Err(message)` with a
-/// user-visible description of the first violation found.
+/// Returns `Ok(())` if all constraints pass, or [`RookError`] (typically
+/// `RookError::ConstraintViolation`) describing the first violation found.
 pub fn validate_row_insert(
     catalog: &crate::catalog::types::Catalog,
     db_name: &str,
     table_name: &str,
     values: &[&str],
-) -> Result<(), String> {
-    let db = catalog.databases.get(db_name)
-        .ok_or_else(|| format!("Database '{}' not found", db_name))?;
-    let table = db.tables.get(table_name)
-        .ok_or_else(|| format!("Table '{}' not found", table_name))?;
+) -> Result<(), RookError> {
+    let db = catalog.databases.get(db_name).ok_or_else(|| RookError::NotFound {
+        entity: "Database",
+        name: db_name.to_string(),
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| RookError::NotFound {
+        entity: "Table",
+        name: format!("{}.{}", db_name, table_name),
+    })?;
 
     let columns = &table.columns;
 
     // 1. NOT NULL
-    validation::check_not_null(columns, values)?;
+    validation::check_not_null(table_name, columns, values)?;
 
-    // 2. UNIQUE (via B+ Tree if index exists)
-    validation::check_unique_insert(db_name, table_name, columns, values)?;
+    // 2. UNIQUE (via B+ Tree if index exists) — inserts have no self-row
+    validation::check_unique_insert(db_name, table_name, columns, values, None)?;
 
     // 3. FOREIGN KEY (parent key must exist)
     validation::check_foreign_key_insert(catalog, db_name, table_name, columns, values)?;
@@ -75,7 +81,7 @@ pub fn validate_row_delete(
     db_name: &str,
     table_name: &str,
     column_values: &[(String, crate::backend::executor::delete::ColumnValue)],
-) -> Result<(), String> {
+) -> Result<(), RookError> {
     // Load FK constraints where OUR table is the parent (ref_table == our_name)
     let foreign_keys = match loaders::load_referencing_foreign_keys(db_name, table_name) {
         Ok(fks) => fks,
@@ -123,9 +129,14 @@ pub fn validate_row_delete(
         } else {
             // RESTRICT (default): block the DELETE if child rows exist
             if value_lookup::child_has_referencing_row(db_name, child_table, child_col, &parent_value_str)? {
-                return Err(format!(
-                    "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
-                    table_name, parent_value_str, child_table, child_col, table_name, parent_col
+                return Err(RookError::constraint(
+                    ConstraintKind::ForeignKey,
+                    table_name,
+                    Some(parent_col),
+                    format!(
+                        "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
+                        table_name, parent_value_str, child_table, child_col, table_name, parent_col
+                    ),
                 ));
             }
         }
@@ -149,7 +160,7 @@ pub fn propagate_update_to_children(
     table_name: &str,
     old_decoded: &[(String, crate::backend::executor::delete::ColumnValue)],
     new_decoded: &[(String, crate::backend::executor::delete::ColumnValue)],
-) -> Result<(), String> {
+) -> Result<(), RookError> {
     let foreign_keys = match loaders::load_referencing_foreign_keys(db_name, table_name) {
         Ok(fks) => fks,
         Err(_) => return Ok(()),
@@ -212,9 +223,14 @@ pub fn propagate_update_to_children(
         } else {
             // RESTRICT (default): block the UPDATE if child rows reference the old value
             if value_lookup::child_has_referencing_row(db_name, child_table, child_col, &old_val)? {
-                return Err(format!(
-                    "FOREIGN KEY constraint violated: cannot update '{}' column '{}' because value '{}' is referenced by '{}' (column '{}')",
-                    table_name, parent_col, old_val, child_table, child_col
+                return Err(RookError::constraint(
+                    ConstraintKind::ForeignKey,
+                    table_name,
+                    Some(parent_col),
+                    format!(
+                        "FOREIGN KEY constraint violated: cannot update '{}' column '{}' because value '{}' is referenced by '{}' (column '{}')",
+                        table_name, parent_col, old_val, child_table, child_col
+                    ),
                 ));
             }
         }
@@ -225,31 +241,36 @@ pub fn propagate_update_to_children(
 
 /// Validate all constraints before updating a row.
 ///
-/// Similar to `validate_row_insert`, but also handles the case where an
-/// UPDATE might set a column to its existing value (which should not trigger
-/// a false UNIQUE violation).  For simplicity, this implementation does **not**
-/// exclude the current row's tuple from the UNIQUE check — a strict
-/// no-duplicates policy is applied.
+/// Similar to `validate_row_insert`, but the UNIQUE check excludes the
+/// row's own previous heap location `exclude = Some((page_id, slot_id))` —
+/// a row always trivially equals its own UNIQUE values, and an UPDATE that
+/// leaves a UNIQUE column untouched (or rewrites it to the same value) must
+/// not collide with itself.
 ///
-/// Returns `Ok(())` if all constraints pass, or `Err(message)`.
+/// Returns `Ok(())` if all constraints pass, or [`RookError`].
 pub fn validate_row_update(
     catalog: &crate::catalog::types::Catalog,
     db_name: &str,
     table_name: &str,
     new_values: &[&str],
-) -> Result<(), String> {
-    let db = catalog.databases.get(db_name)
-        .ok_or_else(|| format!("Database '{}' not found", db_name))?;
-    let table = db.tables.get(table_name)
-        .ok_or_else(|| format!("Table '{}' not found", table_name))?;
+    exclude: Option<(u32, u32)>,
+) -> Result<(), RookError> {
+    let db = catalog.databases.get(db_name).ok_or_else(|| RookError::NotFound {
+        entity: "Database",
+        name: db_name.to_string(),
+    })?;
+    let table = db.tables.get(table_name).ok_or_else(|| RookError::NotFound {
+        entity: "Table",
+        name: format!("{}.{}", db_name, table_name),
+    })?;
 
     let columns = &table.columns;
 
     // 1. NOT NULL (new values must not violate)
-    validation::check_not_null(columns, new_values)?;
+    validation::check_not_null(table_name, columns, new_values)?;
 
-    // 2. UNIQUE (strict — no duplicate keys allowed even for self-update)
-    validation::check_unique_insert(db_name, table_name, columns, new_values)?;
+    // 2. UNIQUE — self-match excluded via `exclude`
+    validation::check_unique_insert(db_name, table_name, columns, new_values, exclude)?;
 
     // 3. FOREIGN KEY (parent key must exist)
     validation::check_foreign_key_insert(catalog, db_name, table_name, columns, new_values)?;

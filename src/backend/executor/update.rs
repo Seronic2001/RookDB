@@ -337,6 +337,7 @@ pub fn update_tuples(
             let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
             if let Err(e) = crate::backend::constraint::validate_row_update(
                 catalog, db_name, table_name, &new_values,
+                Some((page_num, i as u32)),
             ) {
                 log::warn!(
                     "[Update] Skipping row due to constraint violation on '{}.{}': {}",
@@ -625,6 +626,7 @@ pub fn update_by_pointers(
         let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
         if let Err(e) = crate::backend::constraint::validate_row_update(
             catalog, db_name, table_name, &new_values,
+            Some((page_num, slot_idx)),
         ) {
             log::warn!(
                 "[UpdateByPointers] Skipping row due to constraint violation: {}", e
