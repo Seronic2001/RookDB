@@ -227,8 +227,19 @@ impl AggregateOperator {
         aggregates: Vec<AggregateInfo>,
         having: Option<Predicate>,
     ) -> Self {
+        // Propagate the child's table qualifier for group-by columns so
+        // projections above the aggregate can still use qualified references
+        // (e.g. `SELECT d.dept, COUNT(*) FROM t d GROUP BY d.dept`).
+        let child_schema = child.schema();
         let mut output_schema: Vec<ColumnInfo> = group_by_names.iter().zip(group_by_types.iter())
-            .map(|(name, dt)| ColumnInfo { name: name.clone(), data_type: dt.clone(), table: None })
+            .map(|(name, dt)| ColumnInfo {
+                name: name.clone(),
+                data_type: dt.clone(),
+                table: child_schema
+                    .iter()
+                    .find(|ci| ci.name.eq_ignore_ascii_case(name))
+                    .and_then(|ci| ci.table.clone()),
+            })
             .collect();
         for agg in &aggregates {
             output_schema.push(ColumnInfo {

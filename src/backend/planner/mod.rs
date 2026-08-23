@@ -10,6 +10,7 @@
 pub mod semantic;
 pub mod optimizer;
 pub mod helpers;
+pub mod alias;
 #[cfg(test)]
 pub mod tests;
 
@@ -173,6 +174,19 @@ fn plan_select_with_ctes(
         let schema = derive_schema(&inner_plan);
         cte_registry.insert(cte_def.name.to_ascii_lowercase(), (inner_plan, schema));
     }
+
+    // Resolve table aliases (e.g. `employees AS e`) so that qualified
+    // identifiers like `e.name` carry the real table name downstream.
+    // Scan operators stamp tuple columns with real table names, and the
+    // runtime resolver matches on them — an unresolved alias would make
+    // every aliased JOIN reference fail (ANALYSIS.md Tier 1 #4).
+    //
+    // NOTE: this mutates only a clone; CTE bodies are planned recursively
+    // with their own scope and are not affected.
+    let mut select = select.clone();
+    let alias_map = alias::build_alias_map(&select, db);
+    alias::rewrite_select_aliases(&mut select, &alias_map);
+    let select = &select;
 
     // 1. Resolve table references and build the base scan
     let mut current_plan = if select.from.is_empty() {
