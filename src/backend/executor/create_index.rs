@@ -254,14 +254,14 @@ pub fn create_index(
     table_name: &str,
     index_name: &str,
     column_names: &[String],
-) -> Result<usize, String> {
+) -> crate::backend::error::RookResult<usize> {
     log::info!(
         "[CreateIndex] Creating index '{}.{}.{}' on columns {:?}",
         db_name, table_name, index_name, column_names
     );
 
     if column_names.is_empty() {
-        return Err("CREATE INDEX requires at least one column".to_string());
+        return Err("CREATE INDEX requires at least one column".to_string().into());
     }
 
     // 1. Resolve the table schema from the catalog
@@ -297,7 +297,7 @@ pub fn create_index(
     let meta_path = index_meta_file_path(db_name, table_name, &resolved_name);
 
     if !heap_path.exists() {
-        return Err(format!("Heap file not found: {:?}", heap_path));
+        return Err(format!("Heap file not found: {:?}", heap_path).into());
     }
 
     // 5. Open the heap file for scanning
@@ -314,7 +314,7 @@ pub fn create_index(
     for result in scan_iter {
         let (page_id, slot_id, raw_bytes) = match result {
             Ok(triple) => triple,
-            Err(e) => return Err(format!("Scan error: {}", e)),
+            Err(e) => return Err(format!("Scan error: {}", e).into()),
         };
 
         // Deserialize the tuple
@@ -347,7 +347,7 @@ pub fn create_index(
             return Err(format!(
                 "Failed to insert into index at (page={}, slot={}): {}",
                 page_id, slot_id, e
-            ));
+            ).into());
         }
 
         inserted_count += 1;
@@ -508,7 +508,7 @@ pub fn update_index_on_insert(
     values: &[&str],
     page_id: u32,
     slot_id: u32,
-) -> Result<(), String> {
+) -> crate::backend::error::RookResult<()> {
     let indexes = discover_cached(db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update
@@ -622,7 +622,7 @@ pub fn update_index_on_delete(
     tuple_data: &[u8],
     page_id: u32,
     slot_id: u32,
-) -> Result<bool, String> {
+) -> crate::backend::error::RookResult<bool> {
     let indexes = discover_cached(db_name, table_name);
     if indexes.is_empty() {
         return Ok(false); // No indexes to update
@@ -701,7 +701,7 @@ pub fn update_index_on_update(
     old_slot_id: u32,
     new_page_id: u32,
     new_slot_id: u32,
-) -> Result<(), String> {
+) -> crate::backend::error::RookResult<()> {
     let indexes = discover_cached(db_name, table_name);
     if indexes.is_empty() {
         return Ok(()); // No indexes to update

@@ -10,6 +10,7 @@ use super::tuple::{Tuple, display_tuples};
 use super::planner::PhysicalPlanner;
 
 use crate::backend::catalog::types::Catalog;
+use crate::backend::error::RookResult;
 
 /// Execute a logical plan using the Volcano engine and display the results.
 ///
@@ -18,7 +19,7 @@ pub fn execute_plan(
     plan: &LogicalPlan,
     catalog: &Catalog,
     db_name: &str,
-) -> Result<usize, String> {
+) -> RookResult<usize> {
     log::info!("[Volcano] Executing logical plan...");
     log::debug!("[Volcano] Plan: {:?}", plan);
 
@@ -46,7 +47,7 @@ pub fn execute_plan_collect(
     plan: &LogicalPlan,
     catalog: &Catalog,
     db_name: &str,
-) -> Result<Vec<Tuple>, String> {
+) -> RookResult<Vec<Tuple>> {
     let planner = PhysicalPlanner::new(catalog.clone(), db_name.to_string());
     let mut root = planner.plan(plan)?;
 

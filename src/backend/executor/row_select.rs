@@ -11,6 +11,7 @@
 
 use rook_ast::{PredicateNode, QueryPlan, SelectExpr, SelectPlan, TableRef};
 
+use crate::backend::error::RookError;
 use crate::catalog::Catalog;
 
 /// Parse a raw WHERE-clause string into a `PredicateNode` using the real SQL
@@ -19,7 +20,7 @@ use crate::catalog::Catalog;
 /// `None` means "no predicate" (match every row). Parsing embeds the text in
 /// a synthetic SELECT, so the full expression grammar is available —
 /// arithmetic, AND/OR/NOT with parentheses, IN, BETWEEN, LIKE, functions.
-pub fn parse_where_text(text: &str) -> Result<Option<PredicateNode>, String> {
+pub fn parse_where_text(text: &str) -> crate::backend::error::RookResult<Option<PredicateNode>> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -27,10 +28,10 @@ pub fn parse_where_text(text: &str) -> Result<Option<PredicateNode>, String> {
     let sql = format!("SELECT * FROM __where__ WHERE {}", trimmed);
     match rook_parser::parse_sql(&sql)? {
         QueryPlan::Select(select) => Ok(select.selection),
-        other => Err(format!(
+        other => Err(RookError::Internal(format!(
             "WHERE clause did not yield a SELECT statement: {:?}",
             other.statement_type()
-        )),
+        ))),
     }
 }
 
@@ -45,7 +46,7 @@ pub fn select_matching_pointers(
     db_name: &str,
     table_name: &str,
     selection: Option<PredicateNode>,
-) -> Result<Vec<(u32, u32)>, String> {
+) -> crate::backend::error::RookResult<Vec<(u32, u32)>> {
     let select = SelectPlan {
         ctes: Vec::new(),
         projections: vec![SelectExpr::Wildcard],
@@ -72,9 +73,9 @@ pub fn select_matching_pointers(
         match (t.page_id, t.slot_id) {
             (Some(page), Some(slot)) => out.push((page, slot)),
             _ => {
-                return Err(
-                    "engine returned rows without heap locations (operator bug)".to_string()
-                )
+                return Err(RookError::Internal(
+                    "engine returned rows without heap locations (operator bug)".to_string(),
+                ))
             }
         }
     }

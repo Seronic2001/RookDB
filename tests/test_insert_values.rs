@@ -58,7 +58,7 @@ fn insert_rows(catalog: &Catalog, db: &str, sql: &str) -> Result<usize, String> 
         storage_manager::backend::executor::physical::engine::execute_plan_collect(
             &logical, catalog, db,
         )
-        .map_err(|e| e)?;
+        .map_err(|e| e.to_string())?;
     // InsertOperator yields one tuple per successfully inserted row.
     Ok(tuples.len())
 }

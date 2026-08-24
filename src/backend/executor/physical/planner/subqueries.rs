@@ -125,7 +125,7 @@ impl PhysicalPlanner {
             .map_err(|e| format!("Failed to plan EXISTS subquery: {}", e.message))?;
 
         // Execute the plan and check if any tuples are produced
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
+        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name).map_err(|e| e.to_string())?;
         Ok(!tuples.is_empty())
     }
 
@@ -141,7 +141,7 @@ impl PhysicalPlanner {
             .map_err(|e| format!("Failed to plan IN subquery: {}", e.message))?;
 
         // Execute and collect tuples
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
+        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name).map_err(|e| e.to_string())?;
 
         // Extract the first column value from each tuple
         let values: Vec<Option<DataValue>> = tuples
@@ -168,7 +168,7 @@ impl PhysicalPlanner {
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
             .map_err(|e| format!("Failed to plan scalar subquery: {}", e.message))?;
 
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
+        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name).map_err(|e| e.to_string())?;
 
         match tuples.len() {
             0 => Ok((None, DataType::Int)), // NULL → default to Int
