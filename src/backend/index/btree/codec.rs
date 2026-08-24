@@ -1,0 +1,120 @@
+//! B+Tree on-disk codec — split from the original single-file `btree.rs`.
+//!
+//! Page constants, key framing (`[u16 len][bytes]` + composite envelopes),
+//! the root-pointer sidecar, and key size helpers.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::types::value::DataValue;
+use crate::types::DataType;
+
+pub const BTREE_PAGE_SIZE: usize = 8192;
+
+/// Minimum number of keys in a node (half-full, for non-root splits).
+/// Allow at least a few entries even for large keys.
+#[allow(dead_code)]
+pub const BTREE_MIN_KEYS: usize = 2;
+
+/// Page type markers.
+pub(crate) const PAGE_TYPE_INTERNAL: u32 = 0;
+pub(crate) const PAGE_TYPE_LEAF: u32 = 1;
+
+/// Size of the shared page header.
+pub(crate) const PAGE_HEADER: usize = 8; // page_type (4) + num_keys (4)
+/// Leaf-specific header beyond the shared header.
+pub(crate) const LEAF_HEADER: usize = 16; // shared(8) + next_leaf(4) + prev_leaf(4)
+/// Size of a value tuple (page_id + slot_id).
+pub(crate) const VALUE_SIZE: usize = 8; // page_id(4) + slot_id(4)
+/// Size of a child pointer.
+pub(crate) const CHILD_SIZE: usize = 4; // u32
+/// Size of the key length prefix.
+pub(crate) const KEY_LEN_SIZE: usize = 2; // u16
+
+// ─── Encoded Key Helpers ────────────────────────────────────────────────────
+
+/// Sidecar file storing the current root page id (`<idx>.root`, u32 LE).
+///
+/// The index file itself has no header page, so without this every
+/// `BTree::open` assumed page 0 — the ORIGINAL leftmost leaf — and all
+/// searches degenerated to next_leaf chain walks.
+pub(crate) fn root_sidecar_path(idx_path: &Path) -> PathBuf {
+    let mut s = idx_path.as_os_str().to_owned();
+    s.push(".root");
+    PathBuf::from(s)
+}
+
+pub(crate) fn write_root_sidecar(idx_path: &Path, root_page_id: u32) -> io::Result<()> {
+    std::fs::write(root_sidecar_path(idx_path), root_page_id.to_le_bytes())
+}
+
+pub(crate) fn read_root_sidecar(idx_path: &Path) -> io::Result<u32> {
+    let bytes = std::fs::read(root_sidecar_path(idx_path))?;
+    if bytes.len() < 4 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "short root sidecar"));
+    }
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Encode a DataValue to the on-disk key format: `[u16 length][bytes]`.
+pub(crate) fn encode_key(key: &DataValue) -> Vec<u8> {
+    let bytes = key.to_bytes();
+    let mut out = Vec::with_capacity(KEY_LEN_SIZE + bytes.len());
+    out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+    out.extend_from_slice(&bytes);
+    out
+}
+
+/// Decode a key from on-disk format. Returns `(key, bytes_consumed)`.
+pub(crate) fn decode_key(data: &[u8], ty: &DataType) -> io::Result<(DataValue, usize)> {
+    if data.len() < KEY_LEN_SIZE {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key length"));
+    }
+    let len = u16::from_le_bytes([data[0], data[1]]) as usize;
+    if data.len() < KEY_LEN_SIZE + len {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key data"));
+    }
+    let key_bytes = &data[KEY_LEN_SIZE..KEY_LEN_SIZE + len];
+    let value = DataValue::from_bytes(ty, key_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok((value, KEY_LEN_SIZE + len))
+}
+
+/// Encode a composite key as one framed entry:
+/// `[u16 total_len][seg1_len][seg1][seg2_len][seg2]…`
+///
+/// The outer envelope lets leaf serialisation/deserialisation treat the
+/// whole multi-segment key as a single opaque `[len][bytes]` entry, exactly
+/// like single-column keys (ANALYSIS.md Tier 2 #8).
+pub(crate) fn encode_key_multi(values: &[DataValue]) -> io::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    for v in values {
+        body.extend_from_slice(&encode_key(v));
+    }
+    let total = body.len();
+    if total > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Composite key too large: {} bytes", total),
+        ));
+    }
+    let mut out = Vec::with_capacity(KEY_LEN_SIZE + total);
+    out.extend_from_slice(&(total as u16).to_le_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Calculate the byte size of an encoded key.
+#[allow(dead_code)]
+pub(crate) fn encoded_key_size(encoded: &[u8]) -> usize {
+    if encoded.len() < KEY_LEN_SIZE {
+        return 0;
+    }
+    let len = u16::from_le_bytes([encoded[0], encoded[1]]) as usize;
+    KEY_LEN_SIZE + len
+}
+
+/// Get the total byte size of n keys stored sequentially.
+pub(crate) fn total_keys_size(keys: &[Vec<u8>]) -> usize {
+    keys.iter().map(|k| k.len()).sum()
+}

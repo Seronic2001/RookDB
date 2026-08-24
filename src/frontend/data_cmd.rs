@@ -549,7 +549,7 @@ pub fn compact_table_cmd(current_db: &Option<String>) -> io::Result<()> {
     let table = table.trim().to_string();
 
     let path = format!("database/base/{}/{}.dat", db, table);
-    let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(f) => f,
         Err(e) => {
             println!("Could not open table '{}': {}", table, e);

@@ -1,0 +1,225 @@
+//! `BTreeNode` — internal/leaf page images (framing in `codec.rs`).
+//!
+//! Moved verbatim from the original `btree.rs`; items the tree core touches
+//! are `pub(crate)`.
+
+use std::io::{self};
+
+use super::codec::{
+    total_keys_size, CHILD_SIZE, KEY_LEN_SIZE, LEAF_HEADER, PAGE_HEADER,
+    PAGE_TYPE_INTERNAL, PAGE_TYPE_LEAF, BTREE_PAGE_SIZE, VALUE_SIZE,
+};
+
+// ─── BTreeNode ───────────────────────────────────────────────────────────────
+
+/// In-memory representation of a B+ Tree node.
+#[derive(Debug, Clone)]
+pub enum BTreeNode {
+    /// An internal (branch) node: contains keys and child page pointers.
+    Internal {
+        num_keys: u32,
+        /// Encoded keys in sorted order, each as `[u16 len][key_bytes]`.
+        keys: Vec<Vec<u8>>,
+        /// Child page IDs: length = num_keys + 1.
+        children: Vec<u32>,
+    },
+    /// A leaf node: contains keys and heap tuple identifiers.
+    Leaf {
+        num_keys: u32,
+        /// Encoded keys in sorted order.
+        keys: Vec<Vec<u8>>,
+        /// Heap tuple identifiers: (page_id, slot_id) per entry.
+        values: Vec<(u32, u32)>,
+        /// Next leaf in the linked list (0 = none).
+        next_leaf: u32,
+        /// Previous leaf in the linked list (0 = none).
+        prev_leaf: u32,
+    },
+}
+
+impl BTreeNode {
+    /// Create a new empty leaf node.
+    pub(crate) fn new_leaf() -> Self {
+        BTreeNode::Leaf {
+            num_keys: 0,
+            keys: Vec::new(),
+            values: Vec::new(),
+            next_leaf: 0,
+            prev_leaf: 0,
+        }
+    }
+
+    /// Create a new empty internal node.
+    pub(crate) fn new_internal() -> Self {
+        BTreeNode::Internal {
+            num_keys: 0,
+            keys: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Serialize this node into a byte buffer for writing to disk.
+    pub(crate) fn serialize(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; BTREE_PAGE_SIZE];
+        match self {
+            BTreeNode::Internal { num_keys, keys, children } => {
+                // Header
+                buf[0..4].copy_from_slice(&PAGE_TYPE_INTERNAL.to_le_bytes());
+                buf[4..8].copy_from_slice(&num_keys.to_le_bytes());
+
+                // Children (starts at offset 8)
+                let children_start = PAGE_HEADER;
+                for (i, &child) in children.iter().enumerate() {
+                    let off = children_start + i * CHILD_SIZE;
+                    if off + CHILD_SIZE <= BTREE_PAGE_SIZE {
+                        buf[off..off + CHILD_SIZE].copy_from_slice(&child.to_le_bytes());
+                    }
+                }
+
+                // Keys (after children)
+                let mut key_off = children_start + children.len() * CHILD_SIZE;
+                for key in keys {
+                    if key_off + key.len() <= BTREE_PAGE_SIZE {
+                        buf[key_off..key_off + key.len()].copy_from_slice(key);
+                        key_off += key.len();
+                    }
+                }
+            }
+            BTreeNode::Leaf { num_keys, keys, values, next_leaf, prev_leaf } => {
+                // Header
+                buf[0..4].copy_from_slice(&PAGE_TYPE_LEAF.to_le_bytes());
+                buf[4..8].copy_from_slice(&num_keys.to_le_bytes());
+                buf[8..12].copy_from_slice(&next_leaf.to_le_bytes());
+                buf[12..16].copy_from_slice(&prev_leaf.to_le_bytes());
+
+                // Values (starts at offset 16)
+                let values_start = LEAF_HEADER;
+                for (i, &(page_id, slot_id)) in values.iter().enumerate() {
+                    let off = values_start + i * VALUE_SIZE;
+                    if off + VALUE_SIZE <= BTREE_PAGE_SIZE {
+                        buf[off..off + 4].copy_from_slice(&page_id.to_le_bytes());
+                        buf[off + 4..off + 8].copy_from_slice(&slot_id.to_le_bytes());
+                    }
+                }
+
+                // Keys (after values)
+                let mut key_off = values_start + values.len() * VALUE_SIZE;
+                for key in keys {
+                    if key_off + key.len() <= BTREE_PAGE_SIZE {
+                        buf[key_off..key_off + key.len()].copy_from_slice(key);
+                        key_off += key.len();
+                    }
+                }
+            }
+        }
+        buf
+    }
+
+    /// Deserialize a node from a byte buffer.
+    pub(crate) fn deserialize(buf: &[u8]) -> io::Result<Self> {
+        if buf.len() < PAGE_HEADER {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Page too short for header"));
+        }
+
+        let page_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let num_keys = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let nk = num_keys as usize;
+
+        match page_type {
+            PAGE_TYPE_INTERNAL => {
+                let children_start = PAGE_HEADER;
+                let num_children = nk + 1;
+
+                // Read children
+                let mut children = Vec::with_capacity(num_children);
+                for i in 0..num_children {
+                    let off = children_start + i * CHILD_SIZE;
+                    if off + CHILD_SIZE > buf.len() {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated children"));
+                    }
+                    let child = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+                    children.push(child);
+                }
+
+                // Read keys
+                let mut key_off = children_start + num_children * CHILD_SIZE;
+                let mut keys = Vec::with_capacity(nk);
+                for _ in 0..nk {
+                    if key_off + KEY_LEN_SIZE > buf.len() {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key length"));
+                    }
+                    let key_len = u16::from_le_bytes([buf[key_off], buf[key_off + 1]]) as usize;
+                    let total_entry = KEY_LEN_SIZE + key_len;
+                    if key_off + total_entry > buf.len() {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key data"));
+                    }
+                    keys.push(buf[key_off..key_off + total_entry].to_vec());
+                    key_off += total_entry;
+                }
+
+                Ok(BTreeNode::Internal { num_keys, keys, children })
+            }
+            PAGE_TYPE_LEAF => {
+                if buf.len() < LEAF_HEADER {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Page too short for leaf header"));
+                }
+                let next_leaf = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                let prev_leaf = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+
+                // Read values
+                let values_start = LEAF_HEADER;
+                let mut values = Vec::with_capacity(nk);
+                for i in 0..nk {
+                    let off = values_start + i * VALUE_SIZE;
+                    if off + VALUE_SIZE > buf.len() {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated values"));
+                    }
+                    let page_id = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+                    let slot_id = u32::from_le_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]);
+                    values.push((page_id, slot_id));
+                }
+
+                // Read keys
+                let mut key_off = values_start + nk * VALUE_SIZE;
+                let mut keys = Vec::with_capacity(nk);
+                for _ in 0..nk {
+                    if key_off + KEY_LEN_SIZE > buf.len() {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key length"));
+                    }
+                    let key_len = u16::from_le_bytes([buf[key_off], buf[key_off + 1]]) as usize;
+                    let total_entry = KEY_LEN_SIZE + key_len;
+                    if key_off + total_entry > buf.len() {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key data"));
+                    }
+                    keys.push(buf[key_off..key_off + total_entry].to_vec());
+                    key_off += total_entry;
+                }
+
+                Ok(BTreeNode::Leaf { num_keys, keys, values, next_leaf, prev_leaf })
+            }
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown page type: {}", page_type))),
+        }
+    }
+
+    /// Check whether this node can accept another entry of the given key size.
+    pub(crate) fn has_space_for(&self, encoded_key_size: usize) -> bool {
+        match self {
+            BTreeNode::Internal { num_keys, keys, children: _ } => {
+                let nk = *num_keys as usize;
+                let used = PAGE_HEADER
+                    + (nk + 1) * CHILD_SIZE  // children
+                    + total_keys_size(keys);  // keys
+                let needed = CHILD_SIZE + encoded_key_size; // one more child + one key
+                used + needed <= BTREE_PAGE_SIZE
+            }
+            BTreeNode::Leaf { num_keys, keys, values: _, .. } => {
+                let nk = *num_keys as usize;
+                let used = LEAF_HEADER
+                    + nk * VALUE_SIZE  // values
+                    + total_keys_size(keys);  // keys
+                let needed = VALUE_SIZE + encoded_key_size; // one more value + one key
+                used + needed <= BTREE_PAGE_SIZE
+            }
+        }
+    }
+}
