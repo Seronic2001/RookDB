@@ -248,7 +248,8 @@ fn count_via_sql(catalog: &Catalog, db: &str, sql: &str) -> Result<u64, String> 
     let tuples =
         storage_manager::backend::executor::physical::engine::execute_plan_collect(
             &logical, catalog, db,
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
     Ok(match tuples.first().and_then(|t| t.values.first()) {
         Some(Some(DataValue::Int(v))) => *v as u64,
         Some(Some(DataValue::BigInt(v))) => *v as u64,
@@ -291,7 +292,8 @@ fn route_insert(catalog: &Catalog, db: &str, sql: &str) -> Result<usize, String>
             let tuples =
                 storage_manager::backend::executor::physical::engine::execute_plan_collect(
                     &logical, catalog, db,
-                )?;
+                )
+                .map_err(|e| e.to_string())?;
             Ok(tuples.len())
         }
         _ => Err("not a simple VALUES insert".into()),
