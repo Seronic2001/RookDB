@@ -58,7 +58,6 @@ fn int_tuples(data: Vec<(Option<i32>, Option<i32>)>) -> (Vec<Tuple>, Vec<ColumnI
                 a.map(DataValue::Int),
                 b.map(DataValue::Int),
             ],
-            schema.clone(),
         )
     }).collect();
     (tuples, schema)
@@ -154,7 +153,7 @@ fn test_projection_operator() {
     let t = proj.next().unwrap().unwrap();
     assert_eq!(t.values.len(), 1);
     assert_eq!(t.values[0], Some(DataValue::Int(10)));
-    assert_eq!(t.column_info[0].name, "b");
+    assert_eq!(proj.schema()[0].name, "b");
     assert!(proj.next().unwrap().is_none());
 }
 
@@ -267,7 +266,6 @@ fn employee_tuples(data: Vec<(&str, Option<i32>, Option<f64>)>) -> (Vec<Tuple>, 
                 age.map(DataValue::Int),
                 salary.map(|v| DataValue::DoublePrecision(crate::types::value::OrderedF64(v))),
             ],
-            schema.clone(),
         )
     }).collect();
     (tuples, schema)
@@ -527,7 +525,7 @@ fn single_col_schema(name: &str) -> Vec<ColumnInfo> {
 fn single_col_tuples(data: Vec<Option<i32>>, name: &str) -> (Vec<Tuple>, Vec<ColumnInfo>) {
     let schema = single_col_schema(name);
     let tuples = data.into_iter().map(|v| {
-        Tuple::new(vec![v.map(DataValue::Int)], schema.clone())
+        Tuple::new(vec![v.map(DataValue::Int)])
     }).collect();
     (tuples, schema)
 }
@@ -831,29 +829,23 @@ fn test_hash_join_table_qualified() {
     let build_tuples = vec![
         Tuple::new(
             vec![Some(DataValue::Int(1)), Some(DataValue::Varchar("Alice".into()))],
-            build_schema.clone(),
         ),
         Tuple::new(
             vec![Some(DataValue::Int(2)), Some(DataValue::Varchar("Bob".into()))],
-            build_schema.clone(),
         ),
         Tuple::new(
             vec![Some(DataValue::Int(3)), Some(DataValue::Varchar("Charlie".into()))],
-            build_schema.clone(),
         ),
     ];
     let probe_tuples = vec![
         Tuple::new(
             vec![Some(DataValue::Int(2)), Some(DataValue::Varchar("x".into()))],
-            probe_schema.clone(),
         ),
         Tuple::new(
             vec![Some(DataValue::Int(3)), Some(DataValue::Varchar("y".into()))],
-            probe_schema.clone(),
         ),
         Tuple::new(
             vec![Some(DataValue::Int(4)), Some(DataValue::Varchar("z".into()))],
-            probe_schema.clone(),
         ),
     ];
 
@@ -963,15 +955,15 @@ fn test_hash_join_table_qualified_multi_column() {
     ];
 
     let build_tuples = vec![
-        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(100))], build_schema.clone()),
-        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(200))], build_schema.clone()),
-        Tuple::new(vec![Some(DataValue::Int(3)), Some(DataValue::Int(300))], build_schema.clone()),
-        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(999))], build_schema.clone()), // same id, different code
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(100))]),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(200))]),
+        Tuple::new(vec![Some(DataValue::Int(3)), Some(DataValue::Int(300))]),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(999))]), // same id, different code
     ];
     let probe_tuples = vec![
-        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(200))], probe_schema.clone()), // matches build (2,200)
-        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(300))], probe_schema.clone()), // build has (2,999) but code=300 != 999, and (2,200) but code=200 != 300
-        Tuple::new(vec![Some(DataValue::Int(3)), Some(DataValue::Int(300))], probe_schema.clone()), // matches build (3,300)
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(200))]), // matches build (2,200)
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(300))]), // build has (2,999) but code=300 != 999, and (2,200) but code=200 != 300
+        Tuple::new(vec![Some(DataValue::Int(3)), Some(DataValue::Int(300))]), // matches build (3,300)
     ];
 
     let build = MockOperator::new(build_tuples, build_schema);
@@ -1000,11 +992,9 @@ fn test_hash_join_table_qualified_multi_column() {
     // (3,300)probe → (3,300)build = MATCH
     assert_eq!(results.len(), 2);
 
-    // Verify column_info has table qualifiers preserved in output
-    for r in &results {
-        assert_eq!(r.column_info[0].table, Some("t1".into()));
-        assert_eq!(r.column_info[2].table, Some("t2".into()));
-    }
+    // Verify output_schema has table qualifiers preserved in output
+    assert_eq!(join.schema()[0].table, Some("t1".into()));
+    assert_eq!(join.schema()[2].table, Some("t2".into()));
 }
 
 #[test]
@@ -1023,14 +1013,14 @@ fn test_hash_join_remaining_predicate() {
     // Build: employees (dept_id, salary)
     // Probe: department minimum salary thresholds (dept_id, min_salary)
     let build_tuples = vec![
-        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(50000))], build_schema.clone()),
-        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(70000))], build_schema.clone()),
-        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(30000))], build_schema.clone()),
-        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(60000))], build_schema.clone()),
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(50000))]),
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(70000))]),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(30000))]),
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(60000))]),
     ];
     let probe_tuples = vec![
-        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(55000))], probe_schema.clone()), // dept 1 min salary
-        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(50000))], probe_schema.clone()), // dept 2 min salary
+        Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(55000))]), // dept 1 min salary
+        Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(50000))]), // dept 2 min salary
     ];
 
     let build = MockOperator::new(build_tuples, build_schema);

@@ -23,10 +23,9 @@ pub struct ColumnInfo {
 /// source row.  These are populated by scan operators and propagated through
 /// filter/evaluation operators, allowing DML mutations (UPDATE/DELETE) to
 /// identify which physical row to modify without a separate heap scan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tuple {
     pub values: Vec<Option<DataValue>>,
-    pub column_info: Vec<ColumnInfo>,
     /// Heap page identifier where this tuple originated (if known).
     pub page_id: Option<u32>,
     /// Heap slot identifier within `page_id` (if known).
@@ -34,25 +33,25 @@ pub struct Tuple {
 }
 
 impl Tuple {
-    /// Create a new tuple from deserialized values and column metadata.
-    pub fn new(values: Vec<Option<DataValue>>, column_info: Vec<ColumnInfo>) -> Self {
-        debug_assert_eq!(values.len(), column_info.len(),
-            "Tuple values count ({}) must match schema length ({})",
-            values.len(), column_info.len());
-        Self { values, column_info, page_id: None, slot_id: None }
+    /// Create a new tuple from deserialized values.
+    pub fn new(values: Vec<Option<DataValue>>) -> Self {
+        Self { values, page_id: None, slot_id: None }
     }
 
     /// Create a new tuple with heap location metadata.
     pub fn new_with_location(
         values: Vec<Option<DataValue>>,
-        column_info: Vec<ColumnInfo>,
         page_id: u32,
         slot_id: u32,
     ) -> Self {
-        debug_assert_eq!(values.len(), column_info.len(),
-            "Tuple values count ({}) must match schema length ({})",
-            values.len(), column_info.len());
-        Self { values, column_info, page_id: Some(page_id), slot_id: Some(slot_id) }
+        Self { values, page_id: Some(page_id), slot_id: Some(slot_id) }
+    }
+
+    /// Set heap location metadata.
+    pub fn with_location(mut self, page_id: u32, slot_id: u32) -> Self {
+        self.page_id = Some(page_id);
+        self.slot_id = Some(slot_id);
+        self
     }
 
     /// Attach the source tuple's heap location (if any) to this derived
@@ -85,13 +84,23 @@ impl Tuple {
     pub fn concatenate(&self, other: &Tuple) -> Self {
         let mut combined_values = self.values.clone();
         combined_values.extend(other.values.iter().cloned());
-        let mut combined_info = self.column_info.clone();
-        combined_info.extend(other.column_info.iter().cloned());
         Self {
             values: combined_values,
-            column_info: combined_info,
             page_id: None,
             slot_id: None,
+        }
+    }
+
+    /// Project a subset of columns from this tuple.
+    pub fn project(&self, indices: &[usize]) -> Self {
+        let mut projected_values = Vec::with_capacity(indices.len());
+        for &i in indices {
+            projected_values.push(self.values.get(i).cloned().unwrap_or(None));
+        }
+        Self {
+            values: projected_values,
+            page_id: self.page_id,
+            slot_id: self.slot_id,
         }
     }
 }
@@ -99,10 +108,10 @@ impl Tuple {
 // ── Display / Formatting ──────────────────────────────────────────────────────
 
 /// Format a single tuple as a human-readable string.
-pub fn format_tuple(tuple: &Tuple, _col_width: usize) -> String {
+pub fn format_tuple(tuple: &Tuple, schema: &[ColumnInfo], _col_width: usize) -> String {
     let mut parts = Vec::new();
     for (i, val_opt) in tuple.values.iter().enumerate() {
-        let name = &tuple.column_info[i].name;
+        let name = schema.get(i).map(|c| c.name.as_str()).unwrap_or("?");
         match val_opt {
             Some(val) => parts.push(format!("{}={}", name, val)),
             None => parts.push(format!("{}=NULL", name)),
@@ -118,13 +127,12 @@ pub fn format_tuple(tuple: &Tuple, _col_width: usize) -> String {
 /// Display a set of tuples in a formatted table with borders.
 ///
 /// Returns the number of tuples displayed.
-pub fn display_tuples(tuples: &[Tuple]) -> usize {
+pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
     if tuples.is_empty() {
         println!("(0 rows)");
         return 0;
     }
 
-    let schema = &tuples[0].column_info;
     let col_count = schema.len();
 
     // Compute column widths
@@ -189,9 +197,8 @@ pub fn display_tuples(tuples: &[Tuple]) -> usize {
 ///
 /// The returned bytes can be written to a temp file and later deserialized
 /// back into a Tuple using `deserialize_tuple_from_bytes` with the same schema.
-pub fn serialize_tuple_to_bytes(tuple: &Tuple) -> Result<Vec<u8>, String> {
-    let schema_types: Vec<DataType> = tuple
-        .column_info
+pub fn serialize_tuple_to_bytes(tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Vec<u8>, String> {
+    let schema_types: Vec<DataType> = schema
         .iter()
         .map(|c| c.data_type.clone())
         .collect();
@@ -207,5 +214,5 @@ pub fn deserialize_tuple_from_bytes(
 ) -> Result<Tuple, String> {
     let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
     let values = deserialize_nullable_row(&schema_types, bytes)?;
-    Ok(Tuple::new(values, column_info.to_vec()))
+    Ok(Tuple::new(values))
 }

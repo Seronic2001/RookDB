@@ -113,12 +113,9 @@ impl NestedLoopJoinOperator {
         self.left_matched = vec![false; num_left];
         self.right_matched = vec![false; num_right];
 
-        // Helper: create a joined tuple with the operator's output_schema
-        // (which preserves actual table names from child operators).
+        // Helper: create a joined tuple
         let join_tuples = |left: &Tuple, right: &Tuple| -> Tuple {
-            let mut t = left.concatenate(right);
-            t.column_info = self.output_schema.clone();
-            t
+            left.concatenate(right)
         };
 
         // Compute the join
@@ -137,7 +134,7 @@ impl NestedLoopJoinOperator {
             for l_idx in 0..num_left {
                 for r_idx in 0..num_right {
                     let joined = join_tuples(&self.left_tuples[l_idx], &self.right_tuples[r_idx]);
-                    match evaluate_predicate(pred, &joined)? {
+                    match evaluate_predicate(pred, &joined, &self.output_schema)? {
                         Some(true) => {
                             self.output_buffer.push(joined);
                             self.left_matched[l_idx] = true;
@@ -160,7 +157,7 @@ impl NestedLoopJoinOperator {
                     if !matched {
                         let null_values: Vec<Option<DataValue>> =
                             right_cols.iter().map(|_| None).collect();
-                        let null_right = Tuple::new(null_values, right_cols.clone());
+                        let null_right = Tuple::new(null_values);
                         self.output_buffer
                             .push(join_tuples(&self.left_tuples[l_idx], &null_right));
                     }
@@ -176,7 +173,7 @@ impl NestedLoopJoinOperator {
                     if !matched {
                         let null_values: Vec<Option<DataValue>> =
                             left_cols.iter().map(|_| None).collect();
-                        let null_left = Tuple::new(null_values, left_cols.clone());
+                        let null_left = Tuple::new(null_values);
                         self.output_buffer
                             .push(join_tuples(&null_left, &self.right_tuples[r_idx]));
                     }
@@ -391,7 +388,7 @@ fn write_tuple_values(
 fn read_tuple_values(
     r: &mut std::io::BufReader<std::fs::File>,
     types: &[DataType],
-    info: &[ColumnInfo],
+    _info: &[ColumnInfo],
 ) -> std::io::Result<Option<Tuple>> {
     use std::io::Read;
     let mut arity_buf = [0u8; 4];
@@ -417,7 +414,7 @@ fn read_tuple_values(
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         values.push(Some(dv));
     }
-    Ok(Some(Tuple::new(values, info.to_vec())))
+    Ok(Some(Tuple::new(values)))
 }
 
 /// Partition index for a hash key (must agree between build and probe).
@@ -475,13 +472,13 @@ impl HashJoinOperator {
     /// Compute the hash key string from a tuple using a set of key expressions.
     /// Returns `None` if any key is NULL (meaning this tuple cannot match in an
     /// INNER hash join, since SQL NULL != NULL).
-    fn make_hash_key(keys: &[Expr], tuple: &Tuple) -> Result<Option<String>, String> {
+    fn make_hash_key(keys: &[Expr], tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<String>, String> {
         if keys.is_empty() {
             return Ok(Some("__global__".to_string()));
         }
         let mut parts = Vec::with_capacity(keys.len());
         for expr in keys {
-            let val = expr.evaluate(tuple)?;
+            let val = expr.evaluate(tuple, schema)?;
             match val {
                 Some(dv) => parts.push(normalise_value_for_key(&dv)),
                 None => return Ok(None),  // NULL key → can never match (NULL != NULL)
@@ -494,9 +491,10 @@ impl HashJoinOperator {
     /// Tuples with NULL join keys are skipped (they can never match in SQL).
     fn build_hash_table(&mut self) -> Result<(), String> {
         let budget = spill_budget();
+        let build_schema = self.build.schema().to_vec();
         while let Some(tuple) = self.build.next()? {
             // NULL-keyed tuples are skipped — they can never match (NULL != NULL)
-            let Some(key) = Self::make_hash_key(&self.build_keys, &tuple)? else {
+            let Some(key) = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)? else {
                 continue;
             };
 
@@ -578,13 +576,14 @@ impl HashJoinOperator {
     /// stream to disk instead of buffering it in memory.
     fn load_probe(&mut self) -> Result<(), String> {
         let spilling = self.spill.is_some();
+        let probe_schema = self.probe.schema().to_vec();
         while let Some(tuple) = self.probe.next()? {
             if !spilling {
                 self.probe_tuples.push(tuple);
                 continue;
             }
             // Spill mode: NULL-keyed probe tuples can never match — skip.
-            let Some(key) = Self::make_hash_key(&self.probe_keys, &tuple)? else {
+            let Some(key) = Self::make_hash_key(&self.probe_keys, &tuple, &probe_schema)? else {
                 continue;
             };
             let p = partition_of(&key);
@@ -623,13 +622,14 @@ impl HashJoinOperator {
         let probe_types = self.probe_type_cache();
         let build_info = self.build.schema().to_vec();
         let probe_info = self.probe.schema().to_vec();
+        let build_schema = self.build.schema().to_vec();
 
         let mut br = std::io::BufReader::new(std::fs::File::open(&build_path)
             .map_err(|e| format!("hash join spill read failed: {}", e))?);
         while let Some(tuple) = read_tuple_values(&mut br, &build_types, &build_info)
             .map_err(|e| format!("hash join spill read failed: {}", e))?
         {
-            let key = Self::make_hash_key(&self.build_keys, &tuple)?;
+            let key = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)?;
             if let Some(key) = key {
                 self.hash_table.entry(key).or_insert_with(Vec::new).push(tuple);
             }
@@ -663,18 +663,17 @@ impl PhysicalOperator for HashJoinOperator {
             if self.match_pos < self.current_matches.len() {
                 let build_tuple = &self.current_matches[self.match_pos];
                 self.match_pos += 1;
-                let mut joined = build_tuple.concatenate(&self.probe_tuples[self.probe_pos - 1]);
-                // Explicitly set column_info to match output_schema for consistency
-                joined.column_info = self.output_schema.clone();
+                let joined = build_tuple.concatenate(&self.probe_tuples[self.probe_pos - 1]);
                 return Ok(Some(joined));
             }
 
             // Find the next probe tuple that has matches
+            let probe_schema = self.probe.schema().to_vec();
             while self.probe_pos < self.probe_tuples.len() {
                 let probe_tuple = &self.probe_tuples[self.probe_pos];
                 self.probe_pos += 1;
 
-                let key = match Self::make_hash_key(&self.probe_keys, probe_tuple)? {
+                let key = match Self::make_hash_key(&self.probe_keys, probe_tuple, &probe_schema)? {
                     Some(k) => k,
                     None => continue,  // NULL probe key → skip (NULL != NULL)
                 };
@@ -685,7 +684,7 @@ impl PhysicalOperator for HashJoinOperator {
                     for build_tuple in build_matches {
                         if let Some(ref remaining) = self.remaining_predicate {
                             let joined = build_tuple.concatenate(probe_tuple);
-                            match evaluate_predicate(remaining, &joined)? {
+                            match evaluate_predicate(remaining, &joined, &self.output_schema)? {
                                 Some(true) => self.current_matches.push(build_tuple.clone()),
                                 _ => {}
                             }
@@ -697,8 +696,7 @@ impl PhysicalOperator for HashJoinOperator {
                     if !self.current_matches.is_empty() {
                         self.match_pos = 1;
                         let build_tuple = &self.current_matches[0];
-                        let mut joined = build_tuple.concatenate(probe_tuple);
-                        joined.column_info = self.output_schema.clone();
+                        let joined = build_tuple.concatenate(probe_tuple);
                         return Ok(Some(joined));
                     }
                 }
@@ -808,7 +806,7 @@ mod spill_tests {
             if self.pos < self.rows.len() {
                 let row = self.rows[self.pos].clone();
                 self.pos += 1;
-                Ok(Some(Tuple::new(row, self.info.clone())))
+                Ok(Some(Tuple::new(row)))
             } else {
                 Ok(None)
             }

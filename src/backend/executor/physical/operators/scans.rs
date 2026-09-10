@@ -104,7 +104,7 @@ impl PhysicalOperator for SeqScanOperator {
                         .collect()
                 };
 
-                Ok(Some(Tuple::new_with_location(values, self.column_info.clone(), page_id, slot_id)))
+                Ok(Some(Tuple::new_with_location(values, page_id, slot_id)))
             }
             Some(Err(e)) => Err(format!("Scan error: {}", e)),
             None => {
@@ -243,7 +243,7 @@ impl IndexScanOperator {
             .map_err(|e| format!("Failed to fetch heap tuple (page={}, slot={}): {}", page_id, slot_id, e))?;
         let values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
             .map_err(|e| format!("Failed to deserialise tuple: {}", e))?;
-        Ok(Tuple::new_with_location(values, self.column_info.clone(), page_id, slot_id))
+        Ok(Tuple::new_with_location(values, page_id, slot_id))
     }
 }
 

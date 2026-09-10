@@ -11,7 +11,7 @@
 /// - Encapsulates FSM complexity; FSM-driven inserts spread load across pages
 /// - Header persistence survives crashes; FSM fork is a hint (can be rebuilt)
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::MutexGuard;
@@ -70,6 +70,7 @@ fn write_header_via_pool(pool: &mut BufferPool, header: &HeaderMetadata) -> io::
 /// sequential scan that would pollute the cache.
 pub struct HeapScanIterator {
     file_path: PathBuf,
+    file: Option<File>,
     current_page: u32,
     current_slot: u32,
     total_pages: u32,
@@ -85,6 +86,7 @@ impl HeapScanIterator {
         );
         Self {
             file_path,
+            file: None,
             current_page: 1, // Skip header page
             current_slot: 0,
             total_pages,
@@ -96,12 +98,16 @@ impl HeapScanIterator {
     fn load_page(&mut self, page_id: u32) -> io::Result<()> {
         log::trace!("[HeapScanIterator::load_page] Loading page {}", page_id);
         
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(&self.file_path)?;
+        if self.file.is_none() {
+            let f = OpenOptions::new()
+                .read(true)
+                .open(&self.file_path)?;
+            self.file = Some(f);
+        }
+        let file = self.file.as_mut().unwrap();
         
         let mut page = Page::new();
-        read_page(&mut file, &mut page, page_id)?;
+        read_page(file, &mut page, page_id)?;
         
         self.cached_page = Some((page_id, page));
         Ok(())
@@ -1039,6 +1045,38 @@ mod tests {
         }
 
         assert_eq!(count, 0);
+        cleanup_temp_heap(&path);
+    }
+
+    #[test]
+    fn test_heap_scan_reused_handle_multipage() {
+        let (path, mut manager) = setup_temp_heap("test_heap_scan_reused");
+
+        // Insert enough tuples to span multiple pages (each page has ~8 KB)
+        // 200-byte tuples -> ~35 tuples per page. 100 tuples will span ~3 pages.
+        let tuple_data = vec![42u8; 200];
+        let mut inserted_ids = Vec::new();
+        for _ in 0..100 {
+            let (pid, sid) = manager.insert_tuple(&tuple_data).unwrap();
+            inserted_ids.push((pid, sid));
+        }
+        manager.flush().unwrap();
+
+        // Scan all tuples using HeapScanIterator with reused file handle
+        let mut scanned = Vec::new();
+        let mut iter = manager.scan();
+        while let Some(res) = iter.next() {
+            let (pid, sid, data) = res.unwrap();
+            assert_eq!(data, tuple_data);
+            scanned.push((pid, sid));
+        }
+
+        assert_eq!(scanned.len(), 100);
+        assert_eq!(scanned, inserted_ids);
+        assert!(iter.file.is_some(), "File handle should be retained in iterator");
+
+        drop(iter);
+        drop(manager);
         cleanup_temp_heap(&path);
     }
 }

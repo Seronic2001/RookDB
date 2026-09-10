@@ -134,13 +134,13 @@ impl PhysicalOperator for ValuesOperator {
         if self.pos >= self.rows.len() {
             return Ok(None);
         }
-        let empty = Tuple::new(Vec::new(), Vec::new());
+        let empty = Tuple::new(Vec::new());
         let values = self.rows[self.pos]
             .iter()
-            .map(|e| e.evaluate(&empty))
+            .map(|e| e.evaluate(&empty, &[]))
             .collect::<Result<Vec<_>, _>>()?;
         self.pos += 1;
-        Ok(Some(Tuple::new(values, self.schema.clone())))
+        Ok(Some(Tuple::new(values)))
     }
 
     fn schema(&self) -> &[ColumnInfo] {
@@ -232,7 +232,6 @@ mod tests {
                     a.map(DataValue::Int),
                     b.map(DataValue::Int),
                 ],
-                schema.clone(),
             )
         }).collect();
         (tuples, schema)
@@ -503,7 +502,7 @@ mod tests {
 
         // Returned tuple should also match the schema
         let t = op.next().unwrap().unwrap();
-        assert_eq!(t.column_info.len(), schema.len());
+        assert_eq!(t.arity(), schema.len());
     }
 
     // ── Cardinality ──────────────────────────────────────────────────────

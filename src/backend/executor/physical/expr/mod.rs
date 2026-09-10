@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use crate::types::value::DataValue;
 
-use super::tuple::Tuple;
+use super::tuple::{Tuple, ColumnInfo};
 
 // ── Expressions ───────────────────────────────────────────────────────────────
 
@@ -60,12 +60,12 @@ pub enum Expr {
 }
 
 impl Expr {
-    /// Evaluate this expression against a tuple, returning the resulting value
+    /// Evaluate this expression against a tuple and schema, returning the resulting value
     /// (or `None` for NULL).
-    pub fn evaluate(&self, tuple: &Tuple) -> Result<Option<DataValue>, String> {
+    pub fn evaluate(&self, tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<DataValue>, String> {
         match self {
             Expr::Column { table, column } => {
-                // Look up the column by name in the tuple's schema (case-insensitive).
+                // Look up the column by name in the schema (case-insensitive).
                 // ColumnInfo.table is populated with actual table names by scan/join
                 // operators, so table-qualified references like `t1.id` vs `t2.id`
                 // resolve to different columns directly.
@@ -79,7 +79,7 @@ impl Expr {
                 let idx = match table {
                     Some(t) => {
                         // Table-qualified: match both table and column name
-                        tuple.column_info.iter().position(|ci| {
+                        schema.iter().position(|ci| {
                             ci.name.eq_ignore_ascii_case(column)
                                 && ci.table.as_ref()
                                     .map(|ct| ct.eq_ignore_ascii_case(t))
@@ -88,14 +88,14 @@ impl Expr {
                     }
                     None => {
                         // Unqualified: match first column by name only
-                        tuple.column_info.iter()
+                        schema.iter()
                             .position(|ci| ci.name.eq_ignore_ascii_case(column))
                     }
                 }
                 .ok_or_else(|| format!(
                     "Column '{}' not found in tuple schema ({:?})",
                     column,
-                    tuple.column_info.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>()
+                    schema.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>()
                 ))?;
                 Ok(tuple.values.get(idx).ok_or_else(|| {
                     format!("Column '{}' index {} out of bounds (arity {})", column, idx, tuple.arity())
@@ -104,23 +104,23 @@ impl Expr {
             Expr::Constant(dv) => Ok(Some(dv.clone())),
             Expr::Null => Ok(None),
             Expr::Add(l, r) => {
-                let lv = l.evaluate(tuple)?;
-                let rv = r.evaluate(tuple)?;
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(lv, rv, |a, b| Ok(a + b), |a, b| Ok(a + b), |a, b| Ok(a + b), |a, b| Ok(a + b), |a, b| Ok(a + b))
             }
             Expr::Sub(l, r) => {
-                let lv = l.evaluate(tuple)?;
-                let rv = r.evaluate(tuple)?;
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(lv, rv, |a, b| Ok(a - b), |a, b| Ok(a - b), |a, b| Ok(a - b), |a, b| Ok(a - b), |a, b| Ok(a - b))
             }
             Expr::Mul(l, r) => {
-                let lv = l.evaluate(tuple)?;
-                let rv = r.evaluate(tuple)?;
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(lv, rv, |a, b| Ok(a * b), |a, b| Ok(a * b), |a, b| Ok(a * b), |a, b| Ok(a * b), |a, b| Ok(a * b))
             }
             Expr::Div(l, r) => {
-                let lv = l.evaluate(tuple)?;
-                let rv = r.evaluate(tuple)?;
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(
                     lv, rv,
                     |a, b| if b == 0 { return Err("Division by zero".into()); } else { Ok(a / b) },
@@ -131,7 +131,7 @@ impl Expr {
                 )
             }
             Expr::Cast(inner, target_type) => {
-                let val = inner.evaluate(tuple)?;
+                let val = inner.evaluate(tuple, schema)?;
                 match val {
                     None => Ok(None), // CAST(NULL AS type) → NULL
                     Some(dv) => {
@@ -149,20 +149,20 @@ impl Expr {
                 else_result,
             } => {
                 for (cond, res) in when_then_pairs {
-                    let cond_val = cond.evaluate(tuple)?;
+                    let cond_val = cond.evaluate(tuple, schema)?;
                     match cond_val {
-                        Some(DataValue::Bool(true)) => return res.evaluate(tuple),
+                        Some(DataValue::Bool(true)) => return res.evaluate(tuple, schema),
                         _ => continue, // false or NULL → try next WHEN
                     }
                 }
                 // No WHEN matched, use ELSE or NULL
                 match else_result {
-                    Some(else_expr) => else_expr.evaluate(tuple),
+                    Some(else_expr) => else_expr.evaluate(tuple, schema),
                     None => Ok(None),
                 }
             }
             Expr::Function { name, args } => {
-                evaluate_scalar_function(name, args, tuple)
+                evaluate_scalar_function(name, args, tuple, schema)
             }
         }
     }
@@ -187,11 +187,12 @@ fn evaluate_scalar_function(
     name: &str,
     args: &[Expr],
     tuple: &Tuple,
+    schema: &[ColumnInfo],
 ) -> Result<Option<DataValue>, String> {
     // Evaluate all argument expressions against the tuple
     let evaluated: Result<Vec<Option<DataValue>>, String> = args
         .iter()
-        .map(|arg| arg.evaluate(tuple))
+        .map(|arg| arg.evaluate(tuple, schema))
         .collect();
     let evaluated = evaluated?;
 

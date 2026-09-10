@@ -175,10 +175,8 @@ impl PhysicalPlanner {
             1 => {
                 let mut tuple = tuples.into_iter().next().unwrap();
                 let value = tuple.values.drain(..).next().flatten();
-                // Infer the data type from the column info
-                let data_type = tuple.column_info.first()
-                    .map(|ci| ci.data_type.clone())
-                    .unwrap_or(DataType::Int);
+                // Infer the data type from the value (or default to Int)
+                let data_type = value.as_ref().map(|v| v.data_type()).unwrap_or(DataType::Int);
                 Ok((value, data_type))
             }
             n => Err(format!(

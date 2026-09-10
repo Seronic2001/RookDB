@@ -29,7 +29,7 @@ impl PhysicalOperator for SingleRowOperator {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(Tuple::new(Vec::new(), self.schema.clone())))
+        Ok(Some(Tuple::new(Vec::new())))
     }
 
     fn schema(&self) -> &[ColumnInfo] {
@@ -97,15 +97,8 @@ impl PhysicalOperator for CteScanOperator {
         if self.pos >= self.tuples.len() {
             return Ok(None);
         }
-        let mut tuple = self.tuples[self.pos].clone();
+        let tuple = self.tuples[self.pos].clone();
         self.pos += 1;
-        // Override the tuple's column_info with the schema from the CTE's logical
-        // plan definition. The tuples stored from CTE materialization have their
-        // original physical column names (e.g. "expr" for a constant expression), but
-        // the CTE's schema has the correct aliased names (e.g. "n" for `SELECT 1 AS n`).
-        // Without this override, column lookups in the outer query fail because the
-        // tuple has "expr" but the query references "n".
-        tuple.column_info = self.schema.clone();
         Ok(Some(tuple))
     }
 
@@ -146,7 +139,7 @@ impl PhysicalOperator for FilterOperator {
         loop {
             match self.child.next()? {
                 Some(tuple) => {
-                    match evaluate_predicate(&self.predicate, &tuple)? {
+                    match evaluate_predicate(&self.predicate, &tuple, self.child.schema())? {
                         Some(true) => return Ok(Some(tuple)),
                         _ => continue,
                     }
@@ -164,6 +157,10 @@ impl PhysicalOperator for FilterOperator {
         self.child.reset()
     }
 
+    fn estimate_cardinality(&self) -> usize {
+        self.child.estimate_cardinality()
+    }
+
     fn name(&self) -> &'static str {
         "Filter"
     }
@@ -171,12 +168,10 @@ impl PhysicalOperator for FilterOperator {
 
 // ── Projection Operator ───────────────────────────────────────────────────────
 
-/// Selects a subset of columns (or computed expressions) from the child.
+/// Evaluates expressions to produce projected output tuples.
 pub struct ProjectionOperator {
     child: Box<dyn PhysicalOperator>,
-    /// The output schema: each entry is (expression, column_name, data_type).
     projections: Vec<(Expr, String, DataType)>,
-    /// Cached output schema info.
     output_schema: Vec<ColumnInfo>,
 }
 
@@ -185,13 +180,17 @@ impl ProjectionOperator {
         child: Box<dyn PhysicalOperator>,
         projections: Vec<(Expr, String, DataType)>,
     ) -> Self {
-        let output_schema = projections.iter().map(|(_, name, dt)| {
-            ColumnInfo { name: name.clone(), data_type: dt.clone(), table: None }
-        }).collect();
+        let output_schema: Vec<ColumnInfo> = projections.iter()
+            .map(|(_, name, dt)| ColumnInfo {
+                name: name.clone(),
+                data_type: dt.clone(),
+                table: None,
+            })
+            .collect();
         Self { child, projections, output_schema }
     }
 
-    pub fn from_indices(
+    pub fn new_with_mapping(
         child: Box<dyn PhysicalOperator>,
         indices: &[usize],
         names: &[String],
@@ -207,6 +206,14 @@ impl ProjectionOperator {
             projections.push((Expr::Column { table: None, column: name.clone() }, name, dt));
         }
         Ok(Self::new(child, projections))
+    }
+
+    pub fn from_indices(
+        child: Box<dyn PhysicalOperator>,
+        indices: &[usize],
+        names: &[String],
+    ) -> Result<Self, String> {
+        Self::new_with_mapping(child, indices, names)
     }
 
     pub fn star(child: Box<dyn PhysicalOperator>) -> Self {
@@ -225,14 +232,14 @@ impl PhysicalOperator for ProjectionOperator {
             Some(child_tuple) => {
                 let mut values = Vec::with_capacity(self.projections.len());
                 for (expr, _, _) in &self.projections {
-                    let val = expr.evaluate(&child_tuple)?;
+                    let val = expr.evaluate(&child_tuple, self.child.schema())?;
                     values.push(val);
                 }
                 // Each output row derives from exactly one input row: carry
                 // its heap location through so pointer-based UPDATE/DELETE
                 // can still address the row (a synthetic source — aggregate
                 // output — stays location-less).
-                Ok(Some(Tuple::new(values, self.output_schema.clone())
+                Ok(Some(Tuple::new(values)
                     .with_location_from(&child_tuple)))
             }
             None => Ok(None),

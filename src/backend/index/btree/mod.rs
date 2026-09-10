@@ -32,8 +32,8 @@
 //! | 16+8×n | * | key_0_len(2) + key_bytes …  key_n-1_len(2) + key_bytes |
 
 use std::cmp::Ordering;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 mod codec;
@@ -45,6 +45,7 @@ pub(crate) use codec::{
 };
 pub use node::BTreeNode;
 
+use crate::backend::buffer_manager::buffer_pool::BufferPool;
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::table::table_file::file_identity_from_file;
 use crate::types::value::DataValue;
@@ -53,7 +54,8 @@ use crate::types::DataType;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-/// B+ Tree page size (same as heap pages: 8 KB).
+/// Default capacity for an index buffer pool in 8 KB frames.
+pub const INDEX_POOL_CAPACITY: usize = 256;
 // ─── BTree ───────────────────────────────────────────────────────────────────
 
 /// A page-based B+ Tree index stored in a `.idx` file.
@@ -63,8 +65,10 @@ pub struct BTree {
     /// Path to the `.idx` file.
     #[allow(dead_code)]
     file_path: PathBuf,
-    /// Open file handle.
-    file: File,
+    /// Buffer pool managing 8 KB index pages.
+    pool: BufferPool,
+    /// Stable file identity used for PageWriteLock.
+    file_id: u64,
     /// The data type(s) of the indexed column(s). A single entry is a plain
     /// single-column index; multiple entries form a composite key where each
     /// value contributes one `[len][bytes]` segment in order.
@@ -104,6 +108,8 @@ impl BTree {
             .truncate(true)
             .open(&file_path)?;
 
+        let file_id = file_identity_from_file(&file)?;
+
         // Create the root node (empty leaf)
         let root = BTreeNode::new_leaf();
         let buf = root.serialize();
@@ -114,10 +120,18 @@ impl BTree {
         // Persist the root pointer sidecar so reopen lands on the real root.
         write_root_sidecar(&file_path, 0)?;
 
+        let pool = BufferPool::with_file_raw(
+            INDEX_POOL_CAPACITY,
+            file,
+            file_path.clone(),
+            1,
+        );
+
         log::info!("[BTree::create] Created with 1 page, root=0");
         Ok(Self {
             file_path,
-            file,
+            pool,
+            file_id,
             key_types,
             root_page_id: 0,
             total_pages: 1,
@@ -137,8 +151,16 @@ impl BTree {
             .write(true)
             .open(&file_path)?;
 
+        let file_id = file_identity_from_file(&file)?;
         let file_size = file.metadata()?.len();
         let total_pages = (file_size as usize / BTREE_PAGE_SIZE) as u32;
+
+        let pool = BufferPool::with_file_raw(
+            INDEX_POOL_CAPACITY,
+            file,
+            file_path.clone(),
+            total_pages,
+        );
 
         // The key_type is not stored in the file yet — callers must provide it
         // In a full implementation, type info would be stored in a header page.
@@ -156,7 +178,8 @@ impl BTree {
         );
         Ok(Self {
             file_path,
-            file,
+            pool,
+            file_id,
             key_types,
             root_page_id,
             total_pages,
@@ -349,45 +372,35 @@ impl BTree {
 
     /// Return the total number of pages in the index file.
     pub fn total_pages(&self) -> u32 {
-        self.total_pages
+        self.pool.total_pages()
     }
 
     // ─── Page I/O ──────────────────────────────────────────────────────────
 
-    /// Read a node page from disk.
+    /// Read a node page via the buffer pool (cached in memory on hits).
     fn read_node(&mut self, page_id: u32) -> io::Result<BTreeNode> {
-        let offset = page_id as u64 * BTREE_PAGE_SIZE as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; BTREE_PAGE_SIZE];
-        self.file.read_exact(&mut buf)?;
+        let buf = self.pool.read_page_bytes(page_id)?;
         BTreeNode::deserialize(&buf)
     }
 
-    /// Write a node page to disk.
+    /// Write a node page through the buffer pool (marks page dirty).
     fn write_node(&mut self, page_id: u32, node: &BTreeNode) -> io::Result<()> {
-        let offset = page_id as u64 * BTREE_PAGE_SIZE as u64;
         let buf = node.serialize();
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&buf)?;
-        self.file.flush()?;
+        self.pool.write_page_bytes(page_id, &buf)?;
         Ok(())
-
     }
 
-    /// Allocate a new page (append to the file).
+    /// Allocate a new page (appends to file and caches in buffer pool).
     fn allocate_page(&mut self, node: &BTreeNode) -> io::Result<u32> {
-        let page_id = self.total_pages;
         let buf = node.serialize();
-        self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&buf)?;
-        self.file.flush()?;
-        self.total_pages += 1;
+        let page_id = self.pool.allocate_raw_page(&buf)?;
+        self.total_pages = self.pool.total_pages();
         Ok(page_id)
     }
 
     /// Sync all changes to durable storage.
     pub fn sync(&mut self) -> io::Result<()> {
-        self.file.sync_all()?;
+        self.pool.flush_all()?;
         Ok(())
     }
 
@@ -595,7 +608,7 @@ impl BTree {
         let encoded = self.encode_key_for(keys)?;
 
         // Acquire page write lock for the root
-        let file_id = file_identity_from_file(&self.file)?;
+        let file_id = self.file_id;
         let _lock = PageWriteLock::acquire(file_id, self.root_page_id);
 
         let result = self.insert_internal(self.root_page_id, &encoded, page_id, slot_id)?;
@@ -728,7 +741,7 @@ impl BTree {
             let child_id = children[child_idx];
 
             // Acquire write lock for the child before modifying
-            let file_id = file_identity_from_file(&self.file)?;
+            let file_id = self.file_id;
             let _lock = PageWriteLock::acquire(file_id, child_id);
 
             // Recursively insert

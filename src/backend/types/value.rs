@@ -139,6 +139,28 @@ pub enum DataValue {
     Timestamp(NaiveDateTime),
 }
 
+impl DataValue {
+    /// Return the corresponding `DataType` for this value.
+    pub fn data_type(&self) -> crate::types::datatype::DataType {
+        use crate::types::datatype::DataType;
+        match self {
+            DataValue::SmallInt(_) => DataType::SmallInt,
+            DataValue::Int(_) => DataType::Int,
+            DataValue::BigInt(_) => DataType::BigInt,
+            DataValue::Real(_) => DataType::Real,
+            DataValue::DoublePrecision(_) => DataType::DoublePrecision,
+            DataValue::Numeric(v) => DataType::Numeric { precision: 38, scale: v.scale },
+            DataValue::Bool(_) => DataType::Bool,
+            DataValue::Char(s) => DataType::Char(s.len().min(u16::MAX as usize) as u16),
+            DataValue::Varchar(s) => DataType::Varchar(s.len().min(u16::MAX as usize) as u16),
+            DataValue::Date(_) => DataType::Date,
+            DataValue::Time(_) => DataType::Time,
+            DataValue::Bit(s) => DataType::Bit(s.len().min(u16::MAX as usize) as u16),
+            DataValue::Timestamp(_) => DataType::Timestamp,
+        }
+    }
+}
+
 impl fmt::Display for DataValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

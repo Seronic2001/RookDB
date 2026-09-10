@@ -278,9 +278,11 @@ pub(crate) fn check_foreign_key_insert_meta(
 /// NULL results are UNKNOWN and therefore pass.
 /// Metadata-driven CHECK constraint check (hot path).
 ///
-/// Expressions come from the process-cached [`TableMeta`]; each expression is
-/// still compiled per row (SQL parse + predicate build) — memoising compiled
-/// predicates is future work.
+/// Metadata-driven CHECK constraint check (hot path).
+///
+/// Fast path evaluates precompiled physical predicates stored in [`TableMeta`].
+/// If the table metadata was loaded before parser registration, it falls back
+/// to compiling via the registered hook.
 pub(crate) fn check_constraints_meta(
     _db_name: &str,
     table_name: &str,
@@ -288,34 +290,81 @@ pub(crate) fn check_constraints_meta(
     values: &[&str],
     meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
-    let check_exprs: Vec<String> = match meta {
-        Some(m) => m.check_exprs.clone(),
-        None => Vec::new(),
+    let meta = match meta {
+        Some(m) => m,
+        None => return Ok(()),
     };
 
-    if check_exprs.is_empty() {
+    if meta.check_exprs.is_empty() {
         return Ok(());
     }
 
     let tuple = build_check_tuple(columns, values);
 
-    for expr in &check_exprs {
-        let pred = compile_check_predicate(expr, columns)?;
-        match crate::backend::executor::physical::expr::evaluate_predicate(&pred, &tuple) {
-            Ok(Some(true)) => {}                       // satisfied
-            Ok(Some(false)) => {
-                return Err(RookError::constraint(
-                    ConstraintKind::Check,
-                    table_name,
-                    None,
-                    format!("CHECK constraint violated: '{}'", expr),
-                ));
+    let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+    let schema: Vec<crate::backend::executor::physical::tuple::ColumnInfo> = columns
+        .iter()
+        .map(|c| crate::backend::executor::physical::tuple::ColumnInfo {
+            name: c.name.clone(),
+            data_type: c.data_type.clone(),
+            table: None,
+        })
+        .collect();
+
+    // Fast path: evaluate precompiled check AST nodes directly (no SQL parsing)
+    if !meta.check_ast.is_empty() {
+        for (expr, ast_node) in &meta.check_ast {
+            let pred = crate::backend::executor::physical::expr::predicate_from_ast(ast_node, &col_names)
+                .map_err(|e| RookError::Internal(format!(
+                    "Failed to compile CHECK constraint '{}': {}", expr, e
+                )))?;
+            match crate::backend::executor::physical::expr::evaluate_predicate(&pred, &tuple, &schema) {
+                Ok(Some(true)) => {}                       // satisfied
+                Ok(Some(false)) => {
+                    return Err(RookError::constraint(
+                        ConstraintKind::Check,
+                        table_name,
+                        None,
+                        format!("CHECK constraint violated: '{}'", expr),
+                    ));
+                }
+                Ok(None) => {}                             // UNKNOWN (NULL) → pass, per SQL
+                Err(e) => {
+                    return Err(RookError::Internal(format!(
+                        "Failed to evaluate CHECK constraint '{}': {}", expr, e
+                    )));
+                }
             }
-            Ok(None) => {}                             // UNKNOWN (NULL) → pass, per SQL
-            Err(e) => {
-                return Err(RookError::Internal(format!(
-                    "Failed to evaluate CHECK constraint '{}': {}", expr, e
-                )));
+        }
+        return Ok(());
+    }
+
+    // Fallback path: parse and compile using registered hook if check_ast is empty
+    if let Some(parser) = crate::backend::cache::get_check_parser() {
+        for expr in &meta.check_exprs {
+            let node = parser(expr).map_err(|e| RookError::Internal(format!(
+                "Failed to parse CHECK constraint expression '{}': {}", expr, e
+            )))?;
+            let pred = crate::backend::executor::physical::expr::predicate_from_ast(&node, &col_names)
+                .map_err(|e| RookError::Internal(format!(
+                    "Failed to compile CHECK constraint '{}': {}", expr, e
+                )))?;
+            match crate::backend::executor::physical::expr::evaluate_predicate(&pred, &tuple, &schema) {
+                Ok(Some(true)) => {}
+                Ok(Some(false)) => {
+                    return Err(RookError::constraint(
+                        ConstraintKind::Check,
+                        table_name,
+                        None,
+                        format!("CHECK constraint violated: '{}'", expr),
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(RookError::Internal(format!(
+                        "Failed to evaluate CHECK constraint '{}': {}", expr, e
+                    )));
+                }
             }
         }
     }
@@ -323,45 +372,14 @@ pub(crate) fn check_constraints_meta(
     Ok(())
 }
 
-
-
-/// Parse a CHECK expression with the real SQL grammar by embedding it in a
-/// synthetic SELECT, then compile it into a physical `Predicate`.
-fn compile_check_predicate(
-    expr: &str,
-    columns: &[Column],
-) -> Result<crate::backend::executor::physical::expr::Predicate, RookError> {
-    use crate::backend::executor::physical::expr::predicate_from_ast;
-
-    let sql = format!("SELECT * FROM __check__ WHERE {}", expr);
-    let select = rook_parser::parse_sql(&sql)
-        .map_err(|e| RookError::Internal(format!(
-            "Failed to parse CHECK constraint expression '{}': {}", expr, e
-        )))?;
-    let selection = match select {
-        rook_ast::QueryPlan::Select(select) => select.selection,
-        _ => None,
-    };
-    let node = selection.ok_or_else(|| RookError::Internal(format!(
-        "CHECK constraint expression '{}' did not yield a predicate", expr
-    )))?;
-
-    let column_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-    predicate_from_ast(&node, &column_names)
-        .map_err(|e| RookError::Internal(format!(
-            "Failed to compile CHECK constraint '{}': {}", expr, e
-        )))
-}
-
 /// Build a physical Tuple from raw insert/update strings, typed per column.
 ///
 /// NULL (empty or literal "null", case-insensitive) becomes `None`, which
 /// makes comparisons evaluate to UNKNOWN under three-valued logic.
 fn build_check_tuple(columns: &[Column], values: &[&str]) -> crate::backend::executor::physical::tuple::Tuple {
-    use crate::backend::executor::physical::tuple::{ColumnInfo as PhysColInfo, Tuple};
+    use crate::backend::executor::physical::tuple::Tuple;
 
     let mut vals: Vec<Option<crate::types::DataValue>> = Vec::with_capacity(columns.len());
-    let mut info: Vec<PhysColInfo> = Vec::with_capacity(columns.len());
 
     for (col, raw) in columns.iter().zip(values.iter()) {
         let trimmed = raw.trim();
@@ -372,13 +390,8 @@ fn build_check_tuple(columns: &[Column], values: &[&str]) -> crate::backend::exe
                 DataValue::from_bytes(&col.data_type, &bytes).ok()
             }));
         }
-        info.push(PhysColInfo {
-            name: col.name.clone(),
-            data_type: col.data_type.clone(),
-            table: None,
-        });
     }
 
-    Tuple::new(vals, info)
+    Tuple::new(vals)
 }
 

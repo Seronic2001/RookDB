@@ -37,9 +37,28 @@ pub fn execute_plan(
     }
 
     // 4. Display results
-    display_tuples(&tuples);
+    let schema = root.schema().to_vec();
+    display_tuples(&tuples, &schema);
 
     Ok(tuples.len())
+}
+
+/// Execute a plan and collect tuples along with their output schema.
+pub fn execute_plan_collect_with_schema(
+    plan: &LogicalPlan,
+    catalog: &Catalog,
+    db_name: &str,
+) -> RookResult<(Vec<Tuple>, Vec<super::tuple::ColumnInfo>)> {
+    let planner = PhysicalPlanner::new(catalog.clone(), db_name.to_string());
+    let mut root = planner.plan(plan)?;
+    let schema = root.schema().to_vec();
+
+    let mut tuples: Vec<Tuple> = Vec::new();
+    while let Some(tuple) = root.next()? {
+        tuples.push(tuple);
+    }
+
+    Ok((tuples, schema))
 }
 
 /// Execute a plan and collect tuples without displaying (useful for testing).
@@ -48,15 +67,7 @@ pub fn execute_plan_collect(
     catalog: &Catalog,
     db_name: &str,
 ) -> RookResult<Vec<Tuple>> {
-    let planner = PhysicalPlanner::new(catalog.clone(), db_name.to_string());
-    let mut root = planner.plan(plan)?;
-
-    let mut tuples: Vec<Tuple> = Vec::new();
-    while let Some(tuple) = root.next()? {
-        tuples.push(tuple);
-    }
-
-    Ok(tuples)
+    execute_plan_collect_with_schema(plan, catalog, db_name).map(|(tuples, _)| tuples)
 }
 
 /// Pretty-print the operator plan tree (for debugging).

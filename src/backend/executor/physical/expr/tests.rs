@@ -61,9 +61,17 @@ mod tests {
         let schema = int_schema();
         let tuples = data
             .into_iter()
-            .map(|v| Tuple::new(vec![v.map(DataValue::Int)], schema.clone()))
+            .map(|v| Tuple::new(vec![v.map(DataValue::Int)]))
             .collect();
         (tuples, schema)
+    }
+
+    fn outer_schema() -> Vec<ColumnInfo> {
+        vec![ColumnInfo {
+            name: "x".into(),
+            data_type: DataType::Int,
+            table: None,
+        }]
     }
 
     #[test]
@@ -82,12 +90,8 @@ mod tests {
         let inner_plan: Rc<RefCell<Box<dyn PhysicalOperator>>> =
             Rc::new(RefCell::new(filter_op));
 
-        let outer_tuple = Tuple::new(
-            vec![Some(DataValue::Int(1))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
+        let outer_tuple = Tuple::new(vec![Some(DataValue::Int(1))]);
+        let o_schema = outer_schema();
 
         let pred = Predicate::CorrelatedExists {
             inner_plan: inner_plan.clone(),
@@ -95,7 +99,7 @@ mod tests {
             outer_col_indices: vec![0],
         };
 
-        let result = evaluate_predicate(&pred, &outer_tuple).unwrap();
+        let result = evaluate_predicate(&pred, &outer_tuple, &o_schema).unwrap();
         assert_eq!(result, Some(true), "EXISTS should be true when inner plan has tuples");
 
         // Verify the param was set from the outer tuple
@@ -118,12 +122,8 @@ mod tests {
         let inner_plan: Rc<RefCell<Box<dyn PhysicalOperator>>> =
             Rc::new(RefCell::new(filter_op));
 
-        let outer_tuple = Tuple::new(
-            vec![Some(DataValue::Int(99))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
+        let outer_tuple = Tuple::new(vec![Some(DataValue::Int(99))]);
+        let o_schema = outer_schema();
 
         let pred = Predicate::CorrelatedExists {
             inner_plan: inner_plan.clone(),
@@ -131,7 +131,7 @@ mod tests {
             outer_col_indices: vec![0],
         };
 
-        let result = evaluate_predicate(&pred, &outer_tuple).unwrap();
+        let result = evaluate_predicate(&pred, &outer_tuple, &o_schema).unwrap();
         assert_eq!(result, Some(false), "EXISTS should be false when inner plan is empty");
     }
 
@@ -157,25 +157,17 @@ mod tests {
             outer_col_indices: vec![0],
         };
 
+        let o_schema = outer_schema();
+
         // First evaluation
-        let outer1 = Tuple::new(
-            vec![Some(DataValue::Int(10))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
-        let r1 = evaluate_predicate(&pred, &outer1).unwrap();
+        let outer1 = Tuple::new(vec![Some(DataValue::Int(10))]);
+        let r1 = evaluate_predicate(&pred, &outer1, &o_schema).unwrap();
         assert_eq!(r1, Some(true));
         assert_eq!(*param.borrow(), Some(DataValue::Int(10)));
 
         // Second evaluation with different outer value
-        let outer2 = Tuple::new(
-            vec![Some(DataValue::Int(20))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
-        let r2 = evaluate_predicate(&pred, &outer2).unwrap();
+        let outer2 = Tuple::new(vec![Some(DataValue::Int(20))]);
+        let r2 = evaluate_predicate(&pred, &outer2, &o_schema).unwrap();
         assert_eq!(r2, Some(true));
         // Param should now be set to the new outer value (from reset + re-execution)
         assert_eq!(*param.borrow(), Some(DataValue::Int(20)));
@@ -197,12 +189,8 @@ mod tests {
         let inner_plan: Rc<RefCell<Box<dyn PhysicalOperator>>> =
             Rc::new(RefCell::new(filter_op));
 
-        let outer_tuple = Tuple::new(
-            vec![Some(DataValue::Int(7))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
+        let outer_tuple = Tuple::new(vec![Some(DataValue::Int(7))]);
+        let o_schema = outer_schema();
 
         // lhs_expr is the outer column (index 0)
         let pred = Predicate::CorrelatedInSubquery {
@@ -213,7 +201,7 @@ mod tests {
             negated: false,
         };
 
-        let result = evaluate_predicate(&pred, &outer_tuple).unwrap();
+        let result = evaluate_predicate(&pred, &outer_tuple, &o_schema).unwrap();
         assert_eq!(
             result,
             Some(true),
@@ -237,12 +225,8 @@ mod tests {
         let inner_plan: Rc<RefCell<Box<dyn PhysicalOperator>>> =
             Rc::new(RefCell::new(filter_op));
 
-        let outer_tuple = Tuple::new(
-            vec![Some(DataValue::Int(99))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
+        let outer_tuple = Tuple::new(vec![Some(DataValue::Int(99))]);
+        let o_schema = outer_schema();
 
         let pred = Predicate::CorrelatedInSubquery {
             inner_plan: inner_plan.clone(),
@@ -252,7 +236,7 @@ mod tests {
             negated: false,
         };
 
-        let result = evaluate_predicate(&pred, &outer_tuple).unwrap();
+        let result = evaluate_predicate(&pred, &outer_tuple, &o_schema).unwrap();
         assert_eq!(
             result,
             Some(false),
@@ -277,12 +261,8 @@ mod tests {
             Rc::new(RefCell::new(filter_op));
 
         // Outer tuple has NULL value
-        let outer_tuple = Tuple::new(
-            vec![None],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
+        let outer_tuple = Tuple::new(vec![None]);
+        let o_schema = outer_schema();
 
         let pred = Predicate::CorrelatedInSubquery {
             inner_plan: inner_plan.clone(),
@@ -292,7 +272,7 @@ mod tests {
             negated: false,
         };
 
-        let result = evaluate_predicate(&pred, &outer_tuple).unwrap();
+        let result = evaluate_predicate(&pred, &outer_tuple, &o_schema).unwrap();
         assert_eq!(
             result,
             None,
@@ -316,12 +296,8 @@ mod tests {
         let inner_plan: Rc<RefCell<Box<dyn PhysicalOperator>>> =
             Rc::new(RefCell::new(filter_op));
 
-        let outer_tuple = Tuple::new(
-            vec![Some(DataValue::Int(99))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
+        let outer_tuple = Tuple::new(vec![Some(DataValue::Int(99))]);
+        let o_schema = outer_schema();
 
         // NOT IN with no match → true
         let pred = Predicate::CorrelatedInSubquery {
@@ -332,7 +308,7 @@ mod tests {
             negated: true,
         };
 
-        let result = evaluate_predicate(&pred, &outer_tuple).unwrap();
+        let result = evaluate_predicate(&pred, &outer_tuple, &o_schema).unwrap();
         assert_eq!(
             result,
             Some(true),
@@ -340,13 +316,8 @@ mod tests {
         );
 
         // NOT IN with match → false
-        let outer_tuple2 = Tuple::new(
-            vec![Some(DataValue::Int(42))],
-            vec![ColumnInfo {
-                name: "x".into(),
-                data_type: DataType::Int, table: None }],
-        );
-        let result2 = evaluate_predicate(&pred, &outer_tuple2).unwrap();
+        let outer_tuple2 = Tuple::new(vec![Some(DataValue::Int(42))]);
+        let result2 = evaluate_predicate(&pred, &outer_tuple2, &o_schema).unwrap();
         assert_eq!(
             result2,
             Some(false),
@@ -361,9 +332,9 @@ mod tests {
         let schema = vec![ColumnInfo {
             name: "a".into(),
             data_type: DataType::Int, table: None }];
-        let tuple = Tuple::new(vec![None], schema.clone());
+        let tuple = Tuple::new(vec![None]);
         let pred = Predicate::IsDistinctFrom(Expr::Column { table: None, column: "a".into() }, Expr::Column { table: None, column: "a".into() });
-        let result = evaluate_predicate(&pred, &tuple).unwrap();
+        let result = evaluate_predicate(&pred, &tuple, &schema).unwrap();
         assert_eq!(result, Some(false), "NULL IS DISTINCT FROM NULL → false");
     }
 
@@ -374,17 +345,14 @@ mod tests {
             ColumnInfo { name: "b".into(), data_type: DataType::Int, table: None },
         ];
         // a = NULL, b = 5
-        let tuple = Tuple::new(
-            vec![None, Some(DataValue::Int(5))],
-            schema,
-        );
+        let tuple = Tuple::new(vec![None, Some(DataValue::Int(5))]);
         let pred = Predicate::IsDistinctFrom(Expr::Column { table: None, column: "a".into() }, Expr::Column { table: None, column: "b".into() });
-        let result = evaluate_predicate(&pred, &tuple).unwrap();
+        let result = evaluate_predicate(&pred, &tuple, &schema).unwrap();
         assert_eq!(result, Some(true), "NULL IS DISTINCT FROM 5 → true");
 
         // Reverse order
         let pred2 = Predicate::IsDistinctFrom(Expr::Column { table: None, column: "b".into() }, Expr::Column { table: None, column: "a".into() });
-        let result2 = evaluate_predicate(&pred2, &tuple).unwrap();
+        let result2 = evaluate_predicate(&pred2, &tuple, &schema).unwrap();
         assert_eq!(result2, Some(true), "5 IS DISTINCT FROM NULL → true");
     }
 
@@ -395,12 +363,9 @@ mod tests {
             ColumnInfo { name: "b".into(), data_type: DataType::Int, table: None },
         ];
         // a = 5, b = 5
-        let tuple = Tuple::new(
-            vec![Some(DataValue::Int(5)), Some(DataValue::Int(5))],
-            schema,
-        );
+        let tuple = Tuple::new(vec![Some(DataValue::Int(5)), Some(DataValue::Int(5))]);
         let pred = Predicate::IsDistinctFrom(Expr::Column { table: None, column: "a".into() }, Expr::Column { table: None, column: "b".into() });
-        let result = evaluate_predicate(&pred, &tuple).unwrap();
+        let result = evaluate_predicate(&pred, &tuple, &schema).unwrap();
         assert_eq!(result, Some(false), "5 IS DISTINCT FROM 5 → false");
     }
 
@@ -411,12 +376,9 @@ mod tests {
             ColumnInfo { name: "b".into(), data_type: DataType::Int, table: None },
         ];
         // a = 5, b = 7
-        let tuple = Tuple::new(
-            vec![Some(DataValue::Int(5)), Some(DataValue::Int(7))],
-            schema,
-        );
+        let tuple = Tuple::new(vec![Some(DataValue::Int(5)), Some(DataValue::Int(7))]);
         let pred = Predicate::IsDistinctFrom(Expr::Column { table: None, column: "a".into() }, Expr::Column { table: None, column: "b".into() });
-        let result = evaluate_predicate(&pred, &tuple).unwrap();
+        let result = evaluate_predicate(&pred, &tuple, &schema).unwrap();
         assert_eq!(result, Some(true), "5 IS DISTINCT FROM 7 → true");
     }
 
@@ -427,29 +389,20 @@ mod tests {
             ColumnInfo { name: "b".into(), data_type: DataType::Varchar(50), table: None },
         ];
         // a = 'hello', b = 'world'
-        let tuple = Tuple::new(
-            vec![
-                Some(DataValue::Varchar("hello".into())),
-                Some(DataValue::Varchar("world".into())),
-            ],
-            schema,
-        );
+        let tuple = Tuple::new(vec![
+            Some(DataValue::Varchar("hello".into())),
+            Some(DataValue::Varchar("world".into())),
+        ]);
         let pred = Predicate::IsDistinctFrom(Expr::Column { table: None, column: "a".into() }, Expr::Column { table: None, column: "b".into() });
-        let result = evaluate_predicate(&pred, &tuple).unwrap();
+        let result = evaluate_predicate(&pred, &tuple, &schema).unwrap();
         assert_eq!(result, Some(true), "'hello' IS DISTINCT FROM 'world' → true");
 
         // Same values
-        let tuple2 = Tuple::new(
-            vec![
-                Some(DataValue::Varchar("hello".into())),
-                Some(DataValue::Varchar("hello".into())),
-            ],
-            vec![
-                ColumnInfo { name: "a".into(), data_type: DataType::Varchar(50), table: None },
-                ColumnInfo { name: "b".into(), data_type: DataType::Varchar(50), table: None },
-            ],
-        );
-        let result2 = evaluate_predicate(&pred, &tuple2).unwrap();
+        let tuple2 = Tuple::new(vec![
+            Some(DataValue::Varchar("hello".into())),
+            Some(DataValue::Varchar("hello".into())),
+        ]);
+        let result2 = evaluate_predicate(&pred, &tuple2, &schema).unwrap();
         assert_eq!(result2, Some(false), "'hello' IS DISTINCT FROM 'hello' → false");
     }
 
@@ -458,85 +411,85 @@ mod tests {
     #[test]
     fn test_is_true_on_true() {
         let schema = vec![ColumnInfo { name: "x".into(), data_type: DataType::Bool, table: None }];
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))], schema);
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))]);
         let pred = Predicate::IsBoolean {
             expr: Expr::Column { table: None, column: "x".into() },
             test: BooleanTest::True,
             negated: false,
         };
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(true));
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(true));
     }
 
     #[test]
     fn test_is_true_on_false() {
         let schema = vec![ColumnInfo { name: "x".into(), data_type: DataType::Bool, table: None }];
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(false))], schema);
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(false))]);
         let pred = Predicate::IsBoolean {
             expr: Expr::Column { table: None, column: "x".into() },
             test: BooleanTest::True,
             negated: false,
         };
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(false));
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(false));
     }
 
     #[test]
     fn test_is_true_on_null() {
         let schema = vec![ColumnInfo { name: "x".into(), data_type: DataType::Bool, table: None }];
-        let tuple = Tuple::new(vec![None], schema);
+        let tuple = Tuple::new(vec![None]);
         let pred = Predicate::IsBoolean {
             expr: Expr::Column { table: None, column: "x".into() },
             test: BooleanTest::True,
             negated: false,
         };
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(false));
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(false));
     }
 
     #[test]
     fn test_is_false_on_false() {
         let schema = vec![ColumnInfo { name: "x".into(), data_type: DataType::Bool, table: None }];
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(false))], schema);
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(false))]);
         let pred = Predicate::IsBoolean {
             expr: Expr::Column { table: None, column: "x".into() },
             test: BooleanTest::False,
             negated: false,
         };
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(true));
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(true));
     }
 
     #[test]
     fn test_is_false_on_true() {
         let schema = vec![ColumnInfo { name: "x".into(), data_type: DataType::Bool, table: None }];
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))], schema);
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))]);
         let pred = Predicate::IsBoolean {
             expr: Expr::Column { table: None, column: "x".into() },
             test: BooleanTest::False,
             negated: false,
         };
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(false));
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(false));
     }
 
     #[test]
     fn test_is_unknown_on_null() {
         let schema = vec![ColumnInfo { name: "x".into(), data_type: DataType::Bool, table: None }];
-        let tuple = Tuple::new(vec![None], schema);
+        let tuple = Tuple::new(vec![None]);
         let pred = Predicate::IsBoolean {
             expr: Expr::Column { table: None, column: "x".into() },
             test: BooleanTest::Unknown,
             negated: false,
         };
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(true));
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(true));
     }
 
     #[test]
     fn test_is_unknown_on_known_value() {
         let schema = vec![ColumnInfo { name: "x".into(), data_type: DataType::Bool, table: None }];
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))], schema);
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))]);
         let pred = Predicate::IsBoolean {
             expr: Expr::Column { table: None, column: "x".into() },
             test: BooleanTest::Unknown,
             negated: false,
         };
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(false));
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(false));
     }
 
     #[test]
@@ -548,16 +501,16 @@ mod tests {
             test: BooleanTest::True,
             negated: true,
         };
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(false))], schema.clone());
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(true));
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(false))]);
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(true));
 
         // Not true on null → also true (null is not true)
-        let tuple2 = Tuple::new(vec![None], schema.clone());
-        assert_eq!(evaluate_predicate(&pred, &tuple2).unwrap(), Some(true));
+        let tuple2 = Tuple::new(vec![None]);
+        assert_eq!(evaluate_predicate(&pred, &tuple2, &schema).unwrap(), Some(true));
 
         // Not true on true → false
-        let tuple3 = Tuple::new(vec![Some(DataValue::Bool(true))], schema);
-        assert_eq!(evaluate_predicate(&pred, &tuple3).unwrap(), Some(false));
+        let tuple3 = Tuple::new(vec![Some(DataValue::Bool(true))]);
+        assert_eq!(evaluate_predicate(&pred, &tuple3, &schema).unwrap(), Some(false));
     }
 
     #[test]
@@ -569,16 +522,16 @@ mod tests {
             test: BooleanTest::False,
             negated: true,
         };
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))], schema.clone());
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(true));
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))]);
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(true));
 
         // Not false on null → also true
-        let tuple2 = Tuple::new(vec![None], schema.clone());
-        assert_eq!(evaluate_predicate(&pred, &tuple2).unwrap(), Some(true));
+        let tuple2 = Tuple::new(vec![None]);
+        assert_eq!(evaluate_predicate(&pred, &tuple2, &schema).unwrap(), Some(true));
 
         // Not false on false → false
-        let tuple3 = Tuple::new(vec![Some(DataValue::Bool(false))], schema);
-        assert_eq!(evaluate_predicate(&pred, &tuple3).unwrap(), Some(false));
+        let tuple3 = Tuple::new(vec![Some(DataValue::Bool(false))]);
+        assert_eq!(evaluate_predicate(&pred, &tuple3, &schema).unwrap(), Some(false));
     }
 
     #[test]
@@ -590,20 +543,20 @@ mod tests {
             test: BooleanTest::Unknown,
             negated: true,
         };
-        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))], schema.clone());
-        assert_eq!(evaluate_predicate(&pred, &tuple).unwrap(), Some(true));
+        let tuple = Tuple::new(vec![Some(DataValue::Bool(true))]);
+        assert_eq!(evaluate_predicate(&pred, &tuple, &schema).unwrap(), Some(true));
 
-        let tuple2 = Tuple::new(vec![Some(DataValue::Bool(false))], schema.clone());
-        assert_eq!(evaluate_predicate(&pred, &tuple2).unwrap(), Some(true));
+        let tuple2 = Tuple::new(vec![Some(DataValue::Bool(false))]);
+        assert_eq!(evaluate_predicate(&pred, &tuple2, &schema).unwrap(), Some(true));
 
-        let tuple3 = Tuple::new(vec![None], schema);
-        assert_eq!(evaluate_predicate(&pred, &tuple3).unwrap(), Some(false));
+        let tuple3 = Tuple::new(vec![None]);
+        assert_eq!(evaluate_predicate(&pred, &tuple3, &schema).unwrap(), Some(false));
     }
 
     #[test]
     fn test_new_scalar_functions() {
         let schema = vec![];
-        let tuple = Tuple::new(vec![], schema);
+        let tuple = Tuple::new(vec![]);
 
         // 1. Test CONCAT
         let concat_expr = Expr::Function {
@@ -616,7 +569,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            concat_expr.evaluate(&tuple).unwrap(),
+            concat_expr.evaluate(&tuple, &schema).unwrap(),
             Some(DataValue::Varchar("Hello 42 World".to_string()))
         );
 
@@ -629,7 +582,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            mod_expr.evaluate(&tuple).unwrap(),
+            mod_expr.evaluate(&tuple, &schema).unwrap(),
             Some(DataValue::Int(1))
         );
 
@@ -642,7 +595,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            mod_double_expr.evaluate(&tuple).unwrap(),
+            mod_double_expr.evaluate(&tuple, &schema).unwrap(),
             Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(1.5)))
         );
 
@@ -654,7 +607,7 @@ mod tests {
                 Expr::Constant(DataValue::Int(0)),
             ],
         };
-        assert!(mod_zero_expr.evaluate(&tuple).is_err());
+        assert!(mod_zero_expr.evaluate(&tuple, &schema).is_err());
 
         // Test MOD with Null
         let mod_null_expr = Expr::Function {
@@ -664,7 +617,7 @@ mod tests {
                 Expr::Null,
             ],
         };
-        assert_eq!(mod_null_expr.evaluate(&tuple).unwrap(), None);
+        assert_eq!(mod_null_expr.evaluate(&tuple, &schema).unwrap(), None);
 
         // 3. Test POWER
         let power_expr = Expr::Function {
@@ -675,7 +628,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            power_expr.evaluate(&tuple).unwrap(),
+            power_expr.evaluate(&tuple, &schema).unwrap(),
             Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(8.0)))
         );
 
@@ -687,7 +640,7 @@ mod tests {
                 Expr::Constant(DataValue::Int(3)),
             ],
         };
-        assert_eq!(power_null_expr.evaluate(&tuple).unwrap(), None);
+        assert_eq!(power_null_expr.evaluate(&tuple, &schema).unwrap(), None);
 
         // 4. Test SQRT
         let sqrt_expr = Expr::Function {
@@ -697,7 +650,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            sqrt_expr.evaluate(&tuple).unwrap(),
+            sqrt_expr.evaluate(&tuple, &schema).unwrap(),
             Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(3.0)))
         );
 
@@ -708,7 +661,7 @@ mod tests {
                 Expr::Constant(DataValue::Int(-9)),
             ],
         };
-        assert!(sqrt_neg_expr.evaluate(&tuple).is_err());
+        assert!(sqrt_neg_expr.evaluate(&tuple, &schema).is_err());
 
         // Test SQRT with Null
         let sqrt_null_expr = Expr::Function {
@@ -717,6 +670,6 @@ mod tests {
                 Expr::Null,
             ],
         };
-        assert_eq!(sqrt_null_expr.evaluate(&tuple).unwrap(), None);
+        assert_eq!(sqrt_null_expr.evaluate(&tuple, &schema).unwrap(), None);
     }
 }

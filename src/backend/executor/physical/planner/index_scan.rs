@@ -151,6 +151,7 @@ impl PhysicalPlanner {
                 mode, ts.table
             );
 
+            crate::backend::cache::checkpoint();
             let mut btree = BTree::open(idx_path.clone())
                 .map_err(|e| format!("Failed to open index: {}", e))?;
             // Set key type(s) from the INDEXED column(s) (NOT the first table column)

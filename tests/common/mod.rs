@@ -94,6 +94,8 @@ impl TestWorkspace {
         std::fs::create_dir_all(path.join("base")).expect("create workspace");
 
         std::env::set_current_dir(&path).expect("chdir into workspace");
+        storage_manager::backend::executor::row_select::register_where_parser(rook_parser::parse_where_text);
+        storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
         storage_manager::catalog::init_catalog();
 
         Self {

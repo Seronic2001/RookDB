@@ -14,24 +14,28 @@ use rook_ast::{PredicateNode, QueryPlan, SelectExpr, SelectPlan, TableRef};
 use crate::backend::error::RookError;
 use crate::catalog::Catalog;
 
-/// Parse a raw WHERE-clause string into a `PredicateNode` using the real SQL
-/// grammar.
+use std::sync::OnceLock;
+
+pub type WhereParserFn = fn(&str) -> Result<Option<PredicateNode>, String>;
+static WHERE_PARSER: OnceLock<WhereParserFn> = OnceLock::new();
+
+/// Register a parser hook for raw WHERE-clause strings.
+pub fn register_where_parser(parser: WhereParserFn) {
+    let _ = WHERE_PARSER.set(parser);
+}
+
+/// Parse a raw WHERE-clause string into a `PredicateNode` using the registered SQL parser.
 ///
-/// `None` means "no predicate" (match every row). Parsing embeds the text in
-/// a synthetic SELECT, so the full expression grammar is available —
-/// arithmetic, AND/OR/NOT with parentheses, IN, BETWEEN, LIKE, functions.
+/// `None` means "no predicate" (match every row).
 pub fn parse_where_text(text: &str) -> crate::backend::error::RookResult<Option<PredicateNode>> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let sql = format!("SELECT * FROM __where__ WHERE {}", trimmed);
-    match rook_parser::parse_sql(&sql)? {
-        QueryPlan::Select(select) => Ok(select.selection),
-        other => Err(RookError::Internal(format!(
-            "WHERE clause did not yield a SELECT statement: {:?}",
-            other.statement_type()
-        ))),
+    if let Some(parser) = WHERE_PARSER.get() {
+        parser(trimmed).map_err(RookError::Internal)
+    } else {
+        Err(RookError::Internal("No WHERE-clause parser registered".to_string()))
     }
 }
 

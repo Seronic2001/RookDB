@@ -245,6 +245,19 @@ pub fn checkpoint() {
 
 // ── table metadata cache ─────────────────────────────────────────────────────
 
+pub type CheckParserFn = fn(&str) -> Result<rook_ast::PredicateNode, String>;
+static CHECK_PARSER: OnceLock<CheckParserFn> = OnceLock::new();
+
+/// Register a parser hook for raw CHECK constraint expressions.
+pub fn register_check_parser(parser: CheckParserFn) {
+    let _ = CHECK_PARSER.set(parser);
+}
+
+/// Retrieve the registered CHECK constraint parser, if any.
+pub fn get_check_parser() -> Option<CheckParserFn> {
+    CHECK_PARSER.get().copied()
+}
+
 /// Constraint/index metadata for one table, loaded from the system tables.
 #[derive(Debug, Clone)]
 pub struct TableMeta {
@@ -256,6 +269,8 @@ pub struct TableMeta {
     pub foreign_keys: Vec<(String, String, String)>,
     /// CHECK constraint expressions.
     pub check_exprs: Vec<String>,
+    /// Precompiled CHECK constraints as `(expression_sql, AST_node)`.
+    pub check_ast: Vec<(String, rook_ast::PredicateNode)>,
     /// All named indexes as `(index_name, Vec<column_name>, is_unique)`
     /// (superset view of `unique_indexes`, kept for callers needing layout).
     pub named_indexes: Vec<(String, Vec<String>, bool)>,
@@ -346,11 +361,23 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
         }
     }
 
+    let mut check_ast = Vec::new();
+    if !check_exprs.is_empty() {
+        if let Some(parser) = CHECK_PARSER.get() {
+            for expr in &check_exprs {
+                if let Ok(ast_node) = parser(expr) {
+                    check_ast.push((expr.clone(), ast_node));
+                }
+            }
+        }
+    }
+
     Some(Arc::new(TableMeta {
         table_id,
         unique_indexes,
         foreign_keys,
         check_exprs,
+        check_ast,
         named_indexes,
     }))
 }

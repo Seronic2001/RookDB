@@ -201,6 +201,16 @@ impl BufferPool {
         Ok(pool)
     }
 
+    /// Create a buffer pool for a raw page file (such as a B+ Tree .idx file)
+    /// where total pages is derived directly from file size, not a heap header.
+    pub fn with_file_raw(capacity: usize, file: File, file_path: PathBuf, total_pages: u32) -> Self {
+        let mut pool = Self::new(capacity);
+        pool.file_path = Some(file_path);
+        pool.file = Some(file);
+        pool.total_pages = total_pages;
+        pool
+    }
+
     /// Open a file for the buffer pool to manage.
     ///
     /// Reads the header page to determine the total number of pages.
@@ -335,6 +345,57 @@ impl BufferPool {
 
         log::trace!("BufferPool: allocated new page {}", page_id);
         Ok((page_id, FrameId(frame_idx)))
+    }
+
+    /// Allocate a new raw page (without initializing heap headers or rewriting page 0).
+    /// Used for index files where page 0 is a B+ Tree node.
+    pub fn allocate_raw_page(&mut self, data: &[u8]) -> io::Result<u32> {
+        let page_id = self.total_pages;
+
+        // 1. Evict first if needed
+        let frame_idx = self.evict_frame()?;
+
+        // 2. Append to file
+        let file: &mut File = self.file.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "BufferPool has no open file")
+        })?;
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(data)?;
+        file.flush()?;
+
+        self.total_pages = page_id + 1;
+
+        // 3. Store in pool
+        let mut page = Page::new();
+        page.data[..data.len()].copy_from_slice(data);
+        let frame = &mut self.frames[frame_idx];
+        frame.page_id = page_id;
+        frame.page = page;
+        frame.is_dirty = false;
+        frame.pin_count = 0;
+        frame.clock_bit = true;
+        frame.occupied = true;
+
+        self.frame_table.insert(page_id, frame_idx);
+        Ok(page_id)
+    }
+
+    /// Read raw page bytes using the buffer pool cache.
+    /// Hits return without any disk I/O!
+    pub fn read_page_bytes(&mut self, page_id: u32) -> io::Result<Vec<u8>> {
+        let frame_id = self.fetch_page(page_id)?;
+        let data = self.get_page(frame_id).data.clone();
+        self.unpin(frame_id, false);
+        Ok(data)
+    }
+
+    /// Write raw page bytes through the buffer pool (marks page dirty).
+    pub fn write_page_bytes(&mut self, page_id: u32, data: &[u8]) -> io::Result<()> {
+        let frame_id = self.fetch_page(page_id)?;
+        let page = self.get_page_mut(frame_id);
+        page.data[..data.len()].copy_from_slice(data);
+        self.unpin(frame_id, true);
+        Ok(())
     }
 
     /// Access a pinned page by frame ID.

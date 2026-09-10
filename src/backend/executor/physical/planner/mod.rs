@@ -494,6 +494,7 @@ impl PhysicalPlanner {
                     first_idx_name, index_path
                 );
 
+                crate::backend::cache::checkpoint();
                 let mut btree = BTree::open(index_path)
                     .map_err(|e| format!("Failed to open index for table '{}': {}", ts.table, e))?;
 
@@ -529,6 +530,7 @@ impl PhysicalPlanner {
                 legacy_index_path
             );
 
+            crate::backend::cache::checkpoint();
             let mut btree = BTree::open(legacy_index_path)
                 .map_err(|e| format!("Failed to open legacy index for table '{}': {}", ts.table, e))?;
 

@@ -210,7 +210,7 @@ impl SortedRunWriter {
 
     /// Append one tuple to the sorted run.
     fn write_tuple(&mut self, tuple: &Tuple) -> Result<(), String> {
-        let bytes = serialize_tuple_to_bytes(tuple)?;
+        let bytes = serialize_tuple_to_bytes(tuple, &self.schema)?;
         let len = bytes.len() as u32;
 
         self.file
@@ -631,7 +631,6 @@ mod tests {
             .map(|(a, b)| {
                 Tuple::new(
                     vec![a.map(DataValue::Int), b.map(DataValue::Int)],
-                    schema.clone(),
                 )
             })
             .collect();
@@ -640,14 +639,11 @@ mod tests {
 
     #[test]
     fn test_compare_tuples_by_keys_asc() {
-        let schema = int_schema();
         let a = Tuple::new(
             vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))],
-            schema.clone(),
         );
         let b = Tuple::new(
             vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))],
-            schema,
         );
 
         let keys = vec![(0, false)]; // sort by col 0 ascending
@@ -664,14 +660,11 @@ mod tests {
 
     #[test]
     fn test_compare_tuples_by_keys_desc() {
-        let schema = int_schema();
         let a = Tuple::new(
             vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))],
-            schema.clone(),
         );
         let b = Tuple::new(
             vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))],
-            schema,
         );
 
         let keys = vec![(0, true)]; // sort by col 0 descending
@@ -683,14 +676,11 @@ mod tests {
 
     #[test]
     fn test_compare_tuples_by_keys_nulls_first() {
-        let schema = int_schema();
         let a = Tuple::new(
             vec![None, Some(DataValue::Int(10))],
-            schema.clone(),
         );
         let b = Tuple::new(
             vec![Some(DataValue::Int(5)), Some(DataValue::Int(20))],
-            schema,
         );
 
         let keys = vec![(0, false)]; // NULLs first
@@ -822,15 +812,12 @@ mod tests {
         let tuples = vec![
             Tuple::new(
                 vec![Some(DataValue::Int(1)), Some(DataValue::Int(20))],
-                schema.clone(),
             ),
             Tuple::new(
                 vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))],
-                schema.clone(),
             ),
             Tuple::new(
                 vec![Some(DataValue::Int(2)), Some(DataValue::Int(5))],
-                schema.clone(),
             ),
         ];
 

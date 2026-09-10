@@ -267,9 +267,10 @@ impl AggregateOperator {
         if self.group_by_exprs.is_empty() {
             return Ok("__global__".to_string());
         }
+        let child_schema = self.child.schema();
         let mut parts = Vec::with_capacity(self.group_by_exprs.len());
         for expr in &self.group_by_exprs {
-            let val = expr.evaluate(tuple)?;
+            let val = expr.evaluate(tuple, child_schema)?;
             match val {
                 Some(dv) => parts.push(normalise_value_for_key(&dv)),
                 None => parts.push("\x00N\x00".to_string()),
@@ -287,14 +288,14 @@ impl AggregateOperator {
             let val = entry.agg_states[agg_idx].finalize(agg);
             values.push(val);
         }
-        Ok(Tuple::new(values, self.output_schema.clone()))
+        Ok(Tuple::new(values))
     }
 
     fn materialise(&mut self) -> Result<(), String> {
         for entry in &self.groups {
             let tuple = self.build_output_tuple(entry)?;
             if let Some(ref having) = self.having {
-                match evaluate_predicate(having, &tuple)? {
+                match evaluate_predicate(having, &tuple, &self.output_schema)? {
                     Some(true) => self.output_buffer.push(tuple),
                     _ => {}
                 }
@@ -309,10 +310,11 @@ impl AggregateOperator {
 impl PhysicalOperator for AggregateOperator {
     fn next(&mut self) -> Result<Option<Tuple>, String> {
         if !self.consumed {
+            let child_schema = self.child.schema().to_vec();
             while let Some(tuple) = self.child.next()? {
                 let key_str = self.make_group_key(&tuple)?;
                 let key_values: Vec<Option<DataValue>> = self.group_by_exprs.iter()
-                    .map(|expr| expr.evaluate(&tuple))
+                    .map(|expr| expr.evaluate(&tuple, &child_schema))
                     .collect::<Result<Vec<_>, String>>()?;
 
                 let group_idx = match self.group_map.entry(key_str) {
@@ -331,7 +333,7 @@ impl PhysicalOperator for AggregateOperator {
                 let group = &mut self.groups[group_idx];
                 for (agg_idx, agg) in self.aggregates.iter().enumerate() {
                     let value = match &agg.input {
-                        Some(expr) => expr.evaluate(&tuple)?,
+                        Some(expr) => expr.evaluate(&tuple, &child_schema)?,
                         None => None,
                     };
                     group.agg_states[agg_idx].update(agg.function, value.as_ref(), agg.distinct)

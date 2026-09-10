@@ -87,7 +87,6 @@ impl SubqueryExecOperator {
                 let bool_val = DataValue::Bool(exists);
                 self.result = Some(Tuple::new(
                     vec![Some(bool_val)],
-                    self.output_schema.clone(),
                 ));
             }
         }

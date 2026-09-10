@@ -11,7 +11,7 @@ use crate::types::value::DataValue;
 use crate::types::comparison::compare_nullable;
 
 use super::Expr;
-use super::super::tuple::Tuple;
+use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::operators::PhysicalOperator;
 
 // ── Boolean test variants ────────────────────────────────────────────────────
@@ -187,17 +187,17 @@ impl Predicate {
     }
 }
 
-/// Evaluate a predicate against a tuple, returning a tri-value result.
+/// Evaluate a predicate against a tuple and schema, returning a tri-value result.
 ///
 /// Returns `None` for UNKNOWN (NULL involved), `Some(true)` for True,
 /// `Some(false)` for False.
-pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool>, String> {
+pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<bool>, String> {
     match pred {
         Predicate::AlwaysTrue => Ok(Some(true)),
 
         Predicate::Compare(left, op, right) => {
-            let lv = left.evaluate(tuple)?;
-            let rv = right.evaluate(tuple)?;
+            let lv = left.evaluate(tuple, schema)?;
+            let rv = right.evaluate(tuple, schema)?;
 
             match (lv, rv) {
                 (None, _) | (_, None) => Ok(None), // NULL → UNKNOWN
@@ -219,11 +219,11 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool
         }
 
         Predicate::And(left, right) => {
-            let lv = evaluate_predicate(left, tuple)?;
+            let lv = evaluate_predicate(left, tuple, schema)?;
             match lv {
                 Some(false) => Ok(Some(false)), // short-circuit
                 _ => {
-                    let rv = evaluate_predicate(right, tuple)?;
+                    let rv = evaluate_predicate(right, tuple, schema)?;
                     Ok(match (lv, rv) {
                         (Some(true), Some(true)) => Some(true),
                         (Some(false), _) | (_, Some(false)) => Some(false),
@@ -234,11 +234,11 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool
         }
 
         Predicate::Or(left, right) => {
-            let lv = evaluate_predicate(left, tuple)?;
+            let lv = evaluate_predicate(left, tuple, schema)?;
             match lv {
                 Some(true) => Ok(Some(true)), // short-circuit
                 _ => {
-                    let rv = evaluate_predicate(right, tuple)?;
+                    let rv = evaluate_predicate(right, tuple, schema)?;
                     Ok(match (lv, rv) {
                         (Some(false), Some(false)) => Some(false),
                         (Some(true), _) | (_, Some(true)) => Some(true),
@@ -249,22 +249,22 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool
         }
 
         Predicate::Not(inner) => {
-            let iv = evaluate_predicate(inner, tuple)?;
+            let iv = evaluate_predicate(inner, tuple, schema)?;
             Ok(iv.map(|b| !b))
         }
 
         Predicate::IsNull(expr) => {
-            let val = expr.evaluate(tuple)?;
+            let val = expr.evaluate(tuple, schema)?;
             Ok(Some(val.is_none()))
         }
 
         Predicate::IsNotNull(expr) => {
-            let val = expr.evaluate(tuple)?;
+            let val = expr.evaluate(tuple, schema)?;
             Ok(Some(val.is_some()))
         }
 
         Predicate::Like(expr, pattern, escape_char) => {
-            let val = expr.evaluate(tuple)?;
+            let val = expr.evaluate(tuple, schema)?;
             match val {
                 None => Ok(None), // NULL LIKE anything → UNKNOWN
                 Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => {
@@ -277,7 +277,7 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool
         Predicate::ExistsResult(exists) => Ok(Some(*exists)),
 
         Predicate::InSubqueryResult(expr, values, negated) => {
-            let val = expr.evaluate(tuple)?;
+            let val = expr.evaluate(tuple, schema)?;
             match val {
                 None => Ok(None), // NULL IN (...) → UNKNOWN
                 Some(dv) => {
@@ -342,7 +342,7 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool
             negated,
         } => {
             // Evaluate the left-hand side expression against the outer tuple
-            let lhs_val = lhs_expr.evaluate(tuple)?;
+            let lhs_val = lhs_expr.evaluate(tuple, schema)?;
             match lhs_val {
                 None => Ok(None), // NULL IN (...) → UNKNOWN
                 Some(lhs_dv) => {
@@ -385,8 +385,8 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool
         }
 
         Predicate::IsDistinctFrom(left, right) => {
-            let lv = left.evaluate(tuple)?;
-            let rv = right.evaluate(tuple)?;
+            let lv = left.evaluate(tuple, schema)?;
+            let rv = right.evaluate(tuple, schema)?;
 
             // IS DISTINCT FROM: true if values differ OR one is NULL
             // (NULL IS DISTINCT FROM NULL → false; NULL IS DISTINCT FROM 5 → true)
@@ -407,7 +407,7 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple) -> Result<Option<bool
             test,
             negated,
         } => {
-            let val = expr.evaluate(tuple)?;
+            let val = expr.evaluate(tuple, schema)?;
 
             // Standard semantics:
             //   x IS TRUE     → true if x = Some(true), false otherwise (including NULL)
