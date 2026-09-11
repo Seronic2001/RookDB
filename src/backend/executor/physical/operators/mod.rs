@@ -12,7 +12,7 @@
 //!   Null and CteScan operators
 //! - `sort.rs`: SortOperator
 //! - `aggregate.rs`: AggregateOperator with GROUP BY / HAVING support
-//! - `set_op.rs`: UNION [ALL] / INTERSECT [ALL] / EXCEPT [ALL]
+//! - `set_op.rs`: `UNION [ALL] / INTERSECT [ALL] / EXCEPT [ALL]`
 //! - `subquery.rs`: scalar and EXISTS subquery execution
 //! - `insert.rs`: INSERT INTO ... SELECT pipeline operator
 //! - `utils.rs`: normalise_value_for_key

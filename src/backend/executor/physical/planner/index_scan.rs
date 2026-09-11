@@ -3,7 +3,7 @@
 //! Chooses between SeqScan and `IndexScanOperator` (PointLookup /
 //! RangeLookup / CompositePointLookup / FullScan) by matching a filter
 //! predicate against a table's indexes. When several indexes qualify the
-//! most selective mode wins (see [`scan_mode_priority`]).
+//! most selective mode wins (see `scan_mode_priority`).
 
 use std::path::PathBuf;
 

@@ -14,9 +14,9 @@
 //!
 //! * [`with_heap`] — one cached `HeapManager` per canonical `.dat` path.
 //! * [`metadata`] — constraint/index metadata per `(db, table)`.
-//! * [`indexes`] — discovered index files per `(db, table)` (create_index.rs).
+//! * `indexes` — discovered index files per `(db, table)` (create_index.rs).
 //! * [`with_btree`] — one cached `BTree` handle per `.idx` path, with fsync
-//!   batching (sync every [`BTREE_SYNC_INTERVAL`] mutations instead of per op).
+//!   batching (sync every `BTREE_SYNC_INTERVAL` mutations instead of per op).
 //!
 //! Correctness contract (single-user engine):
 //!
@@ -25,9 +25,9 @@
 //! * `checkpoint()` is cheap when nothing is dirty and is safe to call often;
 //!   callers include statement boundaries, the CLI exit path and benchmarks.
 //! * External rewrites of a heap file (VACUUM) and `HeapManager::create`
-//!   evict the affected entries via [`evict_heap`] / [`evict_all_heaps`].
+//!   evict the affected entries via [`evict_heap`] / `evict_all_heaps`.
 //! * Any DDL that rewrites system tables invalidates [`metadata`] /
-//!   [`indexes`] caches via [`invalidate_metadata`].
+//!   `indexes` caches via [`invalidate_metadata`].
 
 use std::collections::HashMap;
 use std::io;
@@ -160,7 +160,7 @@ fn btree_cache() -> &'static Mutex<BTreeCacheMap> {
 ///
 /// `open` is only invoked on a miss (first touch of that index file). Every
 /// call counts as one mutation; a real `sync_all()` runs every
-/// [`BTREE_SYNC_INTERVAL`] calls instead of on every row.
+/// `BTREE_SYNC_INTERVAL` calls instead of on every row.
 ///
 /// `set_key_types` must be applied by `open` — the cached tree already has it.
 pub fn with_btree<T, E>(

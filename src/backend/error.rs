@@ -8,7 +8,7 @@
 //! into typed results through `?` unchanged, and `Display` renders the same
 //! human-readable messages as before.
 //!
-//! ```ignore
+//! ```text
 //! match validate_row_insert(&catalog, "db", "t", &["NULL"]) {
 //!     Err(RookError::ConstraintViolation { kind: ConstraintKind::NotNull, .. }) => { … }
 //!     Err(e) if e.is_io() => { … }

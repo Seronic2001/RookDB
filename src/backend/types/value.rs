@@ -18,7 +18,7 @@
 //! | NUMERIC/DECIMAL | ceil((p+1)/2) | packed BCD + sign nibble |
 //! | BOOL | 1 | 0x00=false 0x01=true |
 //! | CHAR(n) | n | UTF-8, space-padded |
-//! | VARCHAR(n) | 2 + len | [u16 len prefix][UTF-8] in `to_bytes()`; stored without prefix in row |
+//! | VARCHAR(n) | 2 + len | `[u16 len prefix][UTF-8]` in `to_bytes()`; stored without prefix in row |
 //! | DATE | 4 | days since 1970-01-01, i32 LE |
 //! | TIME | 8 | µs since midnight, i64 LE |
 //! | TIMESTAMP | 8 | µs since Unix epoch, i64 LE |
@@ -630,7 +630,7 @@ impl DataValue {
     /// Type-aware variant of [`to_bytes`](Self::to_bytes) for types whose
     /// encoding depends on schema metadata (`NUMERIC` precision, `CHAR` length).
     ///
-    /// For most types this delegates to [`to_bytes`]. For `NUMERIC`/`DECIMAL`
+    /// For most types this delegates to [`Self::to_bytes`]. For `NUMERIC`/`DECIMAL`
     /// it validates the scale matches before BCD-encoding. For `CHAR`/`CHARACTER`
     /// it applies space-padding to the declared fixed length.
     pub fn to_bytes_for_type(&self, ty: &DataType) -> Result<Vec<u8>, String> {

@@ -178,7 +178,7 @@ impl Predicate {
         Predicate::Not(Box::new(inner))
     }
 
-    /// Convenience: wrap two Option<Predicate> into a conjunction.
+    /// Convenience: wrap two `Option<Predicate>` into a conjunction.
     pub fn combine(a: Option<Predicate>, b: Option<Predicate>) -> Option<Predicate> {
         match (a, b) {
             (Some(p1), Some(p2)) => Some(Predicate::and(p1, p2)),

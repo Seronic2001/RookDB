@@ -43,8 +43,8 @@ pub const FSM_PAGE_SIZE: usize = 8192;
 /// Stores a binary max-tree where leaf nodes hold free-space categories (0–255).
 ///
 /// Layout:
-/// - tree[0]: root of this FSM page's subtree
-/// - tree[1..]: internal and leaf nodes (index 0 is root, leaves occupy the right half)
+/// - `tree[0]`: root of this FSM page's subtree
+/// - `tree[1..]`: internal and leaf nodes (index 0 is root, leaves occupy the right half)
 
 #[derive(Clone, Debug)]
 pub struct FSMPage {

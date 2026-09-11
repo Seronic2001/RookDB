@@ -11,7 +11,7 @@
 /// Quickly check whether a specific column is NULL from raw row bytes,
 /// without performing a full deserialisation.
 ///
-/// Row layout: [4B header][null_bitmap][var-len offset table][fixed data][var-len data]
+/// Row layout: `[4B header][null_bitmap][var-len offset table][fixed data][var-len data]`
 /// - Header: u16 num_cols, u16 num_varlen
 /// - Null bitmap: ceil(num_cols / 8) bytes, starting at offset 4
 ///
