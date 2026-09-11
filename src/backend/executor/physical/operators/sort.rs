@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use crate::backend::error::RookResult;
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::external_sort::{ExternalSortOperator, ExternalSortConfig};
 use super::trait_::PhysicalOperator;
@@ -80,7 +81,7 @@ impl SortOperator {
     }
 
     /// Get or initialise the external sort operator.
-    fn init_external(&mut self) -> Result<&mut ExternalSortOperator, String> {
+    fn init_external(&mut self) -> RookResult<&mut ExternalSortOperator> {
         if self.external.is_none() {
             log::info!("[Sort] Switching to external merge sort");
             let config = ExternalSortConfig {
@@ -99,7 +100,7 @@ impl SortOperator {
 }
 
 impl PhysicalOperator for SortOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if self.use_external {
             let external = self.init_external()?;
             return external.next();
@@ -162,7 +163,7 @@ impl PhysicalOperator for SortOperator {
         &self.cached_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         if self.use_external
             && let Some(ref mut ext) = self.external {
                 return ext.reset();

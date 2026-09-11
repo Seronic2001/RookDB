@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering;
 
+use crate::backend::error::{RookError, RookResult};
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
@@ -264,7 +265,7 @@ impl AggregateOperator {
         }
     }
 
-    fn build_output_tuple(&self, entry: &GroupEntry) -> Result<Tuple, String> {
+    fn build_output_tuple(&self, entry: &GroupEntry) -> RookResult<Tuple> {
         let mut values = Vec::new();
         for val in &entry.key_values {
             values.push(val.clone());
@@ -276,7 +277,7 @@ impl AggregateOperator {
         Ok(Tuple::new(values))
     }
 
-    fn materialise(&mut self) -> Result<(), String> {
+    fn materialise(&mut self) -> RookResult<()> {
         for entry in &self.groups {
             let tuple = self.build_output_tuple(entry)?;
             if let Some(ref having) = self.having {
@@ -290,13 +291,14 @@ impl AggregateOperator {
 }
 
 impl PhysicalOperator for AggregateOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if !self.consumed {
             let child_schema = self.child.schema().to_vec();
             while let Some(tuple) = self.child.next()? {
                 let key_values: Vec<Option<DataValue>> = self.group_by_exprs.iter()
                     .map(|expr| expr.evaluate(&tuple, &child_schema))
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<Vec<_>, String>>()
+                    .map_err(|e| RookError::Internal(e))?;
 
                 let group_idx = match self.group_map.entry(key_values.clone()) {
                     std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
@@ -318,7 +320,7 @@ impl PhysicalOperator for AggregateOperator {
                         None => None,
                     };
                     group.agg_states[agg_idx].update(agg.function, value.as_ref(), agg.distinct)
-                        .map_err(|e| format!("Aggregate error: {}", e))?;
+                        .map_err(|e| RookError::Internal(format!("Aggregate error: {}", e)))?;
                 }
             }
             self.consumed = true;
@@ -338,7 +340,7 @@ impl PhysicalOperator for AggregateOperator {
         &self.output_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.child.reset()?;
         self.group_map.clear();
         self.groups.clear();

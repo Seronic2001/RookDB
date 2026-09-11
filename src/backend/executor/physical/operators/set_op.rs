@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
+use crate::backend::error::RookResult;
 use crate::types::value::DataValue;
 
 
@@ -61,7 +62,7 @@ impl SetOpOperator {
     }
 
     /// Materialise both children and compute the set operation result.
-    fn materialise(&mut self) -> Result<(), String> {
+    fn materialise(&mut self) -> RookResult<()> {
         self.left_tuples.clear();
         self.right_tuples.clear();
         while let Some(t) = self.left.next()? {
@@ -177,7 +178,7 @@ impl SetOpOperator {
 }
 
 impl PhysicalOperator for SetOpOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if !self.consumed {
             self.materialise()?;
         }
@@ -195,7 +196,7 @@ impl PhysicalOperator for SetOpOperator {
         &self.output_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.left.reset()?;
         self.right.reset()?;
         self.left_tuples.clear();

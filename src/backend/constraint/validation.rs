@@ -78,6 +78,7 @@ pub(crate) fn check_unique_insert_meta(
             .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
 
         let mut found_via_index = false;
+        let mut checked_index = false;
 
         // Named unique indexes on this column (cached B+ Tree handles).
         for (idx_name, idx_col) in &unique_indexes {
@@ -97,9 +98,13 @@ pub(crate) fn check_unique_insert_meta(
                     bt.set_key_type(col_type.clone());
                     Ok(bt)
                 },
-                |bt| bt.search_all(&key_value),
+                |bt| {
+                    bt.set_key_type(col_type.clone());
+                    bt.search_all(&key_value)
+                },
             ) {
                 Ok(tids) => {
+                    checked_index = true;
                     if tids.iter().any(|tid| Some(*tid) != exclude) {
                         found_via_index = true;
                         break;
@@ -115,7 +120,7 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         // Fallback to legacy single-index file (cached handle as well).
-        if !found_via_index {
+        if !found_via_index && !checked_index {
             let legacy_idx_path = std::path::PathBuf::from(format!(
                 "database/base/{}/{}.idx", db_name, table_name
             ));
@@ -127,12 +132,17 @@ pub(crate) fn check_unique_insert_meta(
                         bt.set_key_type(col_type.clone());
                         Ok(bt)
                     },
-                    |bt| bt.search_all(&key_value),
+                    |bt| {
+                        bt.set_key_type(col_type.clone());
+                        bt.search_all(&key_value)
+                    },
                 ) {
-                    Ok(tids) if tids.iter().any(|tid| Some(*tid) != exclude) => {
-                        found_via_index = true
+                    Ok(tids) => {
+                        checked_index = true;
+                        if tids.iter().any(|tid| Some(*tid) != exclude) {
+                            found_via_index = true;
+                        }
                     }
-                    Ok(_) => {}
                     Err(e) => {
                         log::warn!(
                             "[Constraint] Legacy BTree search error for UNIQUE check on '{}.{}': {}",
@@ -153,6 +163,11 @@ pub(crate) fn check_unique_insert_meta(
                     trimmed, col.name
                 ),
             ));
+        }
+
+        // If an index was checked and no duplicates found, skip the expensive O(N) heap scan.
+        if checked_index {
+            continue;
         }
 
         // No usable index match → heap-scan fallback so UNIQUE still holds

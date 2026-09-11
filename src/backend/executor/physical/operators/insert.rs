@@ -9,6 +9,7 @@
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::Expr;
 use super::PhysicalOperator;
+use crate::backend::error::{RookError, RookResult};
 
 /// Function signature for the insert operation.
 ///
@@ -66,7 +67,7 @@ impl InsertOperator {
 }
 
 impl PhysicalOperator for InsertOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         // Pull one tuple from child, insert it, return it
         match self.child.next()? {
             Some(tuple) => {
@@ -94,7 +95,7 @@ impl PhysicalOperator for InsertOperator {
         &self.child_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.child.reset()?;
         Ok(())
     }
@@ -130,7 +131,7 @@ impl ValuesOperator {
 }
 
 impl PhysicalOperator for ValuesOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if self.pos >= self.rows.len() {
             return Ok(None);
         }
@@ -147,8 +148,8 @@ impl PhysicalOperator for ValuesOperator {
         &self.schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
-        Err("reset() not supported".to_string())
+    fn reset(&mut self) -> RookResult<()> {
+        Err(RookError::Internal("reset() not supported".to_string()))
     }
 
     fn estimate_cardinality(&self) -> usize {
@@ -189,7 +190,7 @@ mod tests {
     }
 
     impl PhysicalOperator for MockChild {
-        fn next(&mut self) -> Result<Option<Tuple>, String> {
+        fn next(&mut self) -> RookResult<Option<Tuple>> {
             if self.pos < self.tuples.len() {
                 let t = self.tuples[self.pos].clone();
                 self.pos += 1;
@@ -203,7 +204,7 @@ mod tests {
             &self.schema
         }
 
-        fn reset(&mut self) -> Result<(), String> {
+        fn reset(&mut self) -> RookResult<()> {
             self.pos = 0;
             Ok(())
         }
@@ -256,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_insert_operator_single_tuple() {
-        // Single tuple → inserted and returned once
+        // Single tuple streamed and returned
         let (tuples, schema) = int_tuples(vec![(Some(1), Some(10))]);
         let child = MockChild::new(tuples, schema);
 
@@ -266,8 +267,7 @@ mod tests {
             child: Box::new(child),
             child_schema: int_schema(),
             inserter: Box::new(move |vals| {
-                let strs: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
-                ins.borrow_mut().push(strs);
+                ins.borrow_mut().push(vals.iter().map(|s| s.to_string()).collect());
                 Ok(())
             }),
         };
@@ -277,13 +277,12 @@ mod tests {
         assert_eq!(t.values[1], Some(DataValue::Int(10)));
         assert!(op.next().unwrap().is_none());
 
-        assert_eq!(inserted.borrow().len(), 1);
-        assert_eq!(inserted.borrow()[0], vec!["1", "10"]);
+        assert_eq!(*inserted.borrow(), vec![vec!["1", "10"]]);
     }
 
     #[test]
-    fn test_insert_operator_streaming_multiple() {
-        // Multiple tuples stream through one at a time
+    fn test_insert_operator_multiple_tuples() {
+        // Multiple tuples streamed one by one
         let (tuples, schema) = int_tuples(vec![
             (Some(1), Some(10)),
             (Some(2), Some(20)),
@@ -291,38 +290,46 @@ mod tests {
         ]);
         let child = MockChild::new(tuples, schema);
 
-        let count: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
-        let cnt = count.clone();
+        let inserted: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+        let ins = inserted.clone();
         let mut op = InsertOperator {
             child: Box::new(child),
             child_schema: int_schema(),
-            inserter: Box::new(move |_vals| {
-                *cnt.borrow_mut() += 1;
+            inserter: Box::new(move |vals| {
+                ins.borrow_mut().push(vals.iter().map(|s| s.to_string()).collect());
                 Ok(())
             }),
         };
 
         let t1 = op.next().unwrap().unwrap();
         assert_eq!(t1.values[0], Some(DataValue::Int(1)));
-        assert_eq!(*count.borrow(), 1);
+        assert_eq!(t1.values[1], Some(DataValue::Int(10)));
 
         let t2 = op.next().unwrap().unwrap();
         assert_eq!(t2.values[0], Some(DataValue::Int(2)));
-        assert_eq!(*count.borrow(), 2);
+        assert_eq!(t2.values[1], Some(DataValue::Int(20)));
 
         let t3 = op.next().unwrap().unwrap();
         assert_eq!(t3.values[0], Some(DataValue::Int(3)));
-        assert_eq!(*count.borrow(), 3);
+        assert_eq!(t3.values[1], Some(DataValue::Int(30)));
 
         assert!(op.next().unwrap().is_none());
-        assert_eq!(*count.borrow(), 3);
+
+        assert_eq!(
+            *inserted.borrow(),
+            vec![
+                vec!["1", "10"],
+                vec!["2", "20"],
+                vec!["3", "30"],
+            ]
+        );
     }
 
     // ── Error handling ───────────────────────────────────────────────────
 
     #[test]
-    fn test_insert_operator_error_constraint_violation() {
-        // Inserter returns an error → operator propagates it
+    fn test_insert_operator_reports_constraint_violation() {
+        // Inserter returns error on constraint violation → operator propagates it
         let (tuples, schema) = int_tuples(vec![(Some(1), Some(10))]);
         let child = MockChild::new(tuples, schema);
 
@@ -336,7 +343,7 @@ mod tests {
         match result {
             Err(msg) => {
                 assert!(
-                    msg.contains("duplicate key"),
+                    msg.to_string().contains("duplicate key"),
                     "Expected constraint error, got: {}",
                     msg
                 );
@@ -378,7 +385,7 @@ mod tests {
 
         // Second call fails
         let err = op.next().unwrap_err();
-        assert!(err.contains("Disk full"), "Got: {}", err);
+        assert!(err.to_string().contains("Disk full"), "Got: {}", err);
     }
 
     // ── NULL values ──────────────────────────────────────────────────────

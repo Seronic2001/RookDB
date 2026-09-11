@@ -34,6 +34,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
+use crate::backend::error::{RookError, RookResult};
 use super::operators::PhysicalOperator;
 use super::tuple::{Tuple, ColumnInfo, serialize_tuple_to_bytes, deserialize_tuple_from_bytes};
 use crate::types::comparison::compare_nullable;
@@ -209,32 +210,33 @@ impl SortedRunWriter {
     }
 
     /// Append one tuple to the sorted run.
-    fn write_tuple(&mut self, tuple: &Tuple) -> Result<(), String> {
-        let bytes = serialize_tuple_to_bytes(tuple, &self.schema)?;
+    fn write_tuple(&mut self, tuple: &Tuple) -> RookResult<()> {
+        let bytes = serialize_tuple_to_bytes(tuple, &self.schema)
+            .map_err(|e| RookError::Internal(e))?;
         let len = bytes.len() as u32;
 
         self.file
             .write_all(&len.to_le_bytes())
-            .map_err(|e| format!("Failed to write tuple length to sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
         self.file
             .write_all(&bytes)
-            .map_err(|e| format!("Failed to write tuple data to sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
 
         self.tuple_count += 1;
         Ok(())
     }
 
     /// Finalize the run by writing the tuple count at the start of the file.
-    fn finalize(&mut self) -> Result<(), String> {
+    fn finalize(&mut self) -> RookResult<()> {
         self.file
             .seek(SeekFrom::Start(0))
-            .map_err(|e| format!("Failed to seek in sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
         self.file
             .write_all(&self.tuple_count.to_le_bytes())
-            .map_err(|e| format!("Failed to write tuple count to sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
         self.file
             .flush()
-            .map_err(|e| format!("Failed to flush sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
         Ok(())
     }
 
@@ -263,16 +265,16 @@ struct SortedRunReader {
 
 impl SortedRunReader {
     /// Open a sorted run file for reading.
-    fn open(path: &Path, schema: Vec<ColumnInfo>, run_index: usize) -> Result<Self, String> {
+    fn open(path: &Path, schema: Vec<ColumnInfo>, run_index: usize) -> RookResult<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .open(path)
-            .map_err(|e| format!("Failed to open sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
 
         // Read tuple count
         let mut count_buf = [0u8; 4];
         file.read_exact(&mut count_buf)
-            .map_err(|e| format!("Failed to read sort temp file header: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
         let tuple_count = u32::from_le_bytes(count_buf);
         log::info!(
             "[ExternalSort] Opened run {} with {} tuples",
@@ -291,7 +293,7 @@ impl SortedRunReader {
     }
 
     /// Read and return the next tuple, advancing the reader.
-    fn next_tuple(&mut self) -> Result<Option<Tuple>, String> {
+    fn next_tuple(&mut self) -> RookResult<Option<Tuple>> {
         if self.exhausted || self.tuples_read >= self.tuple_count {
             self.exhausted = true;
             return Ok(None);
@@ -309,7 +311,7 @@ impl SortedRunReader {
         let mut data_buf = vec![0u8; data_len];
         self.file
             .read_exact(&mut data_buf)
-            .map_err(|e| format!("Failed to read tuple from sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
 
         self.tuples_read += 1;
         if self.tuples_read >= self.tuple_count {
@@ -424,7 +426,7 @@ impl ExternalSortOperator {
     }
 
     /// Phase 1: Consume all tuples from child, sort in chunks, write sorted runs.
-    fn generate_runs(&mut self) -> Result<(), String> {
+    fn generate_runs(&mut self) -> RookResult<()> {
         log::info!("[ExternalSort] Phase 1: Generating sorted runs");
 
         let mut buffer: Vec<Tuple> = Vec::with_capacity(self.config.max_tuples_per_run);
@@ -452,7 +454,7 @@ impl ExternalSortOperator {
     }
 
     /// Sort the buffer and write it as a sorted run to a temp file.
-    fn flush_run(&mut self, buffer: &mut Vec<Tuple>) -> Result<(), String> {
+    fn flush_run(&mut self, buffer: &mut Vec<Tuple>) -> RookResult<()> {
         // Sort the batch
         let sort_keys = self.sort_keys.clone();
         buffer.sort_by(|a, b| compare_tuples_by_keys(a, b, &sort_keys));
@@ -461,27 +463,25 @@ impl ExternalSortOperator {
         let path = self
             .temp_files
             .create_file()
-            .map_err(|e| format!("Failed to create sort temp file: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
 
         let mut writer = SortedRunWriter::new(path.clone(), self.run_schema.clone())
-            .map_err(|e| format!("Failed to create run writer: {}", e))?;
+            .map_err(|e| RookError::Io(e))?;
 
         for tuple in buffer.drain(..) {
             writer
-                .write_tuple(&tuple)
-                .map_err(|e| format!("Failed to write tuple to run: {}", e))?;
+                .write_tuple(&tuple)?;
         }
 
         writer
-            .finalize()
-            .map_err(|e| format!("Failed to finalize run: {}", e))?;
+            .finalize()?;
 
         self.sorted_runs.push(path);
         Ok(())
     }
 
     /// Phase 2: Open all sorted runs and initialize the merge heap.
-    fn init_merge(&mut self) -> Result<(), String> {
+    fn init_merge(&mut self) -> RookResult<()> {
         log::info!(
             "[ExternalSort] Phase 2: Merging {} sorted runs",
             self.sorted_runs.len()
@@ -513,7 +513,7 @@ impl ExternalSortOperator {
     }
 
     /// Yield the next tuple from the merge phase.
-    fn merge_next(&mut self) -> Result<Option<Tuple>, String> {
+    fn merge_next(&mut self) -> RookResult<Option<Tuple>> {
         if self.merge_exhausted || self.heap.is_empty() {
             return Ok(None);
         }
@@ -533,7 +533,7 @@ impl ExternalSortOperator {
 }
 
 impl PhysicalOperator for ExternalSortOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         // Phase 1: generate sorted runs
         if !self.phase1_done {
             self.generate_runs()?;
@@ -548,7 +548,7 @@ impl PhysicalOperator for ExternalSortOperator {
         &self.run_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         // Re-initialize state
         self.sorted_runs.clear();
         self.readers.clear();
@@ -588,7 +588,7 @@ mod tests {
     }
 
     impl PhysicalOperator for MockOperator {
-        fn next(&mut self) -> Result<Option<Tuple>, String> {
+        fn next(&mut self) -> RookResult<Option<Tuple>> {
             if self.pos < self.tuples.len() {
                 let t = self.tuples[self.pos].clone();
                 self.pos += 1;
@@ -602,7 +602,7 @@ mod tests {
             &self.schema
         }
 
-        fn reset(&mut self) -> Result<(), String> {
+        fn reset(&mut self) -> RookResult<()> {
             self.pos = 0;
             Ok(())
         }

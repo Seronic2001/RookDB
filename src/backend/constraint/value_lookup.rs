@@ -30,16 +30,22 @@ fn try_index_for_value(
             if !idx_path.exists() {
                 continue;
             }
-            match crate::backend::index::btree::BTree::open(idx_path) {
-                Ok(mut btree) => {
-                    btree.set_key_type(col_type.clone());
-                    match btree.search(&key_value) {
-                        Ok(Some(_)) => return Some(true),
-                        Ok(None) => return Some(false),
-                        Err(e) => log::warn!("[Constraint] BTree search error for FK lookup: {}", e),
-                    }
-                }
-                Err(e) => log::warn!("[Constraint] Failed to open BTree for FK lookup: {}", e),
+            let search_res = crate::backend::cache::with_btree(
+                &idx_path,
+                || -> std::io::Result<crate::backend::index::btree::BTree> {
+                    let mut bt = crate::backend::index::btree::BTree::open(idx_path.clone())?;
+                    bt.set_key_type(col_type.clone());
+                    Ok(bt)
+                },
+                |bt| {
+                    bt.set_key_type(col_type.clone());
+                    bt.search(&key_value).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                },
+            );
+            match search_res {
+                Ok(Some(_)) => return Some(true),
+                Ok(None) => return Some(false),
+                Err(e) => log::warn!("[Constraint] Cached BTree search error for FK lookup: {}", e),
             }
         }
     }
@@ -49,16 +55,22 @@ fn try_index_for_value(
         "database/base/{}/{}.idx", db_name, table_name
     ));
     if legacy_idx.exists() {
-        match crate::backend::index::btree::BTree::open(legacy_idx) {
-            Ok(mut btree) => {
-                btree.set_key_type(col_type.clone());
-                match btree.search(&key_value) {
-                    Ok(Some(_)) => return Some(true),
-                    Ok(None) => return Some(false),
-                    Err(e) => log::warn!("[Constraint] Legacy BTree search error for FK lookup: {}", e),
-                }
-            }
-            Err(e) => log::warn!("[Constraint] Failed to open legacy BTree for FK lookup: {}", e),
+        let search_res = crate::backend::cache::with_btree(
+            &legacy_idx,
+            || -> std::io::Result<crate::backend::index::btree::BTree> {
+                let mut bt = crate::backend::index::btree::BTree::open(legacy_idx.clone())?;
+                bt.set_key_type(col_type.clone());
+                Ok(bt)
+            },
+            |bt| {
+                bt.set_key_type(col_type.clone());
+                bt.search(&key_value).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            },
+        );
+        match search_res {
+            Ok(Some(_)) => return Some(true),
+            Ok(None) => return Some(false),
+            Err(e) => log::warn!("[Constraint] Cached legacy BTree search error for FK lookup: {}", e),
         }
     }
 

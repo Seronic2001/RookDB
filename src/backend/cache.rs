@@ -433,6 +433,7 @@ pub fn invalidate_metadata() {
     lock(meta_cache()).clear();
     lock(ref_fk_cache()).clear();
     lock(stats_cache()).clear();
+    crate::backend::planner::plan_cache::invalidate_plan_cache();
 }
 
 // ── table statistics cache ───────────────────────────────────────────────────

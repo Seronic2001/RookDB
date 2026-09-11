@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::backend::error::RookResult;
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
@@ -94,7 +95,7 @@ impl NestedLoopJoinOperator {
     }
 
     /// Materialise all tuples from both children, compute the join, and buffer results.
-    fn materialise(&mut self) -> Result<(), String> {
+    fn materialise(&mut self) -> RookResult<()> {
         // Consume both children
         self.left_tuples.clear();
         self.right_tuples.clear();
@@ -183,7 +184,7 @@ impl NestedLoopJoinOperator {
 }
 
 impl PhysicalOperator for NestedLoopJoinOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if !self.consumed {
             self.materialise()?;
         }
@@ -201,7 +202,7 @@ impl PhysicalOperator for NestedLoopJoinOperator {
         &self.output_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.left.reset()?;
         self.right.reset()?;
         self.left_tuples.clear();
@@ -467,7 +468,7 @@ impl HashJoinOperator {
     /// Compute the hash key values from a tuple using a set of key expressions.
     /// Returns `None` if any key is NULL (meaning this tuple cannot match in an
     /// INNER hash join, since SQL NULL != NULL).
-    fn make_hash_key(keys: &[Expr], tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<Vec<DataValue>>, String> {
+    fn make_hash_key(keys: &[Expr], tuple: &Tuple, schema: &[ColumnInfo]) -> RookResult<Option<Vec<DataValue>>> {
         let mut parts = Vec::with_capacity(keys.len());
         for expr in keys {
             let val = expr.evaluate(tuple, schema)?;
@@ -481,7 +482,7 @@ impl HashJoinOperator {
 
     /// Build the hash table from the build side.
     /// Tuples with NULL join keys are skipped (they can never match in SQL).
-    fn build_hash_table(&mut self) -> Result<(), String> {
+    fn build_hash_table(&mut self) -> RookResult<()> {
         let budget = spill_budget();
         let build_schema = self.build.schema().to_vec();
         while let Some(tuple) = self.build.next()? {
@@ -525,7 +526,7 @@ impl HashJoinOperator {
 
     /// The in-memory build side exceeded the budget: hash-partition
     /// everything to temp files, then keep streaming into the partitions.
-    fn begin_spill(&mut self) -> Result<(), String> {
+    fn begin_spill(&mut self) -> RookResult<()> {
         let build_types = self.build_type_cache();
         let probe_types = self.probe_type_cache();
         let mut spill = SpillState::create(build_types, probe_types)
@@ -554,7 +555,7 @@ impl HashJoinOperator {
     }
 
     /// Build stream ended while spilling: close build writers.
-    fn finish_build_spill(&mut self) -> Result<(), String> {
+    fn finish_build_spill(&mut self) -> RookResult<()> {
         if let Some(spill) = &mut self.spill {
             for w in spill.build_writers.drain(..) {
                 w.into_inner()
@@ -566,7 +567,7 @@ impl HashJoinOperator {
 
     /// Consume the probe side. In spill mode this partitions the probe
     /// stream to disk instead of buffering it in memory.
-    fn load_probe(&mut self) -> Result<(), String> {
+    fn load_probe(&mut self) -> RookResult<()> {
         let spilling = self.spill.is_some();
         let probe_schema = self.probe.schema().to_vec();
         while let Some(tuple) = self.probe.next()? {
@@ -598,7 +599,7 @@ impl HashJoinOperator {
     /// Load partition `p`: build side into the hash table, probe side into
     /// `probe_tuples`, resetting the match cursors. Memory is then bounded
     /// by the largest partition rather than the whole join.
-    fn load_spill_partition(&mut self, p: usize) -> Result<(), String> {
+    fn load_spill_partition(&mut self, p: usize) -> RookResult<()> {
         self.hash_table.clear();
         self.probe_tuples.clear();
         self.probe_pos = 0;
@@ -638,7 +639,7 @@ impl HashJoinOperator {
 }
 
 impl PhysicalOperator for HashJoinOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         // Build phase
         if !self.build_done {
             self.build_hash_table()?;
@@ -715,7 +716,7 @@ impl PhysicalOperator for HashJoinOperator {
         &self.output_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.build.reset()?;
         self.probe.reset()?;
         self.hash_table.clear();
@@ -790,7 +791,7 @@ mod spill_tests {
     }
 
     impl PhysicalOperator for MockChild {
-        fn next(&mut self) -> Result<Option<Tuple>, String> {
+        fn next(&mut self) -> RookResult<Option<Tuple>> {
             if self.pos < self.rows.len() {
                 let row = self.rows[self.pos].clone();
                 self.pos += 1;
@@ -802,7 +803,7 @@ mod spill_tests {
         fn schema(&self) -> &[ColumnInfo] {
             &self.info
         }
-        fn reset(&mut self) -> Result<(), String> {
+        fn reset(&mut self) -> RookResult<()> {
             self.pos = 0;
             Ok(())
         }

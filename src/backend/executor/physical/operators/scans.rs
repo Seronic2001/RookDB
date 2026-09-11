@@ -80,8 +80,10 @@ impl SeqScanOperator {
     }
 }
 
+use crate::backend::error::{RookError, RookResult};
+
 impl PhysicalOperator for SeqScanOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if self.exhausted {
             return Ok(None);
         }
@@ -90,7 +92,7 @@ impl PhysicalOperator for SeqScanOperator {
             Some(Ok((page_id, slot_id, raw_bytes))) => {
                 // Deserialise the raw tuple bytes using PHYSICAL column schema
                 let phys_values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
-                    .map_err(|e| format!("Failed to deserialise tuple: {}", e))?;
+                    .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
 
                 // Reorder values from physical order to view column order
                 let values: Vec<Option<DataValue>> = if self.column_mapping.len() == phys_values.len()
@@ -106,7 +108,7 @@ impl PhysicalOperator for SeqScanOperator {
 
                 Ok(Some(Tuple::new_with_location(values, page_id, slot_id)))
             }
-            Some(Err(e)) => Err(format!("Scan error: {}", e)),
+            Some(Err(e)) => Err(RookError::Io(e)),
             None => {
                 self.exhausted = true;
                 Ok(None)
@@ -118,7 +120,7 @@ impl PhysicalOperator for SeqScanOperator {
         &self.column_info
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.scan_iter = self.heap_manager.scan();
         self.exhausted = false;
         Ok(())
@@ -204,7 +206,7 @@ impl IndexScanOperator {
     }
 
     /// Query the B+ Tree and materialize the matching heap tuple locations.
-    fn load_results(&mut self) -> Result<(), String> {
+    fn load_results(&mut self) -> RookResult<()> {
         match &self.mode {
             IndexScanMode::PointLookup(key) => {
                 // Use search_range with the same key for both bounds to retrieve
@@ -212,22 +214,22 @@ impl IndexScanOperator {
                 // This handles non-unique indexes where multiple rows share the
                 // same key value (e.g., multiple employees in the same department).
                 let tids = self.btree.search_range(key, key)
-                    .map_err(|e| format!("Index scan point lookup error: {}", e))?;
+                    .map_err(|e| RookError::Internal(format!("Index scan point lookup error: {}", e)))?;
                 self.results = tids;
             }
             IndexScanMode::CompositePointLookup(keys) => {
                 let tids = self.btree.search_range_keys(keys, keys)
-                    .map_err(|e| format!("Index scan composite point lookup error: {}", e))?;
+                    .map_err(|e| RookError::Internal(format!("Index scan composite point lookup error: {}", e)))?;
                 self.results = tids;
             }
             IndexScanMode::RangeLookup(low, high) => {
                 let tids = self.btree.search_range(low, high)
-                    .map_err(|e| format!("Index scan range lookup error: {}", e))?;
+                    .map_err(|e| RookError::Internal(format!("Index scan range lookup error: {}", e)))?;
                 self.results = tids;
             }
             IndexScanMode::FullScan => {
                 let tids = self.btree.scan_all()
-                    .map_err(|e| format!("Index scan full scan error: {}", e))?;
+                    .map_err(|e| RookError::Internal(format!("Index scan full scan error: {}", e)))?;
                 self.results = tids;
             }
         }
@@ -238,17 +240,17 @@ impl IndexScanOperator {
     /// Fetch a tuple from the heap by (page_id, slot_id) and deserialize it.
     /// Propagates the heap location metadata so DML operations (UPDATE/DELETE)
     /// can identify which physical row to modify.
-    fn fetch_tuple(&mut self, page_id: u32, slot_id: u32) -> Result<Tuple, String> {
+    fn fetch_tuple(&mut self, page_id: u32, slot_id: u32) -> RookResult<Tuple> {
         let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id)
-            .map_err(|e| format!("Failed to fetch heap tuple (page={}, slot={}): {}", page_id, slot_id, e))?;
+            .map_err(|e| RookError::Internal(format!("Failed to fetch heap tuple (page={}, slot={}): {}", page_id, slot_id, e)))?;
         let values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
-            .map_err(|e| format!("Failed to deserialise tuple: {}", e))?;
+            .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
         Ok(Tuple::new_with_location(values, page_id, slot_id))
     }
 }
 
 impl PhysicalOperator for IndexScanOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if !self.loaded {
             self.load_results()?;
         }
@@ -267,7 +269,7 @@ impl PhysicalOperator for IndexScanOperator {
         &self.column_info
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.results.clear();
         self.pos = 0;
         self.loaded = false;

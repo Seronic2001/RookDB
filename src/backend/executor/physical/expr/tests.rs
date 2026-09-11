@@ -6,6 +6,7 @@ mod tests {
     use super::super::{Expr, Predicate, evaluate_predicate, BooleanTest};
     use super::super::super::tuple::{Tuple, ColumnInfo};
     use super::super::super::operators::PhysicalOperator;
+    use crate::backend::error::RookResult;
 
     use crate::types::datatype::DataType;
     use crate::types::value::DataValue;
@@ -26,7 +27,7 @@ mod tests {
     }
 
     impl PhysicalOperator for MockOperator {
-        fn next(&mut self) -> Result<Option<Tuple>, String> {
+        fn next(&mut self) -> RookResult<Option<Tuple>> {
             if self.pos < self.tuples.len() {
                 let t = self.tuples[self.pos].clone();
                 self.pos += 1;
@@ -40,7 +41,7 @@ mod tests {
             &self.schema
         }
 
-        fn reset(&mut self) -> Result<(), String> {
+        fn reset(&mut self) -> RookResult<()> {
             self.pos = 0;
             Ok(())
         }

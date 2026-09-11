@@ -11,6 +11,7 @@ pub mod semantic;
 pub mod optimizer;
 pub mod helpers;
 pub mod alias;
+pub mod plan_cache;
 #[cfg(test)]
 pub mod tests;
 

@@ -1,5 +1,6 @@
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::trait_::PhysicalOperator;
+use crate::backend::error::RookResult;
 use crate::types::value::DataValue;
 use crate::types::datatype::DataType;
 
@@ -59,7 +60,7 @@ impl SubqueryExecOperator {
     }
 
     /// Evaluate the subquery and store the result.
-    fn evaluate(&mut self) -> Result<(), String> {
+    fn evaluate(&mut self) -> RookResult<()> {
         match self.subquery_type {
             SubqueryType::Scalar => {
                 let mut tuples: Vec<Tuple> = Vec::new();
@@ -71,7 +72,7 @@ impl SubqueryExecOperator {
                     return Err(format!(
                         "Scalar subquery returned more than one row (got {})",
                         tuples.len()
-                    ));
+                    ).into());
                 }
 
                 if let Some(tuple) = tuples.into_iter().next() {
@@ -94,7 +95,7 @@ impl SubqueryExecOperator {
 }
 
 impl PhysicalOperator for SubqueryExecOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if !self.evaluated {
             self.evaluate()?;
         }
@@ -109,7 +110,7 @@ impl PhysicalOperator for SubqueryExecOperator {
         &self.output_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.child.reset()?;
         self.evaluated = false;
         self.result = None;

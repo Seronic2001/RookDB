@@ -133,21 +133,6 @@ impl std::error::Error for RookError {
 /// Bridge legacy `String` errors into the typed hierarchy.
 impl From<String> for RookError {
     fn from(s: String) -> Self {
-        // Recognise the engine's canonical violation prefixes so legacy
-        // string sites still produce structured variants.
-        let lower = s.to_ascii_lowercase();
-        if lower.starts_with("not null constraint") {
-            return RookError::constraint(ConstraintKind::NotNull, "", None, s);
-        }
-        if lower.starts_with("unique constraint") {
-            return RookError::constraint(ConstraintKind::Unique, "", None, s);
-        }
-        if lower.starts_with("foreign key constraint") {
-            return RookError::constraint(ConstraintKind::ForeignKey, "", None, s);
-        }
-        if lower.starts_with("check constraint") {
-            return RookError::constraint(ConstraintKind::Check, "", None, s);
-        }
         RookError::Internal(s)
     }
 }
@@ -155,6 +140,12 @@ impl From<String> for RookError {
 impl From<&str> for RookError {
     fn from(s: &str) -> Self {
         RookError::from(s.to_string())
+    }
+}
+
+impl From<RookError> for String {
+    fn from(e: RookError) -> Self {
+        e.to_string()
     }
 }
 
@@ -198,26 +189,25 @@ mod tests {
     }
 
     #[test]
-    fn from_string_detects_violation_prefixes() {
-        let e: RookError = "UNIQUE constraint violated: value '1' dup".into();
-        assert!(e.is_constraint_violation());
-        assert_eq!(e.constraint_kind(), Some(ConstraintKind::Unique));
-
+    fn from_string_maps_to_internal() {
         let e: RookError = "some random failure".into();
         assert!(!e.is_constraint_violation());
         assert!(matches!(e, RookError::Internal(_)));
+
+        let e2: RookError = "UNIQUE constraint violated: value '1' dup".into();
+        assert!(matches!(e2, RookError::Internal(_)));
     }
 
     #[test]
     fn question_mark_auto_converts_strings() {
         fn inner() -> Result<(), String> {
-            Err("CHECK constraint violated: 'x'".to_string())
+            Err("some error".to_string())
         }
         fn outer() -> RookResult<()> {
             inner()?;
             Ok(())
         }
         let err = outer().unwrap_err();
-        assert_eq!(err.constraint_kind(), Some(ConstraintKind::Check));
+        assert!(matches!(err, RookError::Internal(_)));
     }
 }

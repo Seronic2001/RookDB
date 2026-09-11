@@ -1,6 +1,7 @@
 use super::*;
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, ComparisonOp};
+use crate::backend::error::RookResult;
 
 use crate::types::value::DataValue;
 use crate::types::datatype::DataType;
@@ -19,7 +20,7 @@ impl MockOperator {
 }
 
 impl PhysicalOperator for MockOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if self.pos < self.tuples.len() {
             let t = self.tuples[self.pos].clone();
             self.pos += 1;
@@ -33,7 +34,7 @@ impl PhysicalOperator for MockOperator {
         &self.schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.pos = 0;
         Ok(())
     }

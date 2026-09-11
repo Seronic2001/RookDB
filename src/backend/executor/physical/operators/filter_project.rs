@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::backend::error::RookResult;
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
@@ -31,7 +32,7 @@ impl SingleRowOperator {
 }
 
 impl PhysicalOperator for SingleRowOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if self.emitted {
             return Ok(None);
         }
@@ -43,7 +44,7 @@ impl PhysicalOperator for SingleRowOperator {
         &self.schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.emitted = false;
         Ok(())
     }
@@ -67,7 +68,7 @@ impl NullOperator {
 }
 
 impl PhysicalOperator for NullOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         Ok(None)
     }
 
@@ -100,7 +101,7 @@ impl CteScanOperator {
 }
 
 impl PhysicalOperator for CteScanOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if self.pos >= self.tuples.len() {
             return Ok(None);
         }
@@ -113,7 +114,7 @@ impl PhysicalOperator for CteScanOperator {
         &self.schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.pos = 0;
         Ok(())
     }
@@ -142,7 +143,7 @@ impl FilterOperator {
 }
 
 impl PhysicalOperator for FilterOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         loop {
             match self.child.next()? {
                 Some(tuple) => {
@@ -160,7 +161,7 @@ impl PhysicalOperator for FilterOperator {
         self.child.schema()
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.child.reset()
     }
 
@@ -234,7 +235,7 @@ impl ProjectionOperator {
 }
 
 impl PhysicalOperator for ProjectionOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         match self.child.next()? {
             Some(child_tuple) => {
                 let mut values = Vec::with_capacity(self.projections.len());
@@ -257,7 +258,7 @@ impl PhysicalOperator for ProjectionOperator {
         &self.output_schema
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.child.reset()
     }
 
@@ -284,7 +285,7 @@ impl LimitOperator {
 }
 
 impl PhysicalOperator for LimitOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         while self.skipped < self.offset {
             match self.child.next()? {
                 Some(_) => self.skipped += 1,
@@ -309,7 +310,7 @@ impl PhysicalOperator for LimitOperator {
         self.child.schema()
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.child.reset()?;
         self.emitted = 0;
         self.skipped = 0;
@@ -345,7 +346,7 @@ impl DistinctOperator {
 }
 
 impl PhysicalOperator for DistinctOperator {
-    fn next(&mut self) -> Result<Option<Tuple>, String> {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
         if !self.loaded {
             while let Some(tuple) = self.child.next()? {
                 if self.seen.insert(tuple.values.clone()) {
@@ -368,7 +369,7 @@ impl PhysicalOperator for DistinctOperator {
         self.child.schema()
     }
 
-    fn reset(&mut self) -> Result<(), String> {
+    fn reset(&mut self) -> RookResult<()> {
         self.child.reset()?;
         self.seen.clear();
         self.buffer.clear();
