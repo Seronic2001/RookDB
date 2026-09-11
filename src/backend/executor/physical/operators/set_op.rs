@@ -65,11 +65,12 @@ impl SetOpOperator {
     fn materialise(&mut self) -> RookResult<()> {
         self.left_tuples.clear();
         self.right_tuples.clear();
-        while let Some(t) = self.left.next()? {
-            self.left_tuples.push(t);
+        let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        while self.left.next_batch(&mut child_batch)? > 0 {
+            self.left_tuples.append(&mut child_batch);
         }
-        while let Some(t) = self.right.next()? {
-            self.right_tuples.push(t);
+        while self.right.next_batch(&mut child_batch)? > 0 {
+            self.right_tuples.append(&mut child_batch);
         }
 
         match (self.op_type, self.all) {
@@ -190,6 +191,24 @@ impl PhysicalOperator for SetOpOperator {
         } else {
             Ok(None)
         }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        if !self.consumed {
+            self.materialise()?;
+        }
+
+        let available = self.output_buffer.len().saturating_sub(self.output_pos);
+        if available == 0 {
+            return Ok(0);
+        }
+        let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
+        batch.reserve(take);
+        for i in 0..take {
+            batch.push(self.output_buffer[self.output_pos + i].clone());
+        }
+        self.output_pos += take;
+        Ok(take)
     }
 
     fn schema(&self) -> &[ColumnInfo] {

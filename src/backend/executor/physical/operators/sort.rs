@@ -97,6 +97,56 @@ impl SortOperator {
         }
         Ok(self.external.as_mut().unwrap())
     }
+
+    /// Ensure the child has been consumed and sorted in memory (or flagged for external).
+    fn load_if_needed(&mut self) -> RookResult<()> {
+        if self.loaded {
+            return Ok(());
+        }
+
+        // Consume all tuples from child in batches
+        let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        while self.child.next_batch(&mut child_batch)? > 0 {
+            self.buffer.append(&mut child_batch);
+        }
+
+        // Check if we should have used external sort
+        if self.external_threshold > 0 && self.buffer.len() > self.external_threshold {
+            log::info!(
+                "[Sort] In-memory sort exceeded threshold ({} > {}), switching to external",
+                self.buffer.len(),
+                self.external_threshold
+            );
+            self.use_external = true;
+            return Ok(());
+        }
+
+        // Sort in place
+        self.buffer.sort_by(|a, b| {
+            for &(key_idx, descending) in &self.sort_keys {
+                let av = a.values.get(key_idx).and_then(|v| v.as_ref());
+                let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
+                let ordering = match (av, bv) {
+                    (Some(a_val), Some(b_val)) => {
+                        compare_nullable(Some(a_val), Some(b_val))
+                            .unwrap_or(None)
+                            .unwrap_or(Ordering::Equal)
+                    }
+                    (None, None) => Ordering::Equal,
+                    (None, Some(_)) => Ordering::Less,
+                    (Some(_), None) => Ordering::Greater,
+                };
+                let ordering = if descending { ordering.reverse() } else { ordering };
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            Ordering::Equal
+        });
+
+        self.loaded = true;
+        Ok(())
+    }
 }
 
 impl PhysicalOperator for SortOperator {
@@ -108,46 +158,11 @@ impl PhysicalOperator for SortOperator {
 
         // ── In-memory path ──
         if !self.loaded {
-            // Consume all tuples from child
-            while let Some(tuple) = self.child.next()? {
-                self.buffer.push(tuple);
+            self.load_if_needed()?;
+            if self.use_external {
+                let external = self.init_external()?;
+                return external.next();
             }
-
-            // Check if we should have used external sort
-            if self.external_threshold > 0 && self.buffer.len() > self.external_threshold {
-                log::info!(
-                    "[Sort] In-memory sort exceeded threshold ({} > {}), switching to external",
-                    self.buffer.len(),
-                    self.external_threshold
-                );
-                self.use_external = true;
-                return self.next();
-            }
-
-            // Sort in place
-            self.buffer.sort_by(|a, b| {
-                for &(key_idx, descending) in &self.sort_keys {
-                    let av = a.values.get(key_idx).and_then(|v| v.as_ref());
-                    let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
-                    let ordering = match (av, bv) {
-                        (Some(a_val), Some(b_val)) => {
-                            compare_nullable(Some(a_val), Some(b_val))
-                                .unwrap_or(None)
-                                .unwrap_or(Ordering::Equal)
-                        }
-                        (None, None) => Ordering::Equal,
-                        (None, Some(_)) => Ordering::Less,
-                        (Some(_), None) => Ordering::Greater,
-                    };
-                    let ordering = if descending { ordering.reverse() } else { ordering };
-                    if ordering != Ordering::Equal {
-                        return ordering;
-                    }
-                }
-                Ordering::Equal
-            });
-
-            self.loaded = true;
         }
 
         if self.pos < self.buffer.len() {
@@ -157,6 +172,33 @@ impl PhysicalOperator for SortOperator {
         } else {
             Ok(None)
         }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        if self.use_external {
+            let external = self.init_external()?;
+            return external.next_batch(batch);
+        }
+
+        if !self.loaded {
+            self.load_if_needed()?;
+            if self.use_external {
+                let external = self.init_external()?;
+                return external.next_batch(batch);
+            }
+        }
+
+        let available = self.buffer.len().saturating_sub(self.pos);
+        if available == 0 {
+            return Ok(0);
+        }
+        let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
+        batch.reserve(take);
+        for i in 0..take {
+            batch.push(self.buffer[self.pos + i].clone());
+        }
+        self.pos += take;
+        Ok(take)
     }
 
     fn schema(&self) -> &[ColumnInfo] {

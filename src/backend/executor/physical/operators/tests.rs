@@ -1279,3 +1279,133 @@ fn test_cte_scan_operator() {
     let t3 = op.next().unwrap().unwrap();
     assert_eq!(t3.values[0], Some(DataValue::Int(1)));
 }
+
+#[test]
+fn test_batch_filter_and_projection() {
+    // Generate 2500 tuples to verify multi-batch execution (1024 + 1024 + 452)
+    let schema = int_schema();
+    let tuples: Vec<Tuple> = (0..2500)
+        .map(|i| Tuple::new(vec![Some(DataValue::Int(i)), Some(DataValue::Int(i * 10))]))
+        .collect();
+
+    let child = MockOperator::new(tuples, schema);
+    // Filter even values of `a`: 1250 matching rows
+    let filter = FilterOperator::new(
+        Box::new(child),
+        Predicate::Compare(
+            Expr::Column { table: None, column: "a".into() },
+            ComparisonOp::GreaterThan,
+            Expr::Constant(DataValue::Int(1000)), // 1499 rows
+        ),
+    );
+    let mut proj = ProjectionOperator::new(
+        Box::new(filter),
+        vec![(Expr::Column { table: None, column: "b".into() }, "b".into(), DataType::Int)],
+    );
+
+    let mut batch = Vec::new();
+    let count1 = proj.next_batch(&mut batch).unwrap();
+    assert_eq!(count1, 1024);
+    assert_eq!(batch.len(), 1024);
+    assert_eq!(batch[0].values[0], Some(DataValue::Int(1001 * 10)));
+
+    batch.clear();
+    let count2 = proj.next_batch(&mut batch).unwrap();
+    assert_eq!(count2, 475);
+    assert_eq!(batch.len(), 475);
+    assert_eq!(batch[474].values[0], Some(DataValue::Int(2499 * 10)));
+
+    batch.clear();
+    let count3 = proj.next_batch(&mut batch).unwrap();
+    assert_eq!(count3, 0);
+}
+
+#[test]
+fn test_batch_count_star_acceleration() {
+    let schema = int_schema();
+    let tuples: Vec<Tuple> = (0..3500)
+        .map(|i| Tuple::new(vec![Some(DataValue::Int(i)), Some(DataValue::Int(i))]))
+        .collect();
+
+    let child = MockOperator::new(tuples, schema);
+    let mut agg = AggregateOperator::new(
+        Box::new(child),
+        vec![], vec![], vec![],
+        vec![AggregateInfo {
+            function: AggregateFunction::Count,
+            input: None,
+            output_name: "cnt".into(),
+            output_type: DataType::BigInt,
+            distinct: false,
+        }],
+        None,
+    );
+
+    let mut batch = Vec::new();
+    let count = agg.next_batch(&mut batch).unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(batch[0].values[0], Some(DataValue::BigInt(3500)));
+}
+
+#[test]
+fn test_batch_hash_join() {
+    let schema1 = vec![ColumnInfo { name: "id".into(), data_type: DataType::Int, table: None }];
+    let schema2 = vec![ColumnInfo { name: "fk".into(), data_type: DataType::Int, table: None }];
+
+    let tuples1: Vec<Tuple> = (0..1500)
+        .map(|i| Tuple::new(vec![Some(DataValue::Int(i))]))
+        .collect();
+    let tuples2: Vec<Tuple> = (0..1500)
+        .map(|i| Tuple::new(vec![Some(DataValue::Int(i))]))
+        .collect();
+
+    let op1 = MockOperator::new(tuples1, schema1);
+    let op2 = MockOperator::new(tuples2, schema2);
+
+    let mut hj = HashJoinOperator::new(
+        Box::new(op1),
+        Box::new(op2),
+        vec![Expr::Column { table: None, column: "id".into() }],
+        vec![Expr::Column { table: None, column: "fk".into() }],
+        None,
+    );
+
+    let mut batch = Vec::new();
+    let count1 = hj.next_batch(&mut batch).unwrap();
+    assert_eq!(count1, 1024);
+
+    batch.clear();
+    let count2 = hj.next_batch(&mut batch).unwrap();
+    assert_eq!(count2, 476);
+
+    batch.clear();
+    let count3 = hj.next_batch(&mut batch).unwrap();
+    assert_eq!(count3, 0);
+}
+
+#[test]
+fn test_batch_sort_operator() {
+    let schema = vec![ColumnInfo { name: "val".into(), data_type: DataType::Int, table: None }];
+    let tuples: Vec<Tuple> = (0..2000)
+        .rev()
+        .map(|i| Tuple::new(vec![Some(DataValue::Int(i))]))
+        .collect();
+
+    let child = MockOperator::new(tuples, schema);
+    let mut sort = SortOperator::new(Box::new(child), vec![(0, false)]);
+
+    let mut batch = Vec::new();
+    let count1 = sort.next_batch(&mut batch).unwrap();
+    assert_eq!(count1, 1024);
+    assert_eq!(batch[0].values[0], Some(DataValue::Int(0)));
+    assert_eq!(batch[1023].values[0], Some(DataValue::Int(1023)));
+
+    batch.clear();
+    let count2 = sort.next_batch(&mut batch).unwrap();
+    assert_eq!(count2, 976);
+    assert_eq!(batch[975].values[0], Some(DataValue::Int(1999)));
+
+    batch.clear();
+    let count3 = sort.next_batch(&mut batch).unwrap();
+    assert_eq!(count3, 0);
+}

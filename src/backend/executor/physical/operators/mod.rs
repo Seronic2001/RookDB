@@ -33,7 +33,7 @@ mod utils;
 mod tests;
 
 // Re-export everything from submodules
-pub use trait_::PhysicalOperator;
+pub use trait_::{PhysicalOperator, DEFAULT_BATCH_SIZE};
 pub use scans::{SeqScanOperator, IndexScanOperator, IndexScanMode};
 pub use joins::{NestedLoopJoinOperator, HashJoinOperator, JoinType};
 pub use insert::{InsertOperator, ValuesOperator};

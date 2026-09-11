@@ -32,8 +32,9 @@ pub fn execute_plan(
 
     // 3. Pull all tuples from the root operator
     let mut tuples: Vec<Tuple> = Vec::new();
-    while let Some(tuple) = root.next()? {
-        tuples.push(tuple);
+    let mut batch: Vec<Tuple> = Vec::with_capacity(super::operators::DEFAULT_BATCH_SIZE);
+    while root.next_batch(&mut batch)? > 0 {
+        tuples.append(&mut batch);
     }
 
     // 4. Display results
@@ -54,8 +55,9 @@ pub fn execute_plan_collect_with_schema(
     let schema = root.schema().to_vec();
 
     let mut tuples: Vec<Tuple> = Vec::new();
-    while let Some(tuple) = root.next()? {
-        tuples.push(tuple);
+    let mut batch: Vec<Tuple> = Vec::with_capacity(super::operators::DEFAULT_BATCH_SIZE);
+    while root.next_batch(&mut batch)? > 0 {
+        tuples.append(&mut batch);
     }
 
     Ok((tuples, schema))

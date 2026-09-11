@@ -134,34 +134,78 @@ impl PhysicalOperator for CteScanOperator {
 pub struct FilterOperator {
     child: Box<dyn PhysicalOperator>,
     predicate: Predicate,
+    schema: Vec<ColumnInfo>,
+    child_buffer: Vec<Tuple>,
+    buffer_pos: usize,
 }
 
 impl FilterOperator {
     pub fn new(child: Box<dyn PhysicalOperator>, predicate: Predicate) -> Self {
-        Self { child, predicate }
+        let schema = child.schema().to_vec();
+        Self {
+            child,
+            predicate,
+            schema,
+            child_buffer: Vec::new(),
+            buffer_pos: 0,
+        }
     }
 }
 
 impl PhysicalOperator for FilterOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
+        let child_schema = &self.schema;
         loop {
-            match self.child.next()? {
-                Some(tuple) => {
-                    match evaluate_predicate(&self.predicate, &tuple, self.child.schema())? {
-                        Some(true) => return Ok(Some(tuple)),
-                        _ => continue,
-                    }
+            if self.buffer_pos < self.child_buffer.len() {
+                let tuple = &self.child_buffer[self.buffer_pos];
+                self.buffer_pos += 1;
+                match evaluate_predicate(&self.predicate, tuple, child_schema)? {
+                    Some(true) => return Ok(Some(tuple.clone())),
+                    _ => continue,
                 }
-                None => return Ok(None),
+            }
+
+            self.child_buffer.clear();
+            self.buffer_pos = 0;
+            let count = self.child.next_batch(&mut self.child_buffer)?;
+            if count == 0 {
+                return Ok(None);
             }
         }
     }
 
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
+        let child_schema = &self.schema;
+        while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+            if self.buffer_pos >= self.child_buffer.len() {
+                self.child_buffer.clear();
+                self.buffer_pos = 0;
+                let count = self.child.next_batch(&mut self.child_buffer)?;
+                if count == 0 {
+                    break;
+                }
+            }
+
+            while self.buffer_pos < self.child_buffer.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+                let tuple = &self.child_buffer[self.buffer_pos];
+                self.buffer_pos += 1;
+                match evaluate_predicate(&self.predicate, tuple, child_schema)? {
+                    Some(true) => batch.push(tuple.clone()),
+                    _ => continue,
+                }
+            }
+        }
+        Ok(batch.len())
+    }
+
     fn schema(&self) -> &[ColumnInfo] {
-        self.child.schema()
+        &self.schema
     }
 
     fn reset(&mut self) -> RookResult<()> {
+        self.child_buffer.clear();
+        self.buffer_pos = 0;
         self.child.reset()
     }
 
@@ -180,7 +224,10 @@ impl PhysicalOperator for FilterOperator {
 pub struct ProjectionOperator {
     child: Box<dyn PhysicalOperator>,
     projections: Vec<(Expr, String, DataType)>,
+    child_schema: Vec<ColumnInfo>,
     output_schema: Vec<ColumnInfo>,
+    child_buffer: Vec<Tuple>,
+    buffer_pos: usize,
 }
 
 impl ProjectionOperator {
@@ -188,6 +235,7 @@ impl ProjectionOperator {
         child: Box<dyn PhysicalOperator>,
         projections: Vec<(Expr, String, DataType)>,
     ) -> Self {
+        let child_schema = child.schema().to_vec();
         let output_schema: Vec<ColumnInfo> = projections.iter()
             .map(|(_, name, dt)| ColumnInfo {
                 name: name.clone(),
@@ -195,7 +243,14 @@ impl ProjectionOperator {
                 table: None,
             })
             .collect();
-        Self { child, projections, output_schema }
+        Self {
+            child,
+            projections,
+            child_schema,
+            output_schema,
+            child_buffer: Vec::new(),
+            buffer_pos: 0,
+        }
     }
 
     pub fn new_with_mapping(
@@ -229,29 +284,80 @@ impl ProjectionOperator {
         let projections: Vec<(Expr, String, DataType)> = child_schema.iter()
             .map(|ci| (Expr::Column { table: None, column: ci.name.clone() }, ci.name.clone(), ci.data_type.clone()))
             .collect();
-        let output_schema = child_schema;
-        Self { child, projections, output_schema }
+        let output_schema = child_schema.clone();
+        Self {
+            child,
+            projections,
+            child_schema,
+            output_schema,
+            child_buffer: Vec::new(),
+            buffer_pos: 0,
+        }
     }
 }
 
 impl PhysicalOperator for ProjectionOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
-        match self.child.next()? {
-            Some(child_tuple) => {
-                let mut values = Vec::with_capacity(self.projections.len());
-                for (expr, _, _) in &self.projections {
-                    let val = expr.evaluate(&child_tuple, self.child.schema())?;
-                    values.push(val);
-                }
-                // Each output row derives from exactly one input row: carry
-                // its heap location through so pointer-based UPDATE/DELETE
-                // can still address the row (a synthetic source — aggregate
-                // output — stays location-less).
-                Ok(Some(Tuple::new(values)
-                    .with_location_from(&child_tuple)))
+        let child_schema = &self.child_schema;
+        if self.buffer_pos >= self.child_buffer.len() {
+            self.child_buffer.clear();
+            self.buffer_pos = 0;
+            let count = self.child.next_batch(&mut self.child_buffer)?;
+            if count == 0 {
+                return Ok(None);
             }
-            None => Ok(None),
         }
+
+        let child_tuple = &self.child_buffer[self.buffer_pos];
+        self.buffer_pos += 1;
+        let mut values = Vec::with_capacity(self.projections.len());
+        for (expr, _, _) in &self.projections {
+            let val = expr.evaluate(child_tuple, child_schema)?;
+            values.push(val);
+        }
+        Ok(Some(Tuple::new(values).with_location_from(child_tuple)))
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
+        let child_schema = &self.child_schema;
+
+        // Drain any remaining items in child_buffer
+        while self.buffer_pos < self.child_buffer.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+            let child_tuple = &self.child_buffer[self.buffer_pos];
+            self.buffer_pos += 1;
+            let mut values = Vec::with_capacity(self.projections.len());
+            for (expr, _, _) in &self.projections {
+                let val = expr.evaluate(child_tuple, child_schema)?;
+                values.push(val);
+            }
+            batch.push(Tuple::new(values).with_location_from(child_tuple));
+        }
+
+        if batch.len() >= super::trait_::DEFAULT_BATCH_SIZE {
+            return Ok(batch.len());
+        }
+
+        // Pull new batch from child
+        self.child_buffer.clear();
+        self.buffer_pos = 0;
+        let count = self.child.next_batch(&mut self.child_buffer)?;
+        if count == 0 {
+            return Ok(batch.len());
+        }
+
+        while self.buffer_pos < self.child_buffer.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+            let child_tuple = &self.child_buffer[self.buffer_pos];
+            self.buffer_pos += 1;
+            let mut values = Vec::with_capacity(self.projections.len());
+            for (expr, _, _) in &self.projections {
+                let val = expr.evaluate(child_tuple, child_schema)?;
+                values.push(val);
+            }
+            batch.push(Tuple::new(values).with_location_from(child_tuple));
+        }
+
+        Ok(batch.len())
     }
 
     fn schema(&self) -> &[ColumnInfo] {
@@ -259,6 +365,8 @@ impl PhysicalOperator for ProjectionOperator {
     }
 
     fn reset(&mut self) -> RookResult<()> {
+        self.child_buffer.clear();
+        self.buffer_pos = 0;
         self.child.reset()
     }
 

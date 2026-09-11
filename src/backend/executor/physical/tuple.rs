@@ -33,6 +33,11 @@ pub struct Tuple {
 }
 
 impl Tuple {
+    /// Create an empty tuple (used for buffer reuse).
+    pub fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+
     /// Create a new tuple from deserialized values.
     pub fn new(values: Vec<Option<DataValue>>) -> Self {
         Self { values, page_id: None, slot_id: None }
@@ -91,6 +96,24 @@ impl Tuple {
         }
     }
 
+    /// Concatenate two tuples into a destination tuple buffer, reusing its allocation.
+    pub fn concatenate_into(&self, other: &Tuple, out: &mut Tuple) {
+        out.values.clear();
+        out.values.reserve(self.values.len() + other.values.len());
+        out.values.extend(self.values.iter().cloned());
+        out.values.extend(other.values.iter().cloned());
+        out.page_id = None;
+        out.slot_id = None;
+    }
+
+    /// Concatenate two owned tuples without reallocating `self`'s vector.
+    pub fn concatenate_owned(mut self, other: Tuple) -> Self {
+        self.values.extend(other.values);
+        self.page_id = None;
+        self.slot_id = None;
+        self
+    }
+
     /// Project a subset of columns from this tuple.
     pub fn project(&self, indices: &[usize]) -> Self {
         let mut projected_values = Vec::with_capacity(indices.len());
@@ -102,6 +125,30 @@ impl Tuple {
             page_id: self.page_id,
             slot_id: self.slot_id,
         }
+    }
+
+    /// Project a subset of columns into an existing output tuple buffer.
+    pub fn project_into(&self, indices: &[usize], out: &mut Tuple) {
+        out.values.clear();
+        out.values.reserve(indices.len());
+        for &i in indices {
+            out.values.push(self.values.get(i).cloned().unwrap_or(None));
+        }
+        out.page_id = self.page_id;
+        out.slot_id = self.slot_id;
+    }
+
+    /// In-place projection: modifies `self.values` to retain only `indices`.
+    pub fn project_in_place(&mut self, indices: &[usize]) {
+        let mut projected = Vec::with_capacity(indices.len());
+        for &i in indices {
+            projected.push(if i < self.values.len() {
+                std::mem::replace(&mut self.values[i], None)
+            } else {
+                None
+            });
+        }
+        self.values = projected;
     }
 }
 

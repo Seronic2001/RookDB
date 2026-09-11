@@ -288,43 +288,82 @@ impl AggregateOperator {
         }
         Ok(())
     }
+    fn consume_if_needed(&mut self) -> RookResult<()> {
+        if self.consumed {
+            return Ok(());
+        }
+
+        let child_schema = self.child.schema().to_vec();
+        let mut batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+
+        // Fast path for non-grouped global COUNT(*)
+        let is_simple_count_star = self.group_by_exprs.is_empty()
+            && self.aggregates.len() == 1
+            && self.aggregates[0].function == AggregateFunction::Count
+            && self.aggregates[0].input.is_none()
+            && !self.aggregates[0].distinct;
+
+        if is_simple_count_star {
+            let mut total = 0usize;
+            while self.child.next_batch(&mut batch)? > 0 {
+                total += batch.len();
+            }
+            if total > 0 {
+                let mut state = PerGroupState::new();
+                state.row_count = total as u64;
+                self.groups.push(GroupEntry {
+                    key_values: Vec::new(),
+                    agg_states: vec![state],
+                });
+            }
+        } else {
+            while self.child.next_batch(&mut batch)? > 0 {
+                for tuple in batch.drain(..) {
+                    let key_values: Vec<Option<DataValue>> = if self.group_by_exprs.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.group_by_exprs.iter()
+                            .map(|expr| expr.evaluate(&tuple, &child_schema))
+                            .collect::<Result<Vec<_>, String>>()
+                            .map_err(|e| RookError::Internal(e))?
+                    };
+
+                    let group_idx = match self.group_map.entry(key_values.clone()) {
+                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let idx = self.groups.len();
+                            entry.insert(idx);
+                            let agg_states = (0..self.aggregates.len())
+                                .map(|_| PerGroupState::new())
+                                .collect();
+                            self.groups.push(GroupEntry { key_values, agg_states });
+                            idx
+                        }
+                    };
+
+                    let group = &mut self.groups[group_idx];
+                    for (agg_idx, agg) in self.aggregates.iter().enumerate() {
+                        let value = match &agg.input {
+                            Some(expr) => expr.evaluate(&tuple, &child_schema)?,
+                            None => None,
+                        };
+                        group.agg_states[agg_idx].update(agg.function, value.as_ref(), agg.distinct)
+                            .map_err(|e| RookError::Internal(format!("Aggregate error: {}", e)))?;
+                    }
+                }
+            }
+        }
+
+        self.consumed = true;
+        self.materialise()?;
+        Ok(())
+    }
 }
 
 impl PhysicalOperator for AggregateOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
         if !self.consumed {
-            let child_schema = self.child.schema().to_vec();
-            while let Some(tuple) = self.child.next()? {
-                let key_values: Vec<Option<DataValue>> = self.group_by_exprs.iter()
-                    .map(|expr| expr.evaluate(&tuple, &child_schema))
-                    .collect::<Result<Vec<_>, String>>()
-                    .map_err(|e| RookError::Internal(e))?;
-
-                let group_idx = match self.group_map.entry(key_values.clone()) {
-                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        let idx = self.groups.len();
-                        entry.insert(idx);
-                        let agg_states = (0..self.aggregates.len())
-                            .map(|_| PerGroupState::new())
-                            .collect();
-                        self.groups.push(GroupEntry { key_values, agg_states });
-                        idx
-                    }
-                };
-
-                let group = &mut self.groups[group_idx];
-                for (agg_idx, agg) in self.aggregates.iter().enumerate() {
-                    let value = match &agg.input {
-                        Some(expr) => expr.evaluate(&tuple, &child_schema)?,
-                        None => None,
-                    };
-                    group.agg_states[agg_idx].update(agg.function, value.as_ref(), agg.distinct)
-                        .map_err(|e| RookError::Internal(format!("Aggregate error: {}", e)))?;
-                }
-            }
-            self.consumed = true;
-            self.materialise()?;
+            self.consume_if_needed()?;
         }
 
         if self.output_pos < self.output_buffer.len() {
@@ -334,6 +373,25 @@ impl PhysicalOperator for AggregateOperator {
         } else {
             Ok(None)
         }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
+        if !self.consumed {
+            self.consume_if_needed()?;
+        }
+
+        let available = self.output_buffer.len().saturating_sub(self.output_pos);
+        if available == 0 {
+            return Ok(0);
+        }
+        let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
+        batch.reserve(take);
+        for i in 0..take {
+            batch.push(self.output_buffer[self.output_pos + i].clone());
+        }
+        self.output_pos += take;
+        Ok(take)
     }
 
     fn schema(&self) -> &[ColumnInfo] {

@@ -116,6 +116,42 @@ impl PhysicalOperator for SeqScanOperator {
         }
     }
 
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
+        if self.exhausted {
+            return Ok(0);
+        }
+
+        let is_identity = self.column_mapping.len() == self.schema_types.len()
+            && self.column_mapping.iter().enumerate().all(|(i, &idx)| idx == i);
+
+        while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+            match self.scan_iter.next() {
+                Some(Ok((page_id, slot_id, raw_bytes))) => {
+                    let phys_values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
+                        .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
+
+                    let values = if is_identity {
+                        phys_values
+                    } else {
+                        self.column_mapping.iter()
+                            .map(|&phys_idx| phys_values.get(phys_idx).cloned().unwrap_or(None))
+                            .collect()
+                    };
+
+                    batch.push(Tuple::new_with_location(values, page_id, slot_id));
+                }
+                Some(Err(e)) => return Err(RookError::Io(e)),
+                None => {
+                    self.exhausted = true;
+                    break;
+                }
+            }
+        }
+
+        Ok(batch.len())
+    }
+
     fn schema(&self) -> &[ColumnInfo] {
         &self.column_info
     }
@@ -128,6 +164,10 @@ impl PhysicalOperator for SeqScanOperator {
 
     fn name(&self) -> &'static str {
         "SeqScan"
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        self.heap_manager.header.page_count as usize * 100
     }
 }
 
@@ -263,6 +303,22 @@ impl PhysicalOperator for IndexScanOperator {
         } else {
             Ok(None)
         }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
+        if !self.loaded {
+            self.load_results()?;
+        }
+
+        while self.pos < self.results.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+            let (page_id, slot_id) = self.results[self.pos];
+            self.pos += 1;
+            let tuple = self.fetch_tuple(page_id, slot_id)?;
+            batch.push(tuple);
+        }
+
+        Ok(batch.len())
     }
 
     fn schema(&self) -> &[ColumnInfo] {

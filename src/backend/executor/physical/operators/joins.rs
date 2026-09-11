@@ -96,14 +96,15 @@ impl NestedLoopJoinOperator {
 
     /// Materialise all tuples from both children, compute the join, and buffer results.
     fn materialise(&mut self) -> RookResult<()> {
-        // Consume both children
+        // Consume both children in batches
         self.left_tuples.clear();
         self.right_tuples.clear();
-        while let Some(t) = self.left.next()? {
-            self.left_tuples.push(t);
+        let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        while self.left.next_batch(&mut child_batch)? > 0 {
+            self.left_tuples.append(&mut child_batch);
         }
-        while let Some(t) = self.right.next()? {
-            self.right_tuples.push(t);
+        while self.right.next_batch(&mut child_batch)? > 0 {
+            self.right_tuples.append(&mut child_batch);
         }
 
         let num_left = self.left_tuples.len();
@@ -113,18 +114,15 @@ impl NestedLoopJoinOperator {
         self.left_matched = vec![false; num_left];
         self.right_matched = vec![false; num_right];
 
-        // Helper: create a joined tuple
-        let join_tuples = |left: &Tuple, right: &Tuple| -> Tuple {
-            left.concatenate(right)
-        };
+        let mut joined = Tuple::empty();
 
         // Compute the join
         if self.join_type != JoinType::Cross && let Some(pred) = &self.predicate {
             for l_idx in 0..num_left {
                 for r_idx in 0..num_right {
-                    let joined = join_tuples(&self.left_tuples[l_idx], &self.right_tuples[r_idx]);
+                    self.left_tuples[l_idx].concatenate_into(&self.right_tuples[r_idx], &mut joined);
                     if let Some(true) = evaluate_predicate(pred, &joined, &self.output_schema)? {
-                        self.output_buffer.push(joined);
+                        self.output_buffer.push(joined.clone());
                         self.left_matched[l_idx] = true;
                         self.right_matched[r_idx] = true;
                     }
@@ -134,8 +132,8 @@ impl NestedLoopJoinOperator {
             // CROSS JOIN (no predicate) or predicate is None
             for l_idx in 0..num_left {
                 for r_idx in 0..num_right {
-                    let joined = join_tuples(&self.left_tuples[l_idx], &self.right_tuples[r_idx]);
-                    self.output_buffer.push(joined);
+                    self.left_tuples[l_idx].concatenate_into(&self.right_tuples[r_idx], &mut joined);
+                    self.output_buffer.push(joined.clone());
                     self.left_matched[l_idx] = true;
                     self.right_matched[r_idx] = true;
                 }
@@ -154,8 +152,8 @@ impl NestedLoopJoinOperator {
                         let null_values: Vec<Option<DataValue>> =
                             right_cols.iter().map(|_| None).collect();
                         let null_right = Tuple::new(null_values);
-                        self.output_buffer
-                            .push(join_tuples(&self.left_tuples[l_idx], &null_right));
+                        self.left_tuples[l_idx].concatenate_into(&null_right, &mut joined);
+                        self.output_buffer.push(joined.clone());
                     }
                 }
             }
@@ -170,8 +168,8 @@ impl NestedLoopJoinOperator {
                         let null_values: Vec<Option<DataValue>> =
                             left_cols.iter().map(|_| None).collect();
                         let null_left = Tuple::new(null_values);
-                        self.output_buffer
-                            .push(join_tuples(&null_left, &self.right_tuples[r_idx]));
+                        null_left.concatenate_into(&self.right_tuples[r_idx], &mut joined);
+                        self.output_buffer.push(joined.clone());
                     }
                 }
             }
@@ -196,6 +194,24 @@ impl PhysicalOperator for NestedLoopJoinOperator {
         } else {
             Ok(None)
         }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        if !self.consumed {
+            self.materialise()?;
+        }
+
+        let available = self.output_buffer.len().saturating_sub(self.output_pos);
+        if available == 0 {
+            return Ok(0);
+        }
+        let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
+        batch.reserve(take);
+        for i in 0..take {
+            batch.push(self.output_buffer[self.output_pos + i].clone());
+        }
+        self.output_pos += take;
+        Ok(take)
     }
 
     fn schema(&self) -> &[ColumnInfo] {
@@ -485,27 +501,30 @@ impl HashJoinOperator {
     fn build_hash_table(&mut self) -> RookResult<()> {
         let budget = spill_budget();
         let build_schema = self.build.schema().to_vec();
-        while let Some(tuple) = self.build.next()? {
-            // NULL-keyed tuples are skipped — they can never match (NULL != NULL)
-            let Some(key) = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)? else {
-                continue;
-            };
+        let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        while self.build.next_batch(&mut child_batch)? > 0 {
+            for tuple in child_batch.drain(..) {
+                // NULL-keyed tuples are skipped — they can never match (NULL != NULL)
+                let Some(key) = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)? else {
+                    continue;
+                };
 
-            if self.spill.is_some() {
-                // Already spilling: every tuple goes straight to its partition.
-                let p = partition_of(&key);
-                let types = self.build_type_cache();
-                if let Some(spill) = &mut self.spill {
-                    write_tuple_values(&mut spill.build_writers[p], &tuple, &types)
-                        .map_err(|e| format!("hash join spill write failed: {}", e))?;
+                if self.spill.is_some() {
+                    // Already spilling: every tuple goes straight to its partition.
+                    let p = partition_of(&key);
+                    let types = self.build_type_cache();
+                    if let Some(spill) = &mut self.spill {
+                        write_tuple_values(&mut spill.build_writers[p], &tuple, &types)
+                            .map_err(|e| format!("hash join spill write failed: {}", e))?;
+                    }
+                    continue;
                 }
-                continue;
-            }
 
-            self.hash_table.entry(key).or_default().push(tuple);
-            self.build_count += 1;
-            if self.build_count >= budget {
-                self.begin_spill()?;
+                self.hash_table.entry(key).or_default().push(tuple);
+                self.build_count += 1;
+                if self.build_count >= budget {
+                    self.begin_spill()?;
+                }
             }
         }
         self.build_done = true;
@@ -570,20 +589,23 @@ impl HashJoinOperator {
     fn load_probe(&mut self) -> RookResult<()> {
         let spilling = self.spill.is_some();
         let probe_schema = self.probe.schema().to_vec();
-        while let Some(tuple) = self.probe.next()? {
+        let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
+        while self.probe.next_batch(&mut child_batch)? > 0 {
             if !spilling {
-                self.probe_tuples.push(tuple);
+                self.probe_tuples.extend(child_batch.drain(..));
                 continue;
             }
-            // Spill mode: NULL-keyed probe tuples can never match — skip.
-            let Some(key) = Self::make_hash_key(&self.probe_keys, &tuple, &probe_schema)? else {
-                continue;
-            };
-            let p = partition_of(&key);
-            let types = self.probe_type_cache();
-            if let Some(spill) = &mut self.spill {
-                write_tuple_values(&mut spill.probe_writers[p], &tuple, &types)
-                    .map_err(|e| format!("hash join spill write failed: {}", e))?;
+            for tuple in child_batch.drain(..) {
+                // Spill mode: NULL-keyed probe tuples can never match — skip.
+                let Some(key) = Self::make_hash_key(&self.probe_keys, &tuple, &probe_schema)? else {
+                    continue;
+                };
+                let p = partition_of(&key);
+                let types = self.probe_type_cache();
+                if let Some(spill) = &mut self.spill {
+                    write_tuple_values(&mut spill.probe_writers[p], &tuple, &types)
+                        .map_err(|e| format!("hash join spill write failed: {}", e))?;
+                }
             }
         }
         if spilling
@@ -709,6 +731,92 @@ impl PhysicalOperator for HashJoinOperator {
 
             self.exhausted = true;
             return Ok(None);
+        }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        // Build phase
+        if !self.build_done {
+            self.build_hash_table()?;
+            self.load_probe()?;
+        }
+
+        let initial_len = batch.len();
+        let target_len = initial_len + super::trait_::DEFAULT_BATCH_SIZE;
+
+        loop {
+            if self.exhausted {
+                return Ok(batch.len() - initial_len);
+            }
+
+            // Try to yield from current batch of matches
+            while self.match_pos < self.current_matches.len() {
+                let build_tuple = &self.current_matches[self.match_pos];
+                self.match_pos += 1;
+                let mut joined = Tuple::empty();
+                build_tuple.concatenate_into(&self.probe_tuples[self.probe_pos - 1], &mut joined);
+                batch.push(joined);
+                if batch.len() >= target_len {
+                    return Ok(batch.len() - initial_len);
+                }
+            }
+
+            // Find the next probe tuple that has matches
+            let probe_schema = self.probe.schema().to_vec();
+            let mut found_matches = false;
+            let mut scratch_joined = Tuple::empty();
+
+            while self.probe_pos < self.probe_tuples.len() {
+                let probe_tuple = &self.probe_tuples[self.probe_pos];
+                self.probe_pos += 1;
+
+                let key = match Self::make_hash_key(&self.probe_keys, probe_tuple, &probe_schema)? {
+                    Some(k) => k,
+                    None => continue, // NULL probe key -> skip (NULL != NULL)
+                };
+
+                if let Some(build_matches) = self.hash_table.get(&key) {
+                    self.current_matches.clear();
+                    for build_tuple in build_matches {
+                        if let Some(ref remaining) = self.remaining_predicate {
+                            build_tuple.concatenate_into(probe_tuple, &mut scratch_joined);
+                            if let Some(true) = evaluate_predicate(remaining, &scratch_joined, &self.output_schema)? {
+                                self.current_matches.push(build_tuple.clone());
+                            }
+                        } else {
+                            self.current_matches.push(build_tuple.clone());
+                        }
+                    }
+
+                    if !self.current_matches.is_empty() {
+                        self.match_pos = 0;
+                        found_matches = true;
+                        break;
+                    }
+                }
+            }
+
+            if found_matches {
+                continue;
+            }
+
+            // In spill mode the current partition is exhausted: advance to
+            // the next partition, or finish when all are consumed.
+            if self.spill.is_some() {
+                let next_part = self.spill.as_ref().unwrap().part;
+                if next_part < SPILL_PARTITIONS {
+                    self.load_spill_partition(next_part)?;
+                    self.spill.as_mut().unwrap().part = next_part + 1;
+                    continue;
+                }
+                // All partitions done - clean up temp files.
+                if let Some(spill) = self.spill.take() {
+                    spill.remove_dir();
+                }
+            }
+
+            self.exhausted = true;
+            return Ok(batch.len() - initial_len);
         }
     }
 
