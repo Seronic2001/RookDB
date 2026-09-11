@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
-use super::utils::normalise_value_for_key;
 
 use crate::types::value::DataValue;
 use crate::types::DataType;
@@ -119,7 +118,18 @@ impl NestedLoopJoinOperator {
         };
 
         // Compute the join
-        if self.predicate.is_none() || self.join_type == JoinType::Cross {
+        if self.join_type != JoinType::Cross && let Some(pred) = &self.predicate {
+            for l_idx in 0..num_left {
+                for r_idx in 0..num_right {
+                    let joined = join_tuples(&self.left_tuples[l_idx], &self.right_tuples[r_idx]);
+                    if let Some(true) = evaluate_predicate(pred, &joined, &self.output_schema)? {
+                        self.output_buffer.push(joined);
+                        self.left_matched[l_idx] = true;
+                        self.right_matched[r_idx] = true;
+                    }
+                }
+            }
+        } else {
             // CROSS JOIN (no predicate) or predicate is None
             for l_idx in 0..num_left {
                 for r_idx in 0..num_right {
@@ -127,21 +137,6 @@ impl NestedLoopJoinOperator {
                     self.output_buffer.push(joined);
                     self.left_matched[l_idx] = true;
                     self.right_matched[r_idx] = true;
-                }
-            }
-        } else {
-            let pred = self.predicate.as_ref().unwrap();
-            for l_idx in 0..num_left {
-                for r_idx in 0..num_right {
-                    let joined = join_tuples(&self.left_tuples[l_idx], &self.right_tuples[r_idx]);
-                    match evaluate_predicate(pred, &joined, &self.output_schema)? {
-                        Some(true) => {
-                            self.output_buffer.push(joined);
-                            self.left_matched[l_idx] = true;
-                            self.right_matched[r_idx] = true;
-                        }
-                        _ => {}
-                    }
                 }
             }
         }
@@ -245,8 +240,8 @@ pub struct HashJoinOperator {
     output_schema: Vec<ColumnInfo>,
 
     // ── Runtime state ──
-    /// Hash table: key string → list of build tuples.
-    hash_table: HashMap<String, Vec<Tuple>>,
+    /// Hash table: key values → list of build tuples.
+    hash_table: HashMap<Vec<DataValue>, Vec<Tuple>>,
     /// All probe tuples (for replay during reset).
     probe_tuples: Vec<Tuple>,
     /// Current position in probe_tuples.
@@ -418,10 +413,10 @@ fn read_tuple_values(
 }
 
 /// Partition index for a hash key (must agree between build and probe).
-fn partition_of(key: &str) -> usize {
-    use std::hash::Hasher;
+fn partition_of(keys: &[DataValue]) -> usize {
+    use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    h.write(key.as_bytes());
+    keys.hash(&mut h);
     h.finish() as usize % SPILL_PARTITIONS
 }
 
@@ -469,22 +464,19 @@ impl HashJoinOperator {
         self.did_spill
     }
 
-    /// Compute the hash key string from a tuple using a set of key expressions.
+    /// Compute the hash key values from a tuple using a set of key expressions.
     /// Returns `None` if any key is NULL (meaning this tuple cannot match in an
     /// INNER hash join, since SQL NULL != NULL).
-    fn make_hash_key(keys: &[Expr], tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<String>, String> {
-        if keys.is_empty() {
-            return Ok(Some("__global__".to_string()));
-        }
+    fn make_hash_key(keys: &[Expr], tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<Vec<DataValue>>, String> {
         let mut parts = Vec::with_capacity(keys.len());
         for expr in keys {
             let val = expr.evaluate(tuple, schema)?;
             match val {
-                Some(dv) => parts.push(normalise_value_for_key(&dv)),
+                Some(dv) => parts.push(dv),
                 None => return Ok(None),  // NULL key → can never match (NULL != NULL)
             }
         }
-        Ok(Some(parts.join("|")))
+        Ok(Some(parts))
     }
 
     /// Build the hash table from the build side.
@@ -509,7 +501,7 @@ impl HashJoinOperator {
                 continue;
             }
 
-            self.hash_table.entry(key).or_insert_with(Vec::new).push(tuple);
+            self.hash_table.entry(key).or_default().push(tuple);
             self.build_count += 1;
             if self.build_count >= budget {
                 self.begin_spill()?;
@@ -593,14 +585,13 @@ impl HashJoinOperator {
                     .map_err(|e| format!("hash join spill write failed: {}", e))?;
             }
         }
-        if spilling {
-            if let Some(spill) = &mut self.spill {
+        if spilling
+            && let Some(spill) = &mut self.spill {
                 for w in spill.probe_writers.drain(..) {
                     w.into_inner()
                         .map_err(|e| format!("hash join spill flush failed: {}", e))?;
                 }
             }
-        }
         Ok(())
     }
 
@@ -631,7 +622,7 @@ impl HashJoinOperator {
         {
             let key = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)?;
             if let Some(key) = key {
-                self.hash_table.entry(key).or_insert_with(Vec::new).push(tuple);
+                self.hash_table.entry(key).or_default().push(tuple);
             }
         }
 
@@ -684,10 +675,7 @@ impl PhysicalOperator for HashJoinOperator {
                     for build_tuple in build_matches {
                         if let Some(ref remaining) = self.remaining_predicate {
                             let joined = build_tuple.concatenate(probe_tuple);
-                            match evaluate_predicate(remaining, &joined, &self.output_schema)? {
-                                Some(true) => self.current_matches.push(build_tuple.clone()),
-                                _ => {}
-                            }
+                            if let Some(true) = evaluate_predicate(remaining, &joined, &self.output_schema)? { self.current_matches.push(build_tuple.clone()) }
                         } else {
                             self.current_matches.push(build_tuple.clone());
                         }

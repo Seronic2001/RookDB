@@ -1,5 +1,6 @@
 pub mod types;
 pub use types::{Catalog, Column, Constraints, Database, Table};
+#[allow(clippy::module_inception)]
 pub mod catalog;
 
 pub use catalog::{

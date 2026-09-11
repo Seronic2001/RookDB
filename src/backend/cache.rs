@@ -85,7 +85,7 @@ pub fn with_heap<T>(
 
     // Fast path: existing entry.
     {
-        let mut cache = lock(&heap_cache());
+        let mut cache = lock(heap_cache());
         if let Some(entry) = cache.get_mut(&key) {
             entry.manager.reload_header()?;
             let result = f(&mut entry.manager)?;
@@ -100,7 +100,7 @@ pub fn with_heap<T>(
 
     // Miss: open outside the map lock, then insert (double-check).
     let mut manager = HeapManager::open(path.to_path_buf())?;
-    let mut cache = lock(&heap_cache());
+    let mut cache = lock(heap_cache());
     if let Some(entry) = cache.get_mut(&key) {
         // Raced with another opener in between; use the resident one.
         entry.manager.reload_header()?;
@@ -120,7 +120,7 @@ pub fn with_heap<T>(
 /// pool, and VACUUM's direct-I/O compaction leaves stale frames behind.
 pub fn evict_heap(path: &Path) -> io::Result<()> {
     let key = canonical(path);
-    let removed = lock(&heap_cache()).remove(&key);
+    let removed = lock(heap_cache()).remove(&key);
     if let Some(mut entry) = removed {
         entry.manager.flush()?;
     }
@@ -140,7 +140,7 @@ pub fn quiesce_for_direct_io(path: &Path) -> io::Result<()> {
 
 /// Flush and drop every cached heap manager.
 pub fn flush_and_clear_heaps() -> io::Result<()> {
-    let mut cache = lock(&heap_cache());
+    let mut cache = lock(heap_cache());
     for (_, mut entry) in cache.drain() {
         entry.manager.flush()?;
     }
@@ -169,7 +169,7 @@ pub fn with_btree<T, E>(
     f: impl FnOnce(&mut crate::backend::index::btree::BTree) -> Result<T, E>,
 ) -> Result<T, E> {
     let key = canonical(path);
-    let mut cache = lock(&btree_cache());
+    let mut cache = lock(btree_cache());
 
     if !cache.contains_key(&key) {
         let tree = open()?;
@@ -189,20 +189,19 @@ pub fn with_btree<T, E>(
 
 /// fsync every cached B+ Tree with pending mutations and drop the handles.
 pub fn sync_and_clear_btrees<E>() {
-    let mut cache = lock(&btree_cache());
+    let mut cache = lock(btree_cache());
     for (_, (mut tree, ops)) in cache.drain() {
-        if ops > 0 {
-            if let Err(e) = tree.sync() {
+        if ops > 0
+            && let Err(e) = tree.sync() {
                 log::warn!("[cache] btree sync on close failed: {}", e);
             }
-        }
     }
 }
 
 /// Drop a cached B+ Tree handle without syncing (file replaced/removed).
 pub fn evict_btree(path: &Path) {
     let key = canonical(path);
-    lock(&btree_cache()).remove(&key);
+    lock(btree_cache()).remove(&key);
 }
 
 // ── checkpoints ──────────────────────────────────────────────────────────────
@@ -220,7 +219,7 @@ pub fn evict_btree(path: &Path) {
 /// [`sync_and_clear_btrees`] to actually release resources.
 pub fn checkpoint() {
     {
-        let mut cache = lock(&heap_cache());
+        let mut cache = lock(heap_cache());
         for entry in cache.values_mut() {
             if let Err(e) = entry.manager.flush() {
                 log::warn!("[cache] heap checkpoint flush failed: {}", e);
@@ -229,7 +228,7 @@ pub fn checkpoint() {
         }
     }
     {
-        let mut cache = lock(&btree_cache());
+        let mut cache = lock(btree_cache());
         for (_, (tree, ops)) in cache.iter_mut() {
             if *ops > 0 {
                 if let Err(e) = tree.sync() {
@@ -296,38 +295,35 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     // Scan sys_indexes once.
     let mut unique_indexes = Vec::new();
     let mut named_indexes = Vec::new();
-    match scan_sys("indexes", SYS_INDEXES_SCHEMA) {
-        Some(rows) => {
-            for row in rows {
-                if row.len() < 6 {
-                    continue;
-                }
-                let row_table_id = match row[1] {
-                    Some(crate::types::DataValue::Int(id)) => id,
-                    _ => continue,
-                };
-                if row_table_id != table_id {
-                    continue;
-                }
-                let name = text_at(&row, 2);
-                let columns_field = text_at(&row, 5);
-                if name.is_empty() || columns_field.is_empty() {
-                    continue;
-                }
-                let cols: Vec<String> =
-                    columns_field.split(',').map(|c| c.trim().to_string()).collect();
-                let is_unique = matches!(&row[3], Some(crate::types::DataValue::Bool(v)) if *v);
-                // Only genuinely UNIQUE indexes feed the UNIQUE checker —
-                // regular indexes must NOT enforce uniqueness.
-                if is_unique {
-                    for c in &cols {
-                        unique_indexes.push((name.clone(), c.clone()));
-                    }
-                }
-                named_indexes.push((name, cols, is_unique));
+    if let Some(rows) = scan_sys("indexes", SYS_INDEXES_SCHEMA) {
+        for row in rows {
+            if row.len() < 6 {
+                continue;
             }
+            let row_table_id = match row[1] {
+                Some(crate::types::DataValue::Int(id)) => id,
+                _ => continue,
+            };
+            if row_table_id != table_id {
+                continue;
+            }
+            let name = text_at(&row, 2);
+            let columns_field = text_at(&row, 5);
+            if name.is_empty() || columns_field.is_empty() {
+                continue;
+            }
+            let cols: Vec<String> =
+                columns_field.split(',').map(|c| c.trim().to_string()).collect();
+            let is_unique = matches!(&row[3], Some(crate::types::DataValue::Bool(v)) if *v);
+            // Only genuinely UNIQUE indexes feed the UNIQUE checker —
+            // regular indexes must NOT enforce uniqueness.
+            if is_unique {
+                for c in &cols {
+                    unique_indexes.push((name.clone(), c.clone()));
+                }
+            }
+            named_indexes.push((name, cols, is_unique));
         }
-        None => {}
     }
     let _ = db_id;
 
@@ -362,15 +358,14 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     }
 
     let mut check_ast = Vec::new();
-    if !check_exprs.is_empty() {
-        if let Some(parser) = CHECK_PARSER.get() {
+    if !check_exprs.is_empty()
+        && let Some(parser) = CHECK_PARSER.get() {
             for expr in &check_exprs {
                 if let Ok(ast_node) = parser(expr) {
                     check_ast.push((expr.clone(), ast_node));
                 }
             }
         }
-    }
 
     Some(Arc::new(TableMeta {
         table_id,
@@ -425,19 +420,19 @@ fn scan_sys(
 /// table is not present in the system tables yet.
 pub fn metadata(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     let key = (db_name.to_string(), table_name.to_string());
-    if let Some(hit) = lock(&meta_cache()).get(&key) {
+    if let Some(hit) = lock(meta_cache()).get(&key) {
         return Some(Arc::clone(hit));
     }
     let loaded = load_meta(db_name, table_name)?;
-    lock(&meta_cache()).insert(key, Arc::clone(&loaded));
+    lock(meta_cache()).insert(key, Arc::clone(&loaded));
     Some(loaded)
 }
 
 /// Forget all cached table metadata (call after any DDL persists).
 pub fn invalidate_metadata() {
-    lock(&meta_cache()).clear();
-    lock(&ref_fk_cache()).clear();
-    lock(&stats_cache()).clear();
+    lock(meta_cache()).clear();
+    lock(ref_fk_cache()).clear();
+    lock(stats_cache()).clear();
 }
 
 // ── table statistics cache ───────────────────────────────────────────────────
@@ -466,15 +461,14 @@ pub fn table_statistics(
     ));
     let file_len = std::fs::metadata(&path)?.len();
 
-    if let Some((len, hit)) = lock(&stats_cache()).get(&key) {
-        if *len == file_len {
+    if let Some((len, hit)) = lock(stats_cache()).get(&key)
+        && *len == file_len {
             return Ok(std::sync::Arc::clone(hit));
         }
-    }
 
     let stats = crate::statistics::collect_table_statistics(db_name, table_name)?;
     let arc = std::sync::Arc::new(stats);
-    lock(&stats_cache()).insert(key, (file_len, std::sync::Arc::clone(&arc)));
+    lock(stats_cache()).insert(key, (file_len, std::sync::Arc::clone(&arc)));
     Ok(arc)
 }
 
@@ -498,7 +492,7 @@ fn ref_fk_cache() -> &'static Mutex<RefFkCacheMap> {
 /// sweep per row made bulk UPDATE/DELETE quadratic.
 pub fn referencing_fks(db_name: &str, table_name: &str) -> std::sync::Arc<RefFks> {
     let key = (db_name.to_string(), table_name.to_string());
-    if let Some(hit) = lock(&ref_fk_cache()).get(&key) {
+    if let Some(hit) = lock(ref_fk_cache()).get(&key) {
         return std::sync::Arc::clone(hit);
     }
     let loaded = crate::backend::constraint::loaders::load_referencing_foreign_keys(
@@ -507,7 +501,7 @@ pub fn referencing_fks(db_name: &str, table_name: &str) -> std::sync::Arc<RefFks
     )
     .unwrap_or_default();
     let arc = std::sync::Arc::new(loaded);
-    lock(&ref_fk_cache()).insert(key, std::sync::Arc::clone(&arc));
+    lock(ref_fk_cache()).insert(key, std::sync::Arc::clone(&arc));
     arc
 }
 

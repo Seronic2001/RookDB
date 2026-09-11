@@ -156,7 +156,7 @@ pub fn rewrite_expr(expr: &mut ExprNode, map: &HashMap<String, String>) {
     }
 }
 
-fn rewrite_compound(parts: &mut Vec<String>, map: &HashMap<String, String>) {
+fn rewrite_compound(parts: &mut [String], map: &HashMap<String, String>) {
     if parts.len() < 2 {
         return;
     }

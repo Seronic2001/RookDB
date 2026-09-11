@@ -167,15 +167,14 @@ pub fn fold_predicate(pred: &PredicateNode) -> PredicateNode {
         PredicateNode::Compare { left, op, right } => {
             let left = fold_expr(left);
             let right = fold_expr(right);
-            if let (ExprNode::Constant(a), ExprNode::Constant(b)) = (&left, &right) {
-                if let Some(result) = fold_comparison(a, *op, b) {
+            if let (ExprNode::Constant(a), ExprNode::Constant(b)) = (&left, &right)
+                && let Some(result) = fold_comparison(a, *op, b) {
                     return PredicateNode::Compare {
                         left: Box::new(ExprNode::Constant(ConstantValue::Boolean(result))),
                         op: *op,
                         right: Box::new(ExprNode::Constant(b.clone())),
                     };
                 }
-            }
             PredicateNode::Compare {
                 left: Box::new(left),
                 op: *op,

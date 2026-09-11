@@ -192,3 +192,21 @@ fn arithmetic_projection() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0][1], "170000");
 }
+
+#[test]
+fn distinct_with_limit_and_offset() {
+    let _ws = common::TestWorkspace::new("volcano", "dist_limit");
+    let catalog = setup_table("emp_db");
+
+    // All distinct depts are 'eng', 'hr', 'sales' (3 distinct).
+    // ORDER BY dept LIMIT 2 OFFSET 1 must yield exactly 2 rows: 'hr', 'sales'.
+    let out = run_select(
+        &catalog,
+        "emp_db",
+        "SELECT DISTINCT dept FROM employees ORDER BY dept LIMIT 2 OFFSET 1",
+    );
+    assert_eq!(out.len(), 2, "LIMIT 2 OFFSET 1 on 3 distinct departments must return 2 rows");
+    assert_eq!(out[0][0], "'hr'");
+    assert_eq!(out[1][0], "'sales'");
+}
+

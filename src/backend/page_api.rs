@@ -112,7 +112,7 @@ pub fn get_page_count_from_file(file: &mut File) -> io::Result<u32> {
     let file_size = metadata.len() as u32;
     let page_size = 8192u32; // PAGE_SIZE constant
     
-    let count = (file_size + page_size - 1) / page_size; // Ceiling division
+    let count = file_size.div_ceil(page_size); // Ceiling division
     debug_print_page(&format!(
         "get_page_count: file_size={}, page_size={}, count={}",
         file_size, page_size, count

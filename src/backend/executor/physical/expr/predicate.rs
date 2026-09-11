@@ -173,6 +173,7 @@ impl Predicate {
         Predicate::Or(Box::new(left), Box::new(right))
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn not(inner: Predicate) -> Self {
         Predicate::Not(Box::new(inner))
     }

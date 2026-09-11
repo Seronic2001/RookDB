@@ -5,6 +5,7 @@ use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
 
 use crate::types::datatype::DataType;
+use crate::types::value::DataValue;
 
 // ── SingleRowOperator ────────────────────────────────────────────────────────
 
@@ -12,6 +13,12 @@ use crate::types::datatype::DataType;
 pub struct SingleRowOperator {
     schema: Vec<ColumnInfo>,
     emitted: bool,
+}
+
+impl Default for SingleRowOperator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SingleRowOperator {
@@ -218,8 +225,8 @@ impl ProjectionOperator {
 
     pub fn star(child: Box<dyn PhysicalOperator>) -> Self {
         let child_schema = child.schema().to_vec();
-        let projections: Vec<(Expr, String, DataType)> = child_schema.iter().enumerate()
-            .map(|(_i, ci)| (Expr::Column { table: None, column: ci.name.clone() }, ci.name.clone(), ci.data_type.clone()))
+        let projections: Vec<(Expr, String, DataType)> = child_schema.iter()
+            .map(|ci| (Expr::Column { table: None, column: ci.name.clone() }, ci.name.clone(), ci.data_type.clone()))
             .collect();
         let output_schema = child_schema;
         Self { child, projections, output_schema }
@@ -319,7 +326,7 @@ impl PhysicalOperator for LimitOperator {
 /// Removes duplicate tuples (SQL `DISTINCT`).
 pub struct DistinctOperator {
     child: Box<dyn PhysicalOperator>,
-    seen: HashSet<String>,
+    seen: HashSet<Vec<Option<DataValue>>>,
     loaded: bool,
     buffer: Vec<Tuple>,
     pos: usize,
@@ -341,11 +348,7 @@ impl PhysicalOperator for DistinctOperator {
     fn next(&mut self) -> Result<Option<Tuple>, String> {
         if !self.loaded {
             while let Some(tuple) = self.child.next()? {
-                let key = tuple.values.iter().map(|v| match v {
-                    Some(dv) => format!("{:?}", dv),
-                    None => "__NULL__".to_string(),
-                }).collect::<Vec<_>>().join("|");
-                if self.seen.insert(key) {
+                if self.seen.insert(tuple.values.clone()) {
                     self.buffer.push(tuple);
                 }
             }

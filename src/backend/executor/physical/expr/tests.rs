@@ -1,6 +1,7 @@
 //! Tests for expression and predicate evaluation.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::{Expr, Predicate, evaluate_predicate, BooleanTest};
     use super::super::super::tuple::{Tuple, ColumnInfo};

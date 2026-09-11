@@ -1,6 +1,7 @@
 //! Tests for constraint validation.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::validation;
     use crate::catalog::types::{Column, Constraints};

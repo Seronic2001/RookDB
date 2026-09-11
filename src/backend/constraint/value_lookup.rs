@@ -248,12 +248,12 @@ fn scan_table_for_value(
 }
 
 /// Fallback raw heap scan using string matching (for tables not in system catalog).
-fn scan_raw_heap_for_string(heap_path: &std::path::PathBuf, value: &str) -> Result<bool, String> {
+fn scan_raw_heap_for_string(heap_path: &std::path::Path, value: &str) -> Result<bool, String> {
     if !heap_path.exists() {
         return Ok(false);
     }
 
-    let heap = match crate::backend::heap::HeapManager::open(heap_path.clone()) {
+    let heap = match crate::backend::heap::HeapManager::open(heap_path.to_path_buf()) {
         Ok(h) => h,
         Err(e) => {
             log::warn!("[Constraint] Failed to open heap for raw scan: {}", e);

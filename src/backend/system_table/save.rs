@@ -23,13 +23,13 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
         // Also load sys_tables to resolve table_id → table_name
         let mut tbl_id_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
         let tbl_path = sys_path("tables");
-        if tbl_path.exists() {
-            if let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path) {
+        if tbl_path.exists()
+            && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path) {
                 for result in heap.scan() {
-                    if let Ok((_, _, raw_bytes)) = result {
-                        if let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes) {
-                            if decoded.len() >= 3 {
-                                if let Some(Some(crate::types::DataValue::Int(tid))) = decoded.get(0) {
+                    if let Ok((_, _, raw_bytes)) = result
+                        && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
+                            && decoded.len() >= 3
+                                && let Some(Some(crate::types::DataValue::Int(tid))) = decoded.first() {
                                     let name_opt = match decoded.get(2) {
                                         Some(Some(crate::types::DataValue::Varchar(name))) => Some(name.clone()),
                                         Some(Some(crate::types::DataValue::Char(name))) => Some(name.clone()),
@@ -39,18 +39,14 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
                                         tbl_id_to_name.insert(*tid, name);
                                     }
                                 }
-                            }
-                        }
-                    }
                 }
             }
-        }
 
         if let Ok(heap) = crate::backend::heap::HeapManager::open(constr_path.clone()) {
             for result in heap.scan() {
-                if let Ok((_, _, raw_bytes)) = result {
-                    if let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes) {
-                        if decoded.len() >= 6 {
+                if let Ok((_, _, raw_bytes)) = result
+                    && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
+                        && decoded.len() >= 6 {
                             let constr_type = match &decoded[2] {
                                 Some(crate::types::DataValue::Varchar(s)) => s.as_str(),
                                 Some(crate::types::DataValue::Char(s)) => s.as_str(),
@@ -66,10 +62,10 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
                                     .cloned()
                                     .unwrap_or_else(|| format!("<table_id={}>", old_table_id));
 
-                                let constraint_type = decoded[2].as_ref().map(|dv| value_to_string(dv));
-                                let columns = decoded[3].as_ref().map(|dv| value_to_string(dv));
-                                let ref_table = decoded[4].as_ref().map(|dv| value_to_string(dv));
-                                let ref_columns = decoded[5].as_ref().map(|dv| value_to_string(dv));
+                                let constraint_type = decoded[2].as_ref().map(value_to_string);
+                                let columns = decoded[3].as_ref().map(value_to_string);
+                                let ref_table = decoded[4].as_ref().map(value_to_string);
+                                let ref_columns = decoded[5].as_ref().map(value_to_string);
 
                                 // Store CHILD TABLE NAME as the "table_id" field.
                                 // After rebuilding, populate_system_tables will resolve
@@ -86,8 +82,6 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
                                 ]);
                             }
                         }
-                    }
-                }
             }
         }
     }
@@ -151,11 +145,10 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
 
     // Compute the next available constraint_id from existing rows
     let mut next_constr_id = constr_rows.iter().fold(1i32, |max_id, row| {
-        if let Some(Some(id_str)) = row.first() {
-            if let Ok(id) = id_str.parse::<i32>() {
+        if let Some(Some(id_str)) = row.first()
+            && let Ok(id) = id_str.parse::<i32>() {
                 return std::cmp::max(max_id, id + 1);
             }
-        }
         max_id
     });
 
@@ -163,7 +156,7 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
     // (they were loaded from the previous save cycle with constraint_id=None
     //  because the numeric ID was tied to the old table iteration order).
     for row in &mut constr_rows {
-        if row.len() >= 1 && row[0].is_none() {
+        if !row.is_empty() && row[0].is_none() {
             row[0] = Some(next_constr_id.to_string());
             next_constr_id += 1;
         }
@@ -209,7 +202,7 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
                     .constraints
                     .default
                     .as_ref()
-                    .map(|dv| value_to_string(dv))
+                    .map(value_to_string)
                     .unwrap_or_default();
                 let nullable_str = if col.nullable { "true" } else { "false" };
                 let has_default_str = if has_default { "true" } else { "false" };
@@ -271,8 +264,8 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
         if row.len() < 6 {
             continue;
         }
-        if let Some(Some(table_id_str)) = &row.get(1).cloned() {
-            if let Some(table_name) = table_id_str.strip_prefix("TABLE_NAME:") {
+        if let Some(Some(table_id_str)) = &row.get(1).cloned()
+            && let Some(table_name) = table_id_str.strip_prefix("TABLE_NAME:") {
                 let resolved_id = table_name_to_new_id.get(table_name)
                     .cloned()
                     .unwrap_or(0);
@@ -286,7 +279,6 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
                     Some("0".to_string())
                 };
             }
-        }
     }
 
     // Batch-write each system table
@@ -308,11 +300,10 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
     let mut table_name_to_id: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
     for row in &tbl_rows {
         // tbl_rows: [table_id, db_id, name, file_path]
-        if let (Some(table_id_str), Some(table_name)) = (&row[0], &row[2]) {
-            if let Ok(tid) = table_id_str.parse::<i32>() {
+        if let (Some(table_id_str), Some(table_name)) = (&row[0], &row[2])
+            && let Ok(tid) = table_id_str.parse::<i32>() {
                 table_name_to_id.insert(table_name.clone(), tid);
             }
-        }
     }
     // ── Populate sys_views ──────────────────────────────────────────────
     let mut view_rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -479,11 +470,10 @@ fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<Strin
         }
     }
 
-    if !idx_rows.is_empty() {
-        if let Err(e) = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &idx_rows) {
+    if !idx_rows.is_empty()
+        && let Err(e) = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &idx_rows) {
             log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
         }
-    }
 }
 
 /// Strip the `CHECK(...)` wrapper from a sys_constraints `columns` field.

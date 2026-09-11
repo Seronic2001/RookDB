@@ -247,7 +247,7 @@ pub fn load_catalog_from_system() -> Catalog {
             _ => continue,
         };
 
-        let db_id = match &db_row.get(0) {
+        let db_id = match &db_row.first() {
             Some(Some(crate::types::DataValue::Int(id))) => *id,
             _ => continue,
         };
@@ -274,7 +274,7 @@ pub fn load_catalog_from_system() -> Catalog {
                 _ => continue,
             };
 
-            let table_id = match &tbl_row.get(0) {
+            let table_id = match &tbl_row.first() {
                 Some(Some(crate::types::DataValue::Int(id))) => *id,
                 _ => continue,
             };
@@ -397,11 +397,10 @@ pub fn load_catalog_from_system() -> Catalog {
                         .iter()
                         .position(|(_, c)| expr.contains(&c.name))
                         .unwrap_or(0);
-                    if let Some((_, col)) = col_with_ordinals.get_mut(owner) {
-                        if col.constraints.check.is_none() {
+                    if let Some((_, col)) = col_with_ordinals.get_mut(owner)
+                        && col.constraints.check.is_none() {
                             col.constraints.check = Some(expr);
                         }
-                    }
                 }
             }
 
@@ -451,11 +450,10 @@ pub fn resolve_table_id(db_name: &str, table_name: &str) -> std::io::Result<(i32
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(db_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(db_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -477,11 +475,10 @@ pub fn resolve_table_id(db_name: &str, table_name: &str) -> std::io::Result<(i32
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(table_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(table_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,

@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 pub mod buffer_manager;
 pub mod buffer_pool;
 pub mod shared_pool;

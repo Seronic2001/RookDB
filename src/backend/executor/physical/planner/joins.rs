@@ -67,7 +67,7 @@ impl PhysicalPlanner {
                 if equality_preds.is_empty() {
                     None
                 } else {
-                    Some(equality_preds.into_iter().reduce(|a, b| Predicate::and(a, b)).unwrap())
+                    Some(equality_preds.into_iter().reduce(Predicate::and).unwrap())
                 }
             }
             _ => match &j.condition {
@@ -100,14 +100,13 @@ impl PhysicalPlanner {
         // cross-side equality conjunct (INNER joins only) — turns O(n·m)
         // nested-loop joins into O(n+m). Remaining non-equality conjuncts are
         // evaluated as a post-join filter by HashJoinOperator.
-        if matches!(join_type, PhysicalJoinType::Inner) {
-            if let Some(pred) = &predicate {
+        if matches!(join_type, PhysicalJoinType::Inner)
+            && let Some(pred) = &predicate {
                 let left_schema = left.schema().to_vec();
                 let right_schema = right.schema().to_vec();
                 if let Some((build_keys, probe_keys, residual)) =
                     extract_equi_join_keys(pred, &left_schema, &right_schema)
-                {
-                    if !build_keys.is_empty() {
+                    && !build_keys.is_empty() {
                         log::info!(
                             "[Volcano] Using HashJoin: {} equi-key pair(s), residual predicate: {}",
                             build_keys.len(),
@@ -121,9 +120,7 @@ impl PhysicalPlanner {
                             residual,
                         )));
                     }
-                }
             }
-        }
 
         // Use NestedLoopJoin for all join types
         Ok(Box::new(NestedLoopJoinOperator::new(
@@ -403,12 +400,6 @@ impl PhysicalPlanner {
     }
 }
 
-/// Rewrite aggregate calls inside a HAVING predicate into column references
-/// to the matching computed aggregate output.
-///
-/// `HAVING COUNT(*) >= 2` becomes `HAVING <output-of-COUNT(*)> >= 2`, where
-/// the output name is the one assigned by the aggregate planner (the SELECT
-/// alias when present, e.g. `cnt`, otherwise the canonical function name).
 // ── HAVING aggregate rewriting ────────────────────────────────────────────────
 
 /// Rewrite aggregate calls inside a HAVING predicate into column references
@@ -545,7 +536,7 @@ fn render_agg_args(agg: &rook_ast::logical::AggregateExpr) -> String {
     } else {
         agg.args
             .iter()
-            .map(|a| super::helpers::ast_expr_to_output_name(a))
+            .map(super::helpers::ast_expr_to_output_name)
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -622,6 +613,6 @@ fn extract_equi_join_keys(
 
     walk(pred, left_schema, right_schema, &mut build_keys, &mut probe_keys, &mut residual);
 
-    let residual_pred = residual.into_iter().cloned().reduce(|a, b| Predicate::and(a, b));
+    let residual_pred = residual.into_iter().cloned().reduce(Predicate::and);
     Some((build_keys, probe_keys, residual_pred))
 }

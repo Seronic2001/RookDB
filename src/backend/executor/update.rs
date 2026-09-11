@@ -373,12 +373,12 @@ pub fn update_by_pointers(
     // UPDATE rewrites pages via direct I/O — flush/evict cached pool state
     // first so the raw reads observe every prior insert.
     crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to flush cache: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to flush cache: {}", e)))?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to open table file: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
     let file_identity = crate::table::file_identity_from_file(&file)?;
 
     let mut updated_count = 0usize;

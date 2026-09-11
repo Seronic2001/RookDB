@@ -117,8 +117,8 @@ impl PhysicalPlanner {
                 "database/base/{}/{}.idx", self.db_name, ts.table
             ));
             let meta_path = format!("database/base/{}/{}.idx.meta", self.db_name, ts.table);
-            if legacy_idx_path.exists() {
-                if let Ok(meta_json) = std::fs::read_to_string(&meta_path) {
+            if legacy_idx_path.exists()
+                && let Ok(meta_json) = std::fs::read_to_string(&meta_path) {
                     #[derive(serde::Deserialize)]
                     struct IndexMeta { column_name: String }
                     if let Ok(meta) = serde_json::from_str::<IndexMeta>(&meta_json) {
@@ -134,7 +134,6 @@ impl PhysicalPlanner {
                         }
                     }
                 }
-            }
         }
 
         // Build the index scan operator if a matching index was found
@@ -365,13 +364,12 @@ impl PhysicalPlanner {
                 }
 
                 // Single-element IN list: col IN (val) → PointLookup(val)
-                if list.len() == 1 {
-                    if let rook_ast::ExprNode::Constant(cv) = &list[0] {
+                if list.len() == 1
+                    && let rook_ast::ExprNode::Constant(cv) = &list[0] {
                         return Some(IndexScanMode::PointLookup(
                             Self::ast_constant_to_data_value(cv),
                         ));
                     }
-                }
 
                 // Multi-element IN lists are not directly accelerated.
                 // They fall through to SeqScan + FilterOperator which

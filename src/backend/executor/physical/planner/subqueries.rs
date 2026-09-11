@@ -160,10 +160,10 @@ impl PhysicalPlanner {
     /// Materialize a single scalar subquery and return (value, data_type).
     pub(crate) fn materialize_scalar_subquery(
         &self,
-        select: &Box<rook_ast::SelectPlan>,
+        select: &rook_ast::SelectPlan,
     ) -> Result<(Option<DataValue>, DataType), String> {
         log::info!("[Planner] Materializing scalar subquery");
-        let query_plan = rook_ast::QueryPlan::Select((**select).clone());
+        let query_plan = rook_ast::QueryPlan::Select(select.clone());
 
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
             .map_err(|e| format!("Failed to plan scalar subquery: {}", e.message))?;
@@ -349,11 +349,10 @@ impl PhysicalPlanner {
             None => return false,
         };
         for table_name in inner_tables {
-            if let Some(table) = db.tables.get(table_name) {
-                if table.columns.iter().any(|c| c.name.eq_ignore_ascii_case(col_name)) {
+            if let Some(table) = db.tables.get(table_name)
+                && table.columns.iter().any(|c| c.name.eq_ignore_ascii_case(col_name)) {
                     return true;
                 }
-            }
         }
         false
     }
@@ -672,12 +671,11 @@ impl PhysicalPlanner {
                             left,
                             inner_table_name,
                             inner_col_names,
-                        ) {
-                            if !single_pairs.is_empty() {
+                        )
+                            && !single_pairs.is_empty() {
                                 pairs.append(&mut single_pairs);
                                 return Ok(());
                             }
-                        }
                         if let Ok(mut single_pairs) = self.extract_all_correlations(
                             right,
                             inner_table_name,
@@ -723,24 +721,20 @@ impl PhysicalPlanner {
     ) -> Result<(String, String), String> {
         // Check (left = inner, right = outer)
         if let Some(inner_name) = self.extract_column_name_if_inner(left, inner_table_name, inner_col_names)
-        {
-            if let Some(outer_name) =
+            && let Some(outer_name) =
                 self.extract_column_name_if_outer(right, inner_table_name, inner_col_names)
             {
                 return Ok((inner_name, outer_name));
             }
-        }
 
         // Check (left = outer, right = inner)
         if let Some(inner_name) =
             self.extract_column_name_if_inner(right, inner_table_name, inner_col_names)
-        {
-            if let Some(outer_name) =
+            && let Some(outer_name) =
                 self.extract_column_name_if_outer(left, inner_table_name, inner_col_names)
             {
                 return Ok((inner_name, outer_name));
             }
-        }
 
         Err(
             "Could not resolve inner/outer columns in correlated subquery predicate"
@@ -749,9 +743,9 @@ impl PhysicalPlanner {
     }
 
     /// If `expr` references an inner table column, return the column name.
-    fn extract_column_name_if_inner<'a>(
+    fn extract_column_name_if_inner(
         &self,
-        expr: &'a rook_ast::ExprNode,
+        expr: &rook_ast::ExprNode,
         inner_table_name: &str,
         inner_col_names: &[String],
     ) -> Option<String> {
@@ -779,9 +773,9 @@ impl PhysicalPlanner {
 
     /// If `expr` references an outer table column, return the column name
     /// (the last component of a Compound, or the Column name itself).
-    fn extract_column_name_if_outer<'a>(
+    fn extract_column_name_if_outer(
         &self,
-        expr: &'a rook_ast::ExprNode,
+        expr: &rook_ast::ExprNode,
         inner_table_name: &str,
         inner_col_names: &[String],
     ) -> Option<String> {

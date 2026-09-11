@@ -1,8 +1,8 @@
-/// Instrumentation module for counting FSM and Heap operations
-/// 
-/// This module provides atomic counters that track function calls
-/// without impacting performance. Enable verbose output via env_logger
-/// or use `get_stats()` for programmatic access.
+//! Instrumentation module for counting FSM and Heap operations
+//! 
+//! This module provides atomic counters that track function calls
+//! without impacting performance. Enable verbose output via env_logger
+//! or use `get_stats()` for programmatic access.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

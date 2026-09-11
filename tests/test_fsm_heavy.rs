@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 mod common;
 use storage_manager::backend::fsm::fsm::FSM;
@@ -31,7 +31,7 @@ fn setup_db_dir(test_id: &str) -> (PathBuf, TestCleanup) {
 }
 
 // Helper to create path
-fn get_test_path(db_path: &PathBuf, table_name: &str) -> PathBuf {
+fn get_test_path(db_path: &Path, table_name: &str) -> PathBuf {
     db_path.join(format!("{}.dat", table_name))
 }
 
@@ -70,6 +70,7 @@ fn test_large_insertions() {
 }
 
 /// 2. Updation and Deletion & 4. Deallocation Integrity
+///
 /// Demonstrates that deleting large tuples doesn't immediately reclaim space
 /// (VACUUM garbage collection would be needed for that), but slot entries are marked invalid.
 #[test]
@@ -107,6 +108,7 @@ fn test_update_delete_fsm_deallocation() {
 }
 
 /// 3. Allocation Accuracy
+///
 /// Verify that when space is requested, FSM marks it as used, never handing it blindly again without updates.
 #[test]
 fn test_allocation_accuracy() {
@@ -143,7 +145,7 @@ fn test_fragmentation_management() {
         let mut hm = HeapManager::create(file_path.clone()).expect("Failed to create HM");
         for _ in 0..10 {
             // Insert tiny chunks 
-            hm.insert_tuple(&vec![0xDD; 50]).unwrap();
+            hm.insert_tuple(&[0xDD; 50]).unwrap();
         }
         hm.flush().unwrap();
     }
@@ -186,6 +188,7 @@ fn test_persistence_fsm_recovery() {
 }
 
 /// 7. Boundary Violations
+///
 /// App writes past the chunk logically -> FSM/HM rejects tuples > PAGESIZE
 #[test]
 fn test_boundary_violations() {
@@ -263,14 +266,14 @@ fn test_fsm_bubble_up_recalculation() {
     fsm.fsm_set_avail(0, 500, None).unwrap(); // Page 0
     fsm.fsm_set_avail(1, 1000, None).unwrap(); // Page 1
     
-    let cat_1000 = (1000 / 32).max(0).min(255) as u8;
+    let cat_1000 = (1000 / 32) as u8;
     let root_val_1 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
     assert_eq!(root_val_1, cat_1000, "Root should reflect the highest free space");
 
     // Reduce Page 1's space below Page 0's space
     fsm.fsm_set_avail(1, 200, None).unwrap();
     
-    let cat_500 = (500 / 32).max(0).min(255) as u8;
+    let cat_500 = (500 / 32) as u8;
     let root_val_2 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
     
     assert_eq!(
@@ -296,7 +299,7 @@ fn test_fsm_initial_state_routing() {
         fsm.fsm_set_avail(p, 8000, None).unwrap();
     }
     
-    let cat_3000 = (3000 / 32).max(0).min(255) as u8;
+    let cat_3000 = (3000 / 32) as u8;
     let target_page = fsm.fsm_search_avail(cat_3000).unwrap().map(|(id, _)| id);
     
     assert_eq!(
@@ -330,14 +333,14 @@ fn test_fsm_needle_in_haystack() {
     let target_page_id = 3142;
     fsm.fsm_set_avail(target_page_id, 4000, None).unwrap(); 
 
-    let cat_4000 = (4000 / 32).max(0).min(255) as u8;
+    let cat_4000 = (4000 / 32) as u8;
     let root_val_2 = fsm.read_fsm_page(0, 0, 0).unwrap().root_value();
     
     // The root should instantly know 4000 bytes opened up
     assert_eq!(root_val_2, cat_4000, "Root did not bubble up the newly freed space");
 
     // Search for space
-    let cat_3500 = (3500 / 32).max(0).min(255) as u8;
+    let cat_3500 = (3500 / 32) as u8;
     let found_page = fsm.fsm_search_avail(cat_3500).unwrap().map(|(id, _)| id);
     
     assert_eq!(
@@ -362,7 +365,7 @@ fn test_fsm_exact_fit_left_bias() {
     fsm.fsm_set_avail(2, 2000, None).unwrap();
     fsm.fsm_set_avail(3, 2000, None).unwrap();
     
-    let cat_1500 = (1500 / 32).max(0).min(255) as u8;
+    let cat_1500 = (1500 / 32) as u8;
     let found_page = fsm.fsm_search_avail(cat_1500).unwrap().map(|(id, _)| id);
     
     assert_eq!(

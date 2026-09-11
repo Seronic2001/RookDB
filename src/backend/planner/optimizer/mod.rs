@@ -552,18 +552,18 @@ impl Optimizer {
                 let agg_cols: HashSet<String> = a
                     .aggregates
                     .iter()
-                    .flat_map(|ag| ag.args.iter().flat_map(|e| extract_expr_columns(e)))
+                    .flat_map(|ag| ag.args.iter().flat_map(extract_expr_columns))
                     .chain(
                         a.having
                             .as_ref()
-                            .map(|h| columns_in_predicate(h))
+                            .map(columns_in_predicate)
                             .unwrap_or_default(),
                     )
                     .collect();
                 let gb_cols: HashSet<String> = a
                     .group_by
                     .iter()
-                    .flat_map(|e| extract_expr_columns(e))
+                    .flat_map(extract_expr_columns)
                     .collect();
                 let child_needed: HashSet<String> = agg_cols
                     .into_iter()
@@ -582,7 +582,7 @@ impl Optimizer {
                 let cond_cols = j
                     .condition
                     .as_ref()
-                    .map(|c| columns_in_predicate(c))
+                    .map(columns_in_predicate)
                     .unwrap_or_default();
                 let all_needed: HashSet<String> = cond_cols
                     .into_iter()
@@ -833,9 +833,6 @@ impl Optimizer {
         }
     }
 
-    // ─── Pass 5: Limit Pushdown ───────────────────────────────────────────
-
-    /// Push `LogicalLimit` through `LogicalSort` so the sort can use a bounded heap.
     // ─── Pass: Sort hoisting ─────────────────────────────────────────────
 
     /// Rewrite `Sort(Project(X))` into `Project(Sort(X))` when every ORDER BY
@@ -1089,9 +1086,9 @@ fn widen_sort_hint(plan: LogicalPlan, needed: u64) -> LogicalPlan {
             expressions: p.expressions,
             child: Box::new(widen_sort_hint(*p.child, needed)),
         }),
-        LogicalPlan::Distinct(d) => LogicalPlan::Distinct(LogicalDistinct {
-            child: Box::new(widen_sort_hint(*d.child, needed)),
-        }),
+        // Do NOT push through Distinct: duplicate elimination reduces cardinality,
+        // so pushing a top-k limit below Distinct prematurely drops distinct keys.
+        LogicalPlan::Distinct(d) => LogicalPlan::Distinct(d),
         other => other,
     }
 }

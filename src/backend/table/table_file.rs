@@ -15,6 +15,12 @@ pub struct Table {
     pub data: Vec<u8>,
 }
 
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Table {
     // Create an empty page buffer
     pub fn new() -> Self {

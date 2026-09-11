@@ -1,7 +1,6 @@
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom};
-use std::path::PathBuf;
 
 use storage_manager::heap::heap_manager::HeapManager;
 use storage_manager::table::page_count;
@@ -9,7 +8,7 @@ use storage_manager::table::page_count;
 #[test]
 fn test_page_count() {
     // Create a temporary file with read + write access
-    let mut temp_path = PathBuf::from(env::temp_dir());
+    let mut temp_path = env::temp_dir();
     temp_path.push("test_table_page_count.tbl");
 
     // Initialize table (writes 8192 bytes with page_count = 0)

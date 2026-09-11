@@ -79,10 +79,7 @@ impl SubqueryExecOperator {
                 }
             }
             SubqueryType::Exists => {
-                let exists = match self.child.next()? {
-                    Some(_) => true,
-                    None => false,
-                };
+                let exists = self.child.next()?.is_some();
 
                 let bool_val = DataValue::Bool(exists);
                 self.result = Some(Tuple::new(

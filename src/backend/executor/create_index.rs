@@ -16,7 +16,7 @@
 //! The `update_index_on_*` functions query `sys_indexes` to discover all
 //! indexes defined on a table and maintain each one individually.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -434,26 +434,27 @@ fn discover_indexes_for_table(
     let legacy_meta = legacy_index_meta_file_path(db_name, table_name);
     if legacy_idx.exists() && legacy_meta.exists() {
         // Only add if not already covered by a named index (avoid duplicates)
-        if !discovered.iter().any(|(_, p, _)| *p == legacy_idx) {
-            if let Ok(meta) = load_index_meta(&legacy_meta) {
+        if !discovered.iter().any(|(_, p, _)| *p == legacy_idx)
+            && let Ok(meta) = load_index_meta(&legacy_meta) {
                 log::info!(
                     "[IndexDiscover] Found legacy index for {}.{} at {:?}",
                     db_name, table_name, legacy_idx
                 );
                 discovered.push((legacy_meta, legacy_idx, meta));
             }
-        }
     }
 
     discovered
 }
 
+type IndexList = std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>>;
+type DiscoveryCacheMap = std::sync::Mutex<std::collections::HashMap<(String, String), IndexList>>;
+
 /// Memoised [`discover_indexes_for_table`] — one sys_indexes scan per
 /// `(db, table)` instead of one per row. Invalidated on CREATE INDEX and
 /// wherever system tables are rewritten (DDL).
-fn discovery_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>>>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String), std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>>>>> =
-        std::sync::OnceLock::new();
+fn discovery_cache() -> &'static DiscoveryCacheMap {
+    static CACHE: std::sync::OnceLock<DiscoveryCacheMap> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -462,11 +463,10 @@ fn discover_cached(
     table_name: &str,
 ) -> std::sync::Arc<Vec<(PathBuf, PathBuf, IndexMeta)>> {
     let key = (db_name.to_string(), table_name.to_string());
-    if let Ok(map) = discovery_cache().lock() {
-        if let Some(hit) = map.get(&key) {
+    if let Ok(map) = discovery_cache().lock()
+        && let Some(hit) = map.get(&key) {
             return std::sync::Arc::clone(hit);
         }
-    }
 
     let discovered = std::sync::Arc::new(discover_indexes_for_table(db_name, table_name));
     if let Ok(mut map) = discovery_cache().lock() {
@@ -590,8 +590,8 @@ fn build_key_from_decoded(
 }
 
 /// Open the B+Tree for `meta`, configuring its key types (composite-aware).
-fn open_btree_for_meta(idx_path: &PathBuf, meta: &IndexMeta) -> Option<BTree> {
-    let mut btree = BTree::open(idx_path.clone()).ok()?;
+fn open_btree_for_meta(idx_path: &Path, meta: &IndexMeta) -> Option<BTree> {
+    let mut btree = BTree::open(idx_path.to_path_buf()).ok()?;
     let cols = meta.columns();
     let types: Vec<DataType> = meta
         .types()
@@ -691,6 +691,7 @@ pub fn update_index_on_delete(
 /// then for each index:
 ///   - Deletes the old key matching `(old_page_id, old_slot_id)`
 ///   - Inserts the new key at `(new_page_id, new_slot_id)`
+#[allow(clippy::too_many_arguments)]
 pub fn update_index_on_update(
     db_name: &str,
     table_name: &str,
@@ -829,7 +830,7 @@ pub fn parse_string_to_value(ty: &DataType, input: &str) -> Result<DataValue, St
             Ok(DataValue::Bit(bits))
         }
         DataType::Numeric { .. } | DataType::Decimal { .. } => {
-            Err(format!("Index maintenance for NUMERIC/DECIMAL types not yet supported"))
+            Err("Index maintenance for NUMERIC/DECIMAL types not yet supported".to_string())
         }
     }
 }

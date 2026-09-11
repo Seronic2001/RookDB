@@ -17,8 +17,8 @@ pub fn init_catalog() {
     ));
 
     // Create directory if not exist
-    if let Some(parent) = catalog_path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = catalog_path.parent()
+        && !parent.exists() {
             match fs::create_dir_all(parent) {
                 Ok(_) => {
                     debug_print_catalog(&format!(
@@ -33,7 +33,6 @@ pub fn init_catalog() {
                 }
             }
         }
-    }
 
     // Ensure base database directory exists
     let base_dir = Path::new(DATABASE_DIR);
@@ -54,11 +53,10 @@ pub fn init_catalog() {
 
     // Create system directory if not exist
     let system_dir = Path::new(SYSTEM_DIR);
-    if !system_dir.exists() {
-        if let Err(e) = fs::create_dir_all(system_dir) {
+    if !system_dir.exists()
+        && let Err(e) = fs::create_dir_all(system_dir) {
             log::error!("Failed to create system directory: {}", e);
         }
-    }
 
     // Bootstrap: migrate catalog.json → system tables if needed
     let migrated = crate::backend::system_table::bootstrap_system_catalog();

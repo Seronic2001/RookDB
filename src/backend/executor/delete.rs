@@ -267,12 +267,12 @@ pub fn delete_by_pointers(
     let path = format!("database/base/{}/{}.dat", db_name, table_name);
     // DELETE rewrites pages via direct I/O — flush cached state first.
     crate::backend::cache::quiesce_for_direct_io(std::path::Path::new(&path))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to flush cache: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to flush cache: {}", e)))?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to open table file: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to open table file: {}", e)))?;
     let file_identity = crate::table::file_identity_from_file(&file)?;
 
     let mut deleted_count = 0usize;

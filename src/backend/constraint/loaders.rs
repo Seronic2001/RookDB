@@ -14,6 +14,10 @@ use std::path::PathBuf;
 
 
 
+/// A referencing foreign key record:
+/// `(child_table_name, child_column, parent_column, parent_table_name, action_type)`.
+pub type ReferencingFk = (String, String, String, String, String);
+
 /// Load FOREIGN KEY constraints where `our_table` is the **parent** (referenced table).
 ///
 /// Scans ALL constraints in the database to find constraints where
@@ -24,7 +28,7 @@ use std::path::PathBuf;
 pub fn load_referencing_foreign_keys(
     db_name: &str,
     our_table_name: &str,
-) -> Result<Vec<(String, String, String, String, String)>, String> {
+) -> Result<Vec<ReferencingFk>, String> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_TABLES_SCHEMA};
 
     let constr_path = PathBuf::from(format!("{}/constraints.dat", crate::layout::SYSTEM_DIR));
@@ -41,13 +45,13 @@ pub fn load_referencing_foreign_keys(
     // Load sys_tables for the db to create a table_id → table_name mapping
     let tbl_path = PathBuf::from(format!("{}/tables.dat", crate::layout::SYSTEM_DIR));
     let mut tbl_id_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
-    if tbl_path.exists() {
-        if let Ok(heap) = HeapManager::open(tbl_path) {
+    if tbl_path.exists()
+        && let Ok(heap) = HeapManager::open(tbl_path) {
             for result in heap.scan() {
-                if let Ok((_, _, raw_bytes)) = result {
-                    if let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes) {
-                        if decoded.len() >= 3 {
-                            if let Some(Some(DataValue::Int(tid))) = decoded.get(0) {
+                if let Ok((_, _, raw_bytes)) = result
+                    && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
+                        && decoded.len() >= 3
+                            && let Some(Some(DataValue::Int(tid))) = decoded.first() {
                                 let name_opt = match decoded.get(2) {
                                     Some(Some(DataValue::Varchar(name))) => Some(name.clone()),
                                     Some(Some(DataValue::Char(name))) => Some(name.clone()),
@@ -57,12 +61,8 @@ pub fn load_referencing_foreign_keys(
                                     tbl_id_to_name.insert(*tid, name);
                                 }
                             }
-                        }
-                    }
-                }
             }
         }
-    }
 
     let heap = HeapManager::open(constr_path)
         .map_err(|e| format!("Failed to open sys_constraints: {}", e))?;

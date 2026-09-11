@@ -219,6 +219,7 @@ impl BufferPool {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
 
         // Read header page to get page count
@@ -428,11 +429,10 @@ impl BufferPool {
 
     /// Flush a specific page to disk if it is dirty.
     pub fn flush_page(&mut self, page_id: u32) -> io::Result<()> {
-        if let Some(&frame_idx) = self.frame_table.get(&page_id) {
-            if self.frames[frame_idx].is_dirty {
+        if let Some(&frame_idx) = self.frame_table.get(&page_id)
+            && self.frames[frame_idx].is_dirty {
                 self.write_page_to_disk(frame_idx)?;
             }
-        }
         Ok(())
     }
 
@@ -454,12 +454,11 @@ impl BufferPool {
                 wrote_any = true;
             }
         }
-        if wrote_any {
-            if let Some(ref mut file) = self.file {
+        if wrote_any
+            && let Some(ref mut file) = self.file {
                 file.flush()?;
                 file.sync_all()?;
             }
-        }
         Ok(())
     }
 
@@ -860,7 +859,7 @@ mod tests {
         // Re-open the file and verify the data persisted
         let mut file = File::open(&path).expect("open file");
         let mut page = Page::new();
-        file.seek(SeekFrom::Start(1 * PAGE_SIZE as u64)).expect("seek");
+        file.seek(SeekFrom::Start(PAGE_SIZE as u64)).expect("seek");
         file.read_exact(&mut page.data).expect("read");
         let value = u32::from_le_bytes(page.data[check_offset..check_offset + 4].try_into().unwrap());
         assert_eq!(value, data_at_index, "dirty page should have been flushed on drop");

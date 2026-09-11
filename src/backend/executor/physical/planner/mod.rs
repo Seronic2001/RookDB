@@ -77,8 +77,8 @@ impl PhysicalPlanner {
                 // Check if the filter's child is a TableScan that can use an
                 // index-accelerated scan (PointLookup or RangeLookup) instead
                 // of a SeqScan + FilterOperator.
-                if let LogicalPlan::TableScan(ref ts) = *f.child {
-                    if let Some(scan_op) = self.try_plan_index_scan_with_predicate(ts, &f.predicate)? {
+                if let LogicalPlan::TableScan(ref ts) = *f.child
+                    && let Some(scan_op) = self.try_plan_index_scan_with_predicate(ts, &f.predicate)? {
                         log::info!(
                             "[Volcano] Using index-accelerated scan for table '{}' (full predicate preserved on top)",
                             ts.table
@@ -91,7 +91,6 @@ impl PhysicalPlanner {
                         let predicate = self.make_predicate(&f.predicate, scan_op.schema())?;
                         return Ok(Box::new(FilterOperator::new(scan_op, predicate)));
                     }
-                }
 
                 // Fall through: create a SeqScan + FilterOperator
                 let child = self.plan_internal(&f.child, cte_registry)?;
@@ -1124,6 +1123,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_ast_constant_float_to_data_value() {
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Float(3.14));
         match dv {

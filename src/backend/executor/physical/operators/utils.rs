@@ -2,6 +2,7 @@ use crate::types::value::DataValue;
 
 /// Normalise a DataValue into a string that can be used as a hash key.
 /// Uses a simple `type_prefix|value` format that avoids ambiguity.
+#[allow(dead_code)]
 pub fn normalise_value_for_key(val: &DataValue) -> String {
     match val {
         DataValue::SmallInt(v) => format!("I16:{}", v),

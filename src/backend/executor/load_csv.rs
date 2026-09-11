@@ -16,8 +16,7 @@ use crate::types::row::serialize_nullable_row;
 /// 3. Performs row-by-row validation and type checking
 /// 4. Uses HeapManager for FSM-aware insertion
 ///
-/// Returns count of successfully inserted rows on success.use crate::types::DataValue;
-
+/// Returns count of successfully inserted rows on success.
 pub fn load_csv(
     catalog: &Catalog,
     db_name: &str,
@@ -216,7 +215,7 @@ pub fn load_csv(
                 }
 
                 inserted += 1;
-                if inserted % 100 == 0 {
+                if inserted.is_multiple_of(100) {
                     log::info!("Inserted {} rows so far...", inserted);
                 }
             }

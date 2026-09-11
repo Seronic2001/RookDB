@@ -163,11 +163,10 @@ impl PhysicalOperator for SortOperator {
     }
 
     fn reset(&mut self) -> Result<(), String> {
-        if self.use_external {
-            if let Some(ref mut ext) = self.external {
+        if self.use_external
+            && let Some(ref mut ext) = self.external {
                 return ext.reset();
             }
-        }
         self.child.reset()?;
         self.loaded = false;
         self.buffer.clear();

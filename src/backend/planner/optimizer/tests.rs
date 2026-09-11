@@ -907,3 +907,40 @@ fn test_multiple_optimization_passes() {
     assert_eq!(labels_once, labels_twice, "Optimizer should be idempotent");
 }
 
+#[test]
+fn test_distinct_prevents_limit_pushdown_to_sort() {
+    let table_scan = make_table_scan("items", &["id", "category"]);
+    let plan = LogicalPlan::Limit(LogicalLimit {
+        limit: 5,
+        offset: 2,
+        child: Box::new(LogicalPlan::Distinct(LogicalDistinct {
+            child: Box::new(LogicalPlan::Sort(LogicalSort {
+                order_by: vec![OrderByExpr { expr: column("category"), ascending: true }],
+                child: Box::new(table_scan),
+                limit: None,
+            })),
+        })),
+    });
+    let optimizer = Optimizer::new();
+    let optimized = optimizer.optimize(plan);
+
+    // Verify the sort beneath Distinct did NOT have a limit pushed into it
+    match optimized {
+        LogicalPlan::Limit(l) => {
+            assert_eq!(l.limit, 5);
+            assert_eq!(l.offset, 2);
+            match *l.child {
+                LogicalPlan::Distinct(d) => match *d.child {
+                    LogicalPlan::Sort(s) => {
+                        assert_eq!(s.limit, None, "Sort under Distinct must NOT have top-k limit injected");
+                    }
+                    other => panic!("expected Sort under Distinct, got {:?}", other),
+                },
+                other => panic!("expected Distinct under Limit, got {:?}", other),
+            }
+        }
+        other => panic!("expected Limit at top, got {:?}", other),
+    }
+}
+
+

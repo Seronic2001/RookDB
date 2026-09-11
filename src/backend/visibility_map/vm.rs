@@ -13,8 +13,8 @@
 //! * The VM lives in `database/base/<db>/<table>_vm` (one file per table).
 //! * Each byte covers 8 heap pages; bit `i % 8` of byte `i / 8` is page `i`.
 //!   Bit value:
-//!     1 → all-visible (page has zero dead tuples; vacuum can skip it)
-//!     0 → dirty       (page may have dead tuples; vacuum must visit it)
+//!   * 1 → all-visible (page has zero dead tuples; vacuum can skip it)
+//!   * 0 → dirty       (page may have dead tuples; vacuum must visit it)
 //! * Page 0 (header page) is always treated as non-visible by convention.
 //!
 //! # Integration points
@@ -108,13 +108,13 @@ fn read_vm_byte(path: &PathBuf, byte_idx: u64) -> io::Result<u8> {
 }
 
 /// Write a single byte at `byte_idx`, extending the file if necessary.
-fn write_vm_byte(path: &PathBuf, byte_idx: u64, value: u8) -> io::Result<()> {
+fn write_vm_byte(path: &std::path::Path, byte_idx: u64, value: u8) -> io::Result<()> {
     // Ensure parent directory exists.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut file = OpenOptions::new()
-        .read(true).write(true).create(true).open(path)?;
+        .read(true).write(true).create(true).truncate(false).open(path)?;
 
     let len = file.seek(SeekFrom::End(0))?;
     if byte_idx >= len {

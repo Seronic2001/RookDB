@@ -37,7 +37,7 @@ pub fn create_table_cmd(
     let table_name = table_name.trim().to_string();
 
     print!("\nEnter columns in the format:- column_name:data_type\n");
-    print!("Press Enter on an empty line to finish\n");
+    println!("Press Enter on an empty line to finish");
 
     let mut columns = Vec::new();
     loop {

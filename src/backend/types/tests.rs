@@ -357,6 +357,7 @@ fn compare_numeric_exact_values() {
 }
 
 #[test]
+#[allow(clippy::approx_constant)]
 fn roundtrip_real() {
     let encoded = DataValue::parse_and_encode(&DataType::Real, "3.14").unwrap();
     assert_eq!(encoded.len(), 4);
@@ -773,6 +774,7 @@ fn fn_ltrim_rtrim() {
 // ── Built-in functions ─────────────────────────────────────────────────────────
 
 #[test]
+#[allow(clippy::approx_constant)]
 fn fn_abs_round_floor_ceiling() {
     assert_eq!(abs(&DataValue::Int(-7)).unwrap(), DataValue::Int(7));
     let r = round(&DataValue::DoublePrecision(OrderedF64(3.14159)), 2).unwrap();

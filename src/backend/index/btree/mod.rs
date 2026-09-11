@@ -694,7 +694,7 @@ impl BTree {
     /// Convert the first key segment from on-disk encoded bytes to a DataValue.
     #[allow(dead_code)]
     fn key_from_encoded(&self, encoded: &[u8]) -> DataValue {
-        let (key, _) = decode_key(encoded, &self.key_types[0]).unwrap_or_else(|_| {
+        let (key, _) = decode_key(encoded, &self.key_types[0]).unwrap_or({
             (DataValue::Int(0), 0)
         });
         key
@@ -935,17 +935,13 @@ impl BTree {
         self.write_node(new_leaf_id, &right_node)?;
 
         // If there was a next leaf, update its prev_leaf to point to the new sibling
-        if old_next_leaf != 0 && old_next_leaf < self.total_pages {
-            if let Ok(mut next_node) = self.read_node(old_next_leaf) {
-                match &mut next_node {
-                    BTreeNode::Leaf { prev_leaf, .. } => {
-                        *prev_leaf = new_leaf_id;
-                    }
-                    _ => {}
+        if old_next_leaf != 0 && old_next_leaf < self.total_pages
+            && let Ok(mut next_node) = self.read_node(old_next_leaf) {
+                if let BTreeNode::Leaf { prev_leaf, .. } = &mut next_node {
+                    *prev_leaf = new_leaf_id;
                 }
                 self.write_node(old_next_leaf, &next_node)?;
             }
-        }
 
         Ok((promoted_key, new_leaf_id))
     }

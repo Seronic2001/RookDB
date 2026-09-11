@@ -1,13 +1,13 @@
-/// HeaderMetadata: Serializable metadata stored on Page 0 of a heap file.
-/// 
-/// This struct represents the heap file's metadata, occupying exactly 24 bytes:
-/// - Offset 0-4: page_count (u32) - Total heap pages in file
-/// - Offset 4-8: fsm_page_count (u32) - Total pages in FSM fork file
-/// - Offset 8-16: total_tuples (u64) - Total tuples inserted (survives crashes)
-/// - Offset 16-20: last_vacuum (u32) - Timestamp of last vacuum
-/// /// - Offset 20..24 : dead_tuple_count (u32)
-///
-/// These fields enable O(1) COUNT(*) queries and FSM fork reconstruction.
+//! HeaderMetadata: Serializable metadata stored on Page 0 of a heap file.
+//! 
+//! This struct represents the heap file's metadata, occupying exactly 24 bytes:
+//! - Offset 0-4: page_count (u32) - Total heap pages in file
+//! - Offset 4-8: fsm_page_count (u32) - Total pages in FSM fork file
+//! - Offset 8-16: total_tuples (u64) - Total tuples inserted (survives crashes)
+//! - Offset 16-20: last_vacuum (u32) - Timestamp of last vacuum
+//! - Offset 20..24: dead_tuple_count (u32)
+//!
+//! These fields enable O(1) COUNT(*) queries and FSM fork reconstruction.
 
 use std::io::{self, Read, Write, Cursor};
 
@@ -18,6 +18,12 @@ pub struct HeaderMetadata {
     pub total_tuples: u64,    // Total tuples inserted
     pub last_vacuum: u32,     // Last vacuum timestamp (unix seconds)
     pub dead_tuple_count: u32, // Number of soft-deleted (dead) tuples not yet physically removed
+}
+
+impl Default for HeaderMetadata {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HeaderMetadata {

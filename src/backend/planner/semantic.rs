@@ -96,15 +96,14 @@ fn resolve_expr_columns(
         }
         ExprNode::Compound(parts) => {
             // For `table.column`, extract the column part (last element)
-            if let Some(col_name) = parts.last() {
-                if !schema.contains(col_name) {
+            if let Some(col_name) = parts.last()
+                && !schema.contains(col_name) {
                     errors.push(format!(
                         "Column '{}' not found (resolved from '{}')",
                         col_name,
                         parts.join(".")
                     ));
                 }
-            }
         }
         ExprNode::Constant(_) => {} // constants always valid
         ExprNode::Binary { left, right, .. } => {

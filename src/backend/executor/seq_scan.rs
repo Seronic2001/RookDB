@@ -100,7 +100,7 @@ pub fn show_tuples(
             ));
         }
 
-        if (lower - PAGE_HEADER_SIZE) % ITEM_ID_SIZE != 0 {
+        if !(lower - PAGE_HEADER_SIZE).is_multiple_of(ITEM_ID_SIZE) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(

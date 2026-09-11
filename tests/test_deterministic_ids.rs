@@ -38,9 +38,9 @@ fn read_id_pairs(
     let heap = storage_manager::heap::HeapManager::open(path).expect("open system table");
     let mut pairs = Vec::new();
     for result in heap.scan() {
-        if let Ok((_, _, raw)) = result {
-            if let Ok(row) = deserialize_nullable_row(schema, &raw) {
-                let id = match row.get(0) {
+        if let Ok((_, _, raw)) = result
+            && let Ok(row) = deserialize_nullable_row(schema, &raw) {
+                let id = match row.first() {
                     Some(Some(DataValue::Int(id))) => *id,
                     _ => continue,
                 };
@@ -51,7 +51,6 @@ fn read_id_pairs(
                 };
                 pairs.push((name, id));
             }
-        }
     }
     pairs
 }

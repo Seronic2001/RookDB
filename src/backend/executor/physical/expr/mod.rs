@@ -123,11 +123,11 @@ impl Expr {
                 let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(
                     lv, rv,
-                    |a, b| if b == 0 { return Err("Division by zero".into()); } else { Ok(a / b) },
-                    |a, b| if b == 0 { return Err("Division by zero".into()); } else { Ok(a / b) },
-                    |a, b| if b == 0 { return Err("Division by zero".into()); } else { Ok(a / b) },
-                    |a, b| if b == 0.0 { return Err("Division by zero".into()); } else { Ok(a / b) },
-                    |a, b| if b == 0.0 { return Err("Division by zero".into()); } else { Ok(a / b) },
+                    |a, b| if b == 0 { Err("Division by zero".into())} else { Ok(a / b) },
+                    |a, b| if b == 0 { Err("Division by zero".into())} else { Ok(a / b) },
+                    |a, b| if b == 0 { Err("Division by zero".into())} else { Ok(a / b) },
+                    |a, b| if b == 0.0 { Err("Division by zero".into())} else { Ok(a / b) },
+                    |a, b| if b == 0.0 { Err("Division by zero".into())} else { Ok(a / b) },
                 )
             }
             Expr::Cast(inner, target_type) => {
@@ -332,10 +332,8 @@ fn evaluate_scalar_function(
 
         "CONCAT" => {
             let mut res = String::new();
-            for val in evaluated {
-                if let Some(dv) = val {
-                    res.push_str(&value_to_raw_string(&dv));
-                }
+            for dv in evaluated.into_iter().flatten() {
+                res.push_str(&value_to_raw_string(&dv));
             }
             Ok(Some(DataValue::Varchar(res)))
         }
@@ -447,7 +445,7 @@ fn evaluate_scalar_function(
             let val = iter.next().flatten()
                 .ok_or_else(|| "ROUND requires a non-NULL numeric argument".to_string())?;
             let places = match iter.next().flatten() {
-                Some(DataValue::Int(p)) => p as i32,
+                Some(DataValue::Int(p)) => p,
                 Some(DataValue::BigInt(p)) => p as i32,
                 None => 0,
                 _ => return Err("ROUND requires integer places".to_string()),

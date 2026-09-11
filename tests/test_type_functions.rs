@@ -18,6 +18,7 @@ fn string_functions_work() {
 }
 
 #[test]
+#[allow(clippy::approx_constant)]
 fn numeric_functions_work_for_real_double_and_numeric() {
     assert_eq!(
         abs(&DataValue::Real(OrderedF32(-3.5))).unwrap(),

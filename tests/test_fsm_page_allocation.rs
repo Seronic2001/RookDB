@@ -1,6 +1,6 @@
-/// Test to verify FSM tree search correctly allocates tuples across pages
-/// Based on user issue: tuples were being forced to sequential pages (1, 2, 3...)
-/// instead of being distributed across pages with available free space
+//! Test to verify FSM tree search correctly allocates tuples across pages
+//! Based on user issue: tuples were being forced to sequential pages (1, 2, 3...)
+//! instead of being distributed across pages with available free space
 
 mod common;
 

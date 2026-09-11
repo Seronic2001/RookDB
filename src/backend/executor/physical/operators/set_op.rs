@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use super::super::tuple::{Tuple, ColumnInfo};
+use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
-use super::utils::normalise_value_for_key;
+use crate::types::value::DataValue;
 
 
 // ── SetOp Type ────────────────────────────────────────────────────────────────
@@ -60,14 +60,6 @@ impl SetOpOperator {
         }
     }
 
-    /// Serialise a tuple to a string key for hashing/comparison.
-    fn tuple_key(tuple: &Tuple) -> String {
-        tuple.values.iter().map(|v| match v {
-            Some(dv) => normalise_value_for_key(dv),
-            None => "\x00N\x00".to_string(),
-        }).collect::<Vec<_>>().join("|")
-    }
-
     /// Materialise both children and compute the set operation result.
     fn materialise(&mut self) -> Result<(), String> {
         self.left_tuples.clear();
@@ -82,44 +74,42 @@ impl SetOpOperator {
         match (self.op_type, self.all) {
             (SetOpType::Union, true) => {
                 self.output_buffer = self.left_tuples.drain(..).collect();
-                self.output_buffer.extend(self.right_tuples.drain(..));
+                self.output_buffer.append(&mut self.right_tuples);
             }
 
             (SetOpType::Union, false) => {
                 let mut seen = HashSet::new();
                 for tuple in self.left_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
-                    if seen.insert(key) {
+                    if seen.insert(tuple.values.clone()) {
                         self.output_buffer.push(tuple);
                     }
                 }
                 for tuple in self.right_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
-                    if seen.insert(key) {
+                    if seen.insert(tuple.values.clone()) {
                         self.output_buffer.push(tuple);
                     }
                 }
             }
 
             (SetOpType::Intersect, true) => {
-                let mut left_counts: HashMap<String, (usize, Tuple)> = HashMap::new();
-                let mut order: Vec<String> = Vec::new();
+                let mut left_counts: HashMap<Vec<Option<DataValue>>, (usize, Tuple)> = HashMap::new();
+                let mut order: Vec<Vec<Option<DataValue>>> = Vec::new();
                 for tuple in self.left_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
+                    let key = tuple.values.clone();
                     let entry = left_counts.entry(key.clone()).or_insert((0, tuple));
                     entry.0 += 1;
-                    if entry.0 == 1 { order.push(key); }
+                    if entry.0 == 1 {
+                        order.push(key);
+                    }
                 }
 
-                let mut results: HashMap<String, Vec<Tuple>> = HashMap::new();
+                let mut results: HashMap<Vec<Option<DataValue>>, Vec<Tuple>> = HashMap::new();
                 for tuple in self.right_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
-                    if let Some((count, _)) = left_counts.get_mut(&key) {
-                        if *count > 0 {
+                    if let Some((count, _)) = left_counts.get_mut(&tuple.values)
+                        && *count > 0 {
                             *count -= 1;
-                            results.entry(key.clone()).or_insert_with(Vec::new).push(tuple);
+                            results.entry(tuple.values.clone()).or_default().push(tuple);
                         }
-                    }
                 }
 
                 for key in order {
@@ -130,33 +120,34 @@ impl SetOpOperator {
             }
 
             (SetOpType::Intersect, false) => {
-                let left_set: HashSet<String> =
-                    self.left_tuples.iter().map(Self::tuple_key).collect();
+                let left_set: HashSet<Vec<Option<DataValue>>> =
+                    self.left_tuples.iter().map(|t| t.values.clone()).collect();
                 let mut seen = HashSet::new();
                 for tuple in self.right_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
-                    if left_set.contains(&key) && seen.insert(key) {
+                    if left_set.contains(&tuple.values) && seen.insert(tuple.values.clone()) {
                         self.output_buffer.push(tuple);
                     }
                 }
             }
 
             (SetOpType::Except, true) => {
-                let mut left_counts: HashMap<String, (usize, Vec<Tuple>)> = HashMap::new();
-                let mut order: Vec<String> = Vec::new();
+                let mut left_counts: HashMap<Vec<Option<DataValue>>, (usize, Vec<Tuple>)> = HashMap::new();
+                let mut order: Vec<Vec<Option<DataValue>>> = Vec::new();
                 for tuple in self.left_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
+                    let key = tuple.values.clone();
                     let entry = left_counts.entry(key.clone()).or_insert((0, Vec::new()));
                     entry.0 += 1;
                     entry.1.push(tuple);
-                    if entry.0 == 1 { order.push(key); }
+                    if entry.0 == 1 {
+                        order.push(key);
+                    }
                 }
 
                 for tuple in self.right_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
-                    if let Some((count, _)) = left_counts.get_mut(&key) {
-                        if *count > 0 { *count -= 1; }
-                    }
+                    if let Some((count, _)) = left_counts.get_mut(&tuple.values)
+                        && *count > 0 {
+                            *count -= 1;
+                        }
                 }
 
                 for key in order {
@@ -169,12 +160,11 @@ impl SetOpOperator {
             }
 
             (SetOpType::Except, false) => {
-                let right_set: HashSet<String> =
-                    self.right_tuples.iter().map(Self::tuple_key).collect();
+                let right_set: HashSet<Vec<Option<DataValue>>> =
+                    self.right_tuples.iter().map(|t| t.values.clone()).collect();
                 let mut seen = HashSet::new();
                 for tuple in self.left_tuples.drain(..) {
-                    let key = Self::tuple_key(&tuple);
-                    if !right_set.contains(&key) && seen.insert(key) {
+                    if !right_set.contains(&tuple.values) && seen.insert(tuple.values.clone()) {
                         self.output_buffer.push(tuple);
                     }
                 }

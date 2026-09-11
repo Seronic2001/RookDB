@@ -137,7 +137,7 @@ impl RowLayout {
             let ty = &physical.physical_types[physical.logical_to_physical[log_idx]];
             let align = ty.alignment() as usize;
             // Pad cursor to alignment boundary
-            if align > 1 && cursor % align != 0 {
+            if align > 1 && !cursor.is_multiple_of(align) {
                 cursor += align - (cursor % align);
             }
             fixed_col_offsets.push(cursor);

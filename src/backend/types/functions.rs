@@ -455,7 +455,7 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
                 }),
             };
             if is_already {
-                return Ok(DataValue::Date(d.clone()));
+                return Ok(DataValue::Date(*d));
             }
             // Truncate to floor first, then advance
             let floored = match date_trunc_floor(value, part) {
@@ -494,7 +494,7 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
                 DatePart::Second => true,
             };
             if is_already {
-                return Ok(DataValue::Timestamp(ts.clone()));
+                return Ok(DataValue::Timestamp(*ts));
             }
             // Floor and advance
             match date_trunc_floor(value, part) {

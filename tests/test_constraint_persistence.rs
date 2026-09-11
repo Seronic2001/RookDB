@@ -214,8 +214,8 @@ fn count_constraint_rows(db: &str, table: &str, ctype: &str) -> usize {
     };
     let mut n = 0;
     for result in heap.scan() {
-        if let Ok((_, _, raw)) = result {
-            if let Ok(decoded) =
+        if let Ok((_, _, raw)) = result
+            && let Ok(decoded) =
                 storage_manager::types::deserialize_nullable_row(st::SYS_CONSTRAINTS_SCHEMA, &raw)
             {
                 let tid = matches!(&decoded.get(1), Some(Some(storage_manager::types::DataValue::Int(_))));
@@ -228,7 +228,6 @@ fn count_constraint_rows(db: &str, table: &str, ctype: &str) -> usize {
                     n += 1;
                 }
             }
-        }
     }
     n
 }

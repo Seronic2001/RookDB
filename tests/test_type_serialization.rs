@@ -2,6 +2,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use storage_manager::types::{DataType, DataValue, NumericValue, OrderedF32, OrderedF64};
 
 #[test]
+#[allow(clippy::approx_constant)]
 fn roundtrip_serialization_for_all_datatypes() {
     let numeric_ty = DataType::Numeric {
         precision: 10,

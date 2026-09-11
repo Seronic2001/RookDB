@@ -67,7 +67,7 @@ fn table_contents(catalog: &Catalog, db: &str) -> Vec<Vec<String>> {
     use storage_manager::backend::executor::physical::engine::execute_plan_collect;
     use storage_manager::backend::executor::physical::tuple::Tuple;
     use rook_ast::QueryPlan;
-    let select = match rook_parser::parse_sql(&format!("SELECT * FROM staff ORDER BY id")) {
+    let select = match rook_parser::parse_sql("SELECT * FROM staff ORDER BY id") {
         Ok(QueryPlan::Select(s)) => s,
         _ => panic!("setup select"),
     };

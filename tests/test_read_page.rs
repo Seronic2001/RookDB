@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Seek, Write};
 use storage_manager::disk::read_page;
 use storage_manager::page::{PAGE_SIZE, Page};
 
@@ -42,7 +42,7 @@ fn test_read_page() {
     assert_eq!(page.data, original_data, "Page data mismatch after reading");
 
     // Optional sanity check: cursor should be at PAGE_SIZE offset
-    let pos = file.seek(SeekFrom::Current(0)).unwrap();
+    let pos = file.stream_position().unwrap();
     assert_eq!(pos, PAGE_SIZE as u64, "File cursor not at expected offset");
 
     // Cleanup

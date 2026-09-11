@@ -183,8 +183,8 @@ pub(crate) fn check_unique_insert_meta(
 
                     if let Some(Some(existing_val)) = decoded.get(col_pos) {
                         use crate::types::Comparable;
-                        if let Ok(cmp) = existing_val.compare(&key_value) {
-                            if cmp == std::cmp::Ordering::Equal {
+                        if let Ok(cmp) = existing_val.compare(&key_value)
+                            && cmp == std::cmp::Ordering::Equal {
                                 return Err(RookError::constraint(
                                     ConstraintKind::Unique,
                                     table_name,
@@ -195,7 +195,6 @@ pub(crate) fn check_unique_insert_meta(
                                     ),
                                 ));
                             }
-                        }
                     }
                 }
             }

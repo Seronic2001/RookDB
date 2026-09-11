@@ -8,11 +8,6 @@
 //! region. The bitmap is always written first in the serialized row, immediately
 //! after the 4-byte header.
 
-/// Compact NULL indicator for all columns in a row.
-///
-/// Bit layout: bit `i` of the bitmap → logical column `i` (LSB-first within
-/// each byte). A `1` means NULL; a `0` means non-NULL.
-
 /// Quickly check whether a specific column is NULL from raw row bytes,
 /// without performing a full deserialisation.
 ///

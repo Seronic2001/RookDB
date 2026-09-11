@@ -120,13 +120,11 @@ fn vacuum_reclaims_dead_tuples_and_preserves_live_rows() {
     let schema = vec![DataType::Int, DataType::Varchar(60)];
     let mut live_ids = Vec::new();
     for r in heap.scan() {
-        if let Ok((_, _, raw)) = r {
-            if let Ok(row) = storage_manager::types::deserialize_nullable_row(&schema, &raw) {
-                if let Some(Some(storage_manager::types::DataValue::Int(id))) = row.get(0) {
+        if let Ok((_, _, raw)) = r
+            && let Ok(row) = storage_manager::types::deserialize_nullable_row(&schema, &raw)
+                && let Some(Some(storage_manager::types::DataValue::Int(id))) = row.first() {
                     live_ids.push(*id);
                 }
-            }
-        }
     }
     live_ids.sort();
     let expected: Vec<i32> = (0..40).filter(|i| !((0..10).contains(i) || (20..30).contains(i))).collect();

@@ -34,7 +34,7 @@ pub fn shared_pool_capacity() -> usize {
         std::env::var("ROOK_POOL_FRAMES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n >= 8 && n <= (1 << 20))
+            .filter(|&n| (8..=(1 << 20)).contains(&n))
             .unwrap_or(DEFAULT)
     })
 }

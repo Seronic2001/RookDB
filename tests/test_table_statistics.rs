@@ -1,15 +1,16 @@
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Seek;
-use std::path::PathBuf;
 
+#[allow(deprecated)]
 use storage_manager::heap::{init_table, insert_tuple};
 use storage_manager::statistics::collect_table_statistics_from_file;
 use storage_manager::types::{serialize_nullable_row, DataType};
 
 #[test]
+#[allow(deprecated)]
 fn test_collect_table_statistics_counts_pages_and_tuples() {
-    let mut temp_path = PathBuf::from(env::temp_dir());
+    let mut temp_path = env::temp_dir();
     temp_path.push("rookdb_table_statistics_test.tbl");
 
     let mut file = OpenOptions::new()

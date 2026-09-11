@@ -280,7 +280,7 @@ fn test_minimal_delete_cascade() {
     create_table(&mut catalog, db_name, "orders", orders_cols);
 
     // FK: orders.user_id → users.id ON DELETE CASCADE
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "orders", "FOREIGN KEY ON DELETE CASCADE", "user_id",
         Some("users"), Some("id"),
     ).expect("Failed to insert FK constraint");
@@ -319,11 +319,11 @@ fn test_recursive_delete_cascade() {
     // Insert FK constraints:
     //   orders.user_id → users.id ON DELETE CASCADE
     //   order_items.order_id → orders.id ON DELETE CASCADE
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "orders", "FOREIGN KEY ON DELETE CASCADE", "user_id",
         Some("users"), Some("id"),
     ).expect("Failed to insert orders FK constraint");
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "order_items", "FOREIGN KEY ON DELETE CASCADE", "order_id",
         Some("orders"), Some("id"),
     ).expect("Failed to insert order_items FK constraint");
@@ -376,12 +376,12 @@ fn test_recursive_delete_set_null() {
     create_three_tier_schema(&mut catalog, db_name);
 
     // FK: orders.user_id → users.id ON DELETE SET NULL
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "orders", "FOREIGN KEY ON DELETE SET NULL", "user_id",
         Some("users"), Some("id"),
     ).expect("Failed to insert orders FK constraint");
     // FK: order_items.order_id → orders.id ON DELETE SET NULL
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "order_items", "FOREIGN KEY ON DELETE SET NULL", "order_id",
         Some("orders"), Some("id"),
     ).expect("Failed to insert order_items FK constraint");
@@ -443,12 +443,12 @@ fn test_recursive_update_cascade() {
     create_three_tier_schema(&mut catalog, db_name);
 
     // FK: orders.user_id → users.id ON UPDATE CASCADE
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "orders", "FOREIGN KEY ON UPDATE CASCADE", "user_id",
         Some("users"), Some("id"),
     ).expect("Failed to insert orders FK constraint");
     // FK: order_items.order_id → orders.id ON UPDATE CASCADE
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "order_items", "FOREIGN KEY ON UPDATE CASCADE", "order_id",
         Some("orders"), Some("id"),
     ).expect("Failed to insert order_items FK constraint");
@@ -548,12 +548,12 @@ fn test_recursive_update_cascade_same_column_chain() {
     create_table(&mut catalog, db_name, "order_items", order_items_cols);
 
     // FK: orders.fk_user_id → users.id ON UPDATE CASCADE
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "orders", "FOREIGN KEY ON UPDATE CASCADE", "fk_user_id",
         Some("users"), Some("id"),
     ).expect("Failed to insert orders FK constraint");
     // FK: order_items.fk_user_id → orders.fk_user_id ON UPDATE CASCADE (same column chain!)
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "order_items", "FOREIGN KEY ON UPDATE CASCADE", "fk_user_id",
         Some("orders"), Some("fk_user_id"),
     ).expect("Failed to insert order_items FK constraint");
@@ -603,12 +603,12 @@ fn test_recursive_update_set_null() {
     create_three_tier_schema(&mut catalog, db_name);
 
     // FK: orders.user_id → users.id ON UPDATE SET NULL
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "orders", "FOREIGN KEY ON UPDATE SET NULL", "user_id",
         Some("users"), Some("id"),
     ).expect("Failed to insert orders FK constraint");
     // FK: order_items.order_id → orders.id ON UPDATE SET NULL
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "order_items", "FOREIGN KEY ON UPDATE SET NULL", "order_id",
         Some("orders"), Some("id"),
     ).expect("Failed to insert order_items FK constraint");
@@ -704,12 +704,12 @@ fn test_recursive_update_set_null_same_column_chain() {
     create_table(&mut catalog, db_name, "order_items", order_items_cols);
 
     // FK: orders.fk_user_id → users.id ON UPDATE SET NULL
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "orders", "FOREIGN KEY ON UPDATE SET NULL", "fk_user_id",
         Some("users"), Some("id"),
     ).expect("Failed to insert orders FK constraint");
     // FK: order_items.fk_user_id → orders.fk_user_id ON UPDATE SET NULL (same column chain!)
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "order_items", "FOREIGN KEY ON UPDATE SET NULL", "fk_user_id",
         Some("orders"), Some("fk_user_id"),
     ).expect("Failed to insert order_items FK constraint");
@@ -793,11 +793,11 @@ fn test_cycle_detection_delete_cascade() {
     // Circular FK chain:
     //   table_a.a_ref → table_b.id ON DELETE CASCADE
     //   table_b.b_ref → table_a.id ON DELETE CASCADE
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "table_a", "FOREIGN KEY ON DELETE CASCADE", "a_ref",
         Some("table_b"), Some("id"),
     ).expect("Failed to insert table_a FK constraint");
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "table_b", "FOREIGN KEY ON DELETE CASCADE", "b_ref",
         Some("table_a"), Some("id"),
     ).expect("Failed to insert table_b FK constraint");
@@ -871,7 +871,7 @@ fn test_fk_restrict_blocks_delete() {
     create_table(&mut catalog, db_name, "children", children_cols);
 
     // FK with RESTRICT (default): just "FOREIGN KEY"
-    let _ = storage_manager::backend::system_table::insert_constraint_metadata(
+    storage_manager::backend::system_table::insert_constraint_metadata(
         db_name, "children", "FOREIGN KEY", "parent_id",
         Some("parents"), Some("id"),
     ).expect("Failed to insert FK constraint");

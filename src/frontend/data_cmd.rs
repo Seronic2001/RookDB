@@ -225,7 +225,7 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
         &catalog, &db, table, selection,
     )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    .map_err(io::Error::other)?;
 
     // Fetch and display each matching row through the heap manager.
     let heap_path = format!("database/base/{}/{}.dat", db, table);
@@ -345,7 +345,7 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
         &catalog, &db, &table, selection,
     )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    .map_err(io::Error::other)?;
 
     if returning && !pointers.is_empty() {
         // Snapshot the rows before deletion so they can be printed.
@@ -358,8 +358,8 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
             columns.iter().map(|c| c.data_type.clone()).collect();
         println!("\n=== Deleted rows ===");
         for &(page_id, slot_id) in &pointers {
-            if let Ok(raw) = heap.get_tuple(page_id, slot_id) {
-                if let Ok(values) =
+            if let Ok(raw) = heap.get_tuple(page_id, slot_id)
+                && let Ok(values) =
                     storage_manager::types::deserialize_nullable_row(&schema_types, &raw)
                 {
                     let cells: Vec<String> = columns
@@ -372,7 +372,6 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
                         .collect();
                     println!("  {}", cells.join("  |  "));
                 }
-            }
         }
         println!("===================");
     }
@@ -474,7 +473,7 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
         &catalog, &db, &table, selection,
     )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    .map_err(io::Error::other)?;
 
     // -- RETURNING --
     print!("\nPrint updated rows? (y/n): ");
@@ -507,8 +506,8 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
                     columns.iter().map(|c| c.data_type.clone()).collect();
                 println!("\n=== Updated rows (after) ===");
                 for &(page_id, slot_id) in &pointers {
-                    if let Ok(raw) = heap.get_tuple(page_id, slot_id) {
-                        if let Ok(values) = storage_manager::types::deserialize_nullable_row(
+                    if let Ok(raw) = heap.get_tuple(page_id, slot_id)
+                        && let Ok(values) = storage_manager::types::deserialize_nullable_row(
                             &schema_types,
                             &raw,
                         ) {
@@ -522,7 +521,6 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
                                 .collect();
                             println!("  {}", cells.join("  |  "));
                         }
-                    }
                 }
                 println!("========================");
             }

@@ -150,31 +150,31 @@ impl Comparable for DataValue {
             // Cross-type integer ↔ DOUBLE PRECISION comparisons
             (DataValue::SmallInt(a), DataValue::DoublePrecision(b)) => {
                 let af = OrderedF64(*a as f64);
-                let bf = OrderedF64(b.0 as f64);
+                let bf = OrderedF64(b.0);
                 Ok(af.cmp(&bf))
             }
             (DataValue::DoublePrecision(a), DataValue::SmallInt(b)) => {
-                let af = OrderedF64(a.0 as f64);
+                let af = OrderedF64(a.0);
                 let bf = OrderedF64(*b as f64);
                 Ok(af.cmp(&bf))
             }
             (DataValue::Int(a), DataValue::DoublePrecision(b)) => {
                 let af = OrderedF64(*a as f64);
-                let bf = OrderedF64(b.0 as f64);
+                let bf = OrderedF64(b.0);
                 Ok(af.cmp(&bf))
             }
             (DataValue::DoublePrecision(a), DataValue::Int(b)) => {
-                let af = OrderedF64(a.0 as f64);
+                let af = OrderedF64(a.0);
                 let bf = OrderedF64(*b as f64);
                 Ok(af.cmp(&bf))
             }
             (DataValue::BigInt(a), DataValue::DoublePrecision(b)) => {
                 let af = OrderedF64(*a as f64);
-                let bf = OrderedF64(b.0 as f64);
+                let bf = OrderedF64(b.0);
                 Ok(af.cmp(&bf))
             }
             (DataValue::DoublePrecision(a), DataValue::BigInt(b)) => {
-                let af = OrderedF64(a.0 as f64);
+                let af = OrderedF64(a.0);
                 let bf = OrderedF64(*b as f64);
                 Ok(af.cmp(&bf))
             }

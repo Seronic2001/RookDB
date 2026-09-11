@@ -39,7 +39,7 @@ use crate::types::validation::validate_value;
 ///
 /// On disk the value is encoded as packed BCD (Binary Coded Decimal) with
 /// a trailing sign nibble (`0x0C` = positive, `0x0D` = negative).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NumericValue {
     /// The integer coefficient: actual value = `unscaled / 10^scale`.
     pub unscaled: i128,
@@ -60,21 +60,27 @@ impl PartialEq for OrderedF32 {
 }
 impl Eq for OrderedF32 {}
 
-impl PartialOrd for OrderedF32 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(&other.0)
+impl std::hash::Hash for OrderedF32 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
     }
 }
 
 impl Ord for OrderedF32 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or_else(|| {
+        self.0.partial_cmp(&other.0).unwrap_or_else(|| {
             match (self.0.is_nan(), other.0.is_nan()) {
                 (true, true) => std::cmp::Ordering::Equal,
                 (true, false) => std::cmp::Ordering::Greater,
                 _ => std::cmp::Ordering::Less,
             }
         })
+    }
+}
+
+impl PartialOrd for OrderedF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -90,15 +96,15 @@ impl PartialEq for OrderedF64 {
 }
 impl Eq for OrderedF64 {}
 
-impl PartialOrd for OrderedF64 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(&other.0)
+impl std::hash::Hash for OrderedF64 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
     }
 }
 
 impl Ord for OrderedF64 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or_else(|| {
+        self.0.partial_cmp(&other.0).unwrap_or_else(|| {
             match (self.0.is_nan(), other.0.is_nan()) {
                 (true, true) => std::cmp::Ordering::Equal,
                 (true, false) => std::cmp::Ordering::Greater,
@@ -108,11 +114,17 @@ impl Ord for OrderedF64 {
     }
 }
 
+impl PartialOrd for OrderedF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// The in-memory representation of a SQL column value.
 ///
 /// Each variant corresponds to one or more [`DataType`] variants. Encoding and
 /// decoding rules are documented in the module-level table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DataValue {
     SmallInt(i16),
     Int(i32),
@@ -268,7 +280,7 @@ fn encode_numeric_bcd(value: &NumericValue, precision: u8) -> Result<Vec<u8>, St
     }
 
     let mut nibbles: Vec<u8> = Vec::with_capacity(precision as usize + 2);
-    if precision % 2 == 0 {
+    if precision.is_multiple_of(2) {
         nibbles.push(0);
     }
     for ch in digits.chars() {
@@ -297,7 +309,7 @@ fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> Result<NumericV
         nibbles.push(b & 0x0F);
     }
 
-    let start = if precision % 2 == 0 { 1 } else { 0 };
+    let start = if precision.is_multiple_of(2) { 1 } else { 0 };
     let digits_slice = &nibbles[start..start + precision as usize];
     let sign_nibble = nibbles[start + precision as usize];
     if !digits_slice.iter().all(|d| *d <= 9) {

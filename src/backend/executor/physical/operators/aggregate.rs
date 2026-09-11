@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
-use super::utils::normalise_value_for_key;
 
 use crate::types::value::DataValue;
 use crate::types::datatype::DataType;
@@ -22,14 +21,12 @@ pub enum AggregateFunction {
     Max,
 }
 
-// ── AggregateInfo ─────────────────────────────────────────────────────────────
+// ── Aggregate Info Struct ──────────────────────────────────────────────────────
 
-/// Metadata for one aggregate function in the operator.
+/// Metadata for one aggregate function in the SELECT clause.
 #[derive(Debug, Clone)]
 pub struct AggregateInfo {
     pub function: AggregateFunction,
-    /// The input expression to aggregate.
-    /// For COUNT(*), this is None (counts all rows including NULLs).
     pub input: Option<Expr>,
     pub output_name: String,
     pub output_type: DataType,
@@ -44,13 +41,19 @@ pub struct AggregateInfo {
 pub struct PerGroupState {
     pub(super) row_count: u64,
     pub(super) non_null_count: u64,
-    pub(super) distinct_seen: HashSet<String>,
+    pub(super) distinct_seen: HashSet<DataValue>,
     pub(super) has_sum: bool,
     pub(super) sum_int: i128,
     pub(super) sum_float: f64,
     pub(super) sum_is_float: bool,
     pub(super) min: Option<DataValue>,
     pub(super) max: Option<DataValue>,
+}
+
+impl Default for PerGroupState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PerGroupState {
@@ -77,12 +80,10 @@ impl PerGroupState {
             None => return Ok(()),
         };
 
-        if distinct {
-            let key = normalise_value_for_key(val);
-            if !self.distinct_seen.insert(key) {
+        if distinct
+            && !self.distinct_seen.insert(val.clone()) {
                 return Ok(());
             }
-        }
 
         self.non_null_count += 1;
 
@@ -211,7 +212,7 @@ pub struct AggregateOperator {
     having: Option<Predicate>,
     output_schema: Vec<ColumnInfo>,
 
-    group_map: HashMap<String, usize>,
+    group_map: HashMap<Vec<Option<DataValue>>, usize>,
     groups: Vec<GroupEntry>,
     output_buffer: Vec<Tuple>,
     output_pos: usize,
@@ -263,22 +264,6 @@ impl AggregateOperator {
         }
     }
 
-    fn make_group_key(&self, tuple: &Tuple) -> Result<String, String> {
-        if self.group_by_exprs.is_empty() {
-            return Ok("__global__".to_string());
-        }
-        let child_schema = self.child.schema();
-        let mut parts = Vec::with_capacity(self.group_by_exprs.len());
-        for expr in &self.group_by_exprs {
-            let val = expr.evaluate(tuple, child_schema)?;
-            match val {
-                Some(dv) => parts.push(normalise_value_for_key(&dv)),
-                None => parts.push("\x00N\x00".to_string()),
-            }
-        }
-        Ok(parts.join("|"))
-    }
-
     fn build_output_tuple(&self, entry: &GroupEntry) -> Result<Tuple, String> {
         let mut values = Vec::new();
         for val in &entry.key_values {
@@ -295,10 +280,7 @@ impl AggregateOperator {
         for entry in &self.groups {
             let tuple = self.build_output_tuple(entry)?;
             if let Some(ref having) = self.having {
-                match evaluate_predicate(having, &tuple, &self.output_schema)? {
-                    Some(true) => self.output_buffer.push(tuple),
-                    _ => {}
-                }
+                if let Some(true) = evaluate_predicate(having, &tuple, &self.output_schema)? { self.output_buffer.push(tuple) }
             } else {
                 self.output_buffer.push(tuple);
             }
@@ -312,12 +294,11 @@ impl PhysicalOperator for AggregateOperator {
         if !self.consumed {
             let child_schema = self.child.schema().to_vec();
             while let Some(tuple) = self.child.next()? {
-                let key_str = self.make_group_key(&tuple)?;
                 let key_values: Vec<Option<DataValue>> = self.group_by_exprs.iter()
                     .map(|expr| expr.evaluate(&tuple, &child_schema))
                     .collect::<Result<Vec<_>, String>>()?;
 
-                let group_idx = match self.group_map.entry(key_str) {
+                let group_idx = match self.group_map.entry(key_values.clone()) {
                     std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         let idx = self.groups.len();

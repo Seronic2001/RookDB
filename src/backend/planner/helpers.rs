@@ -434,11 +434,10 @@ pub fn extract_aggregates(projections: &[SelectExpr]) -> Vec<AggregateExpr> {
         // For top-level aggregates with an explicit alias (e.g. `SUM(price) AS total`),
         // apply the alias to the aggregate. For nested aggregates (e.g. inside Binary),
         // the function name remains as the alias.
-        if found.len() == 1 && matches!(item, SelectExpr::ExprWithAlias { .. }) {
-            if let SelectExpr::ExprWithAlias { alias, .. } = item {
+        if found.len() == 1 && matches!(item, SelectExpr::ExprWithAlias { .. })
+            && let SelectExpr::ExprWithAlias { alias, .. } = item {
                 found[0].alias = Some(alias.clone());
             }
-        }
 
         aggregates.extend(found);
     }
@@ -497,7 +496,7 @@ pub fn aggregate_identity(agg: &AggregateExpr) -> String {
     format!(
         "{:?}({})",
         agg.function,
-        agg.args.iter().map(|a| expr_to_name(a)).collect::<Vec<_>>().join(",")
+        agg.args.iter().map(expr_to_name).collect::<Vec<_>>().join(",")
     )
 }
 

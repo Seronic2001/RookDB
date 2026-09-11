@@ -325,7 +325,7 @@ fn plan_select_with_ctes(
 
     // 4. Apply GROUP BY / HAVING
     let has_aggregates = !select.group_by.is_empty() || select.having.is_some()
-        || select.projections.iter().any(|p| contains_aggregate(p));
+        || select.projections.iter().any(contains_aggregate);
 
     if has_aggregates {
         let mut aggregates = extract_aggregates(&select.projections);
@@ -387,7 +387,7 @@ fn plan_select_with_ctes(
     for cte_def in select.ctes.iter().rev() {
         let cte_key = cte_def.name.to_ascii_lowercase();
 
-        if cte_def.recursive_term.is_some() {
+        if let Some(rec_select_plan) = &cte_def.recursive_term {
             let (non_rec_logical, non_rec_schema) = cte_registry
                 .remove(&cte_key)
                 .expect("CTE must be in registry at wrap time");
@@ -399,8 +399,6 @@ fn plan_select_with_ctes(
                 system_table_name: None,
             });
             cte_registry.insert(cte_key.clone(), (dummy_plan, non_rec_schema.clone()));
-
-            let rec_select_plan = cte_def.recursive_term.as_ref().unwrap();
 
             let adjusted_rec_plan: rook_ast::SelectPlan = if rec_select_plan.from.is_empty() {
                 let mut adjusted = (**rec_select_plan).clone();

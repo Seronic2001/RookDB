@@ -60,7 +60,7 @@ fn test_page_free_space() {
     );
 
     assert_eq!(
-        lower, PAGE_HEADER_SIZE as u32,
+        lower, PAGE_HEADER_SIZE,
         "Expected lower offset = PAGE_HEADER_SIZE after init_page()"
     );
 

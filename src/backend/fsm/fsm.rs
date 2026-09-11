@@ -1,16 +1,16 @@
-/// FSM (Free Space Map) - Implements PostgreSQL-style 3-level binary max-tree
-/// for efficient page-level free-space tracking.
-///
-/// Key Design:
-/// - Each heap page maps to one u8 free-space category (0-255) where:
-///   category = floor(free_bytes × 255 / PAGE_SIZE)
-/// - 3-level tree: Level 2 (root) covers billions of pages, Level 0 (leaves)
-/// - FSM fork is treated as a hint; can be rebuilt from heap after crash
-///
-/// Constants (for 8KB pages):
-/// - FSM_NODES_PER_PAGE: 7999 bytes (binary max-tree array)
-/// - FSM_SLOTS_PER_PAGE: 4000 usable leaf slots 
-/// - FSM_LEVELS: 3 (Level 0=leaves, Level 2=root, constant height)
+//! FSM (Free Space Map) - Implements PostgreSQL-style 3-level binary max-tree
+//! for efficient page-level free-space tracking.
+//!
+//! Key Design:
+//! - Each heap page maps to one u8 free-space category (0-255) where:
+//!   category = floor(free_bytes × 255 / PAGE_SIZE)
+//! - 3-level tree: Level 2 (root) covers billions of pages, Level 0 (leaves)
+//! - FSM fork is treated as a hint; can be rebuilt from heap after crash
+//!
+//! Constants (for 8KB pages):
+//! - FSM_NODES_PER_PAGE: 7999 bytes (binary max-tree array)
+//! - FSM_SLOTS_PER_PAGE: 4000 usable leaf slots 
+//! - FSM_LEVELS: 3 (Level 0=leaves, Level 2=root, constant height)
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write, Seek, SeekFrom};
@@ -151,6 +151,7 @@ impl FSM {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&fsm_path)?;
 
         Ok(Self {
@@ -221,23 +222,19 @@ impl FSM {
             let offset = heap_page_id as u64 * 8192; // PAGE_SIZE
             heap_file.seek(SeekFrom::Start(offset))?;
 
-            if let Ok(_) = heap_file.read_exact(&mut page_bytes) {
+            if heap_file.read_exact(&mut page_bytes).is_ok() {
                 // Calculate free space in this page
                 let lower = u32::from_le_bytes(page_bytes[0..4].try_into().unwrap());
                 let upper = u32::from_le_bytes(page_bytes[4..8].try_into().unwrap());
 
-                let free_bytes = if upper >= lower {
-                    upper - lower
-                } else {
-                    0
-                };
+                let free_bytes = upper.saturating_sub(lower);
 
                 let category = Self::bytes_to_category(free_bytes);
 
-                let log_l0 = heap_page_id / FSM_SLOTS_PER_PAGE as u32;
-                let slot_l0 = (heap_page_id % FSM_SLOTS_PER_PAGE as u32) as usize;
+                let log_l0 = heap_page_id / FSM_SLOTS_PER_PAGE;
+                let slot_l0 = (heap_page_id % FSM_SLOTS_PER_PAGE) as usize;
 
-                let leaf_page = in_memory_pages.entry((0, log_l0)).or_insert_with(FSMPage::new);
+                let leaf_page = in_memory_pages.entry((0, log_l0)).or_default();
                 leaf_page.tree[FSM_NON_LEAF_NODES + slot_l0] = category;
 
                 if heap_page_id % 1000 == 0 {
@@ -250,7 +247,7 @@ impl FSM {
         }
 
         // Bubble up Level 0 -> Level 1 (Only if needed)
-        let max_l0 = page_count / FSM_SLOTS_PER_PAGE as u32;
+        let max_l0 = page_count / FSM_SLOTS_PER_PAGE;
         for log_l0 in 0..=max_l0 {
             if let Some(page_l0) = in_memory_pages.get_mut(&(0, log_l0)) {
                 // Bubble up internally
@@ -261,10 +258,10 @@ impl FSM {
                 // Only create Level 1 if we have exceeded Level 0
                 if page_count > FSM_SLOTS_PER_PAGE {
                     let root_val = page_l0.tree[0];
-                    let log_l1 = log_l0 / FSM_SLOTS_PER_PAGE as u32;
-                    let slot_l1 = (log_l0 % FSM_SLOTS_PER_PAGE as u32) as usize;
+                    let log_l1 = log_l0 / FSM_SLOTS_PER_PAGE;
+                    let slot_l1 = (log_l0 % FSM_SLOTS_PER_PAGE) as usize;
                     
-                    let page_l1 = in_memory_pages.entry((1, log_l1)).or_insert_with(FSMPage::new);
+                    let page_l1 = in_memory_pages.entry((1, log_l1)).or_default();
                     page_l1.tree[FSM_NON_LEAF_NODES + slot_l1] = root_val;
                 }
             }
@@ -272,7 +269,7 @@ impl FSM {
 
         // Bubble up Level 1 -> Level 2 (Only if needed)
         if page_count > FSM_SLOTS_PER_PAGE {
-            let max_l1 = max_l0 / FSM_SLOTS_PER_PAGE as u32;
+            let max_l1 = max_l0 / FSM_SLOTS_PER_PAGE;
             for log_l1 in 0..=max_l1 {
                 if let Some(page_l1) = in_memory_pages.get_mut(&(1, log_l1)) {
                     // Bubble up internally
@@ -284,10 +281,10 @@ impl FSM {
                     let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
                     if page_count > threshold_l2 {
                         let root_val = page_l1.tree[0];
-                        let log_l2 = log_l1 / FSM_SLOTS_PER_PAGE as u32;
-                        let slot_l2 = (log_l1 % FSM_SLOTS_PER_PAGE as u32) as usize;
+                        let log_l2 = log_l1 / FSM_SLOTS_PER_PAGE;
+                        let slot_l2 = (log_l1 % FSM_SLOTS_PER_PAGE) as usize;
 
-                        let page_l2 = in_memory_pages.entry((2, log_l2)).or_insert_with(FSMPage::new);
+                        let page_l2 = in_memory_pages.entry((2, log_l2)).or_default();
                         page_l2.tree[FSM_NON_LEAF_NODES + slot_l2] = root_val;
                     }
                 }
@@ -296,7 +293,7 @@ impl FSM {
             // Bubble up Level 2 internally
             let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
             if page_count > threshold_l2 {
-                let max_l2 = max_l1 / FSM_SLOTS_PER_PAGE as u32;
+                let max_l2 = max_l1 / FSM_SLOTS_PER_PAGE;
                 for log_l2 in 0..=max_l2 {
                     if let Some(page_l2) = in_memory_pages.get_mut(&(2, log_l2)) {
                         for i in (0..FSM_NON_LEAF_NODES).rev() {
@@ -350,16 +347,16 @@ impl FSM {
             return 1;
         }
 
-        let l0_count = (heap_pages + FSM_SLOTS_PER_PAGE - 1) / FSM_SLOTS_PER_PAGE;
+        let l0_count = heap_pages.div_ceil(FSM_SLOTS_PER_PAGE);
         
         let threshold_l2 = FSM_SLOTS_PER_PAGE.saturating_mul(FSM_SLOTS_PER_PAGE);
         if heap_pages <= threshold_l2 {
-            let l1_count = (l0_count + FSM_SLOTS_PER_PAGE - 1) / FSM_SLOTS_PER_PAGE;
+            let l1_count = l0_count.div_ceil(FSM_SLOTS_PER_PAGE);
             return l0_count + l1_count;
         }
 
-        let l1_count = (l0_count + FSM_SLOTS_PER_PAGE - 1) / FSM_SLOTS_PER_PAGE;
-        let l2_count = (l1_count + FSM_SLOTS_PER_PAGE - 1) / FSM_SLOTS_PER_PAGE;
+        let l1_count = l0_count.div_ceil(FSM_SLOTS_PER_PAGE);
+        let l2_count = l1_count.div_ceil(FSM_SLOTS_PER_PAGE);
         
         l0_count + l1_count + l2_count
     }
@@ -471,7 +468,7 @@ impl FSM {
             // Avoid calling serialize() on an empty FSMPage to prevent double-serialization logs
             let empty_bytes = vec![0u8; FSM_PAGE_SIZE];
             
-            let mut pages_to_write = ((block_offset + FSM_PAGE_SIZE as u64 - current_size) / FSM_PAGE_SIZE as u64) as u64;
+            let mut pages_to_write = (block_offset + FSM_PAGE_SIZE as u64 - current_size) / FSM_PAGE_SIZE as u64;
             while pages_to_write > 0 {
                 self.fsm_file.write_all(&empty_bytes)?;
                 pages_to_write -= 1;
@@ -643,7 +640,7 @@ impl FSM {
                 // leaf_offset is the index among the leaves (0 to 3999)
                 // for level L, its leaves refer to Level L-1 pages.
                 // Each Level L page spans FSM_SLOTS_PER_PAGE Level L-1 pages
-                let next_page_no = page_no * (FSM_SLOTS_PER_PAGE as u32) + leaf_offset as u32;
+                let next_page_no = page_no * FSM_SLOTS_PER_PAGE + leaf_offset as u32;
                 
                 if let Some(result) = self.search_tree_for_available_page(
                     level - 1,
@@ -684,7 +681,7 @@ impl FSM {
 
         // Find which Level 0 FSM page contains this heap_page_id
         // Each Level 0 FSM page tracks FSM_SLOTS_PER_PAGE heap pages
-        let fsm_page_no = (heap_page_id / FSM_SLOTS_PER_PAGE) as u32;
+        let fsm_page_no = heap_page_id / FSM_SLOTS_PER_PAGE;
         let slot_within_page = (heap_page_id % FSM_SLOTS_PER_PAGE) as usize;
 
         log::trace!(
@@ -748,7 +745,7 @@ impl FSM {
         }
 
         // Write updated Level 0 page
-        self.write_fsm_page(0, fsm_page_no, 0, &leaf_page)?;
+        self.write_fsm_page(0, fsm_page_no, 0, leaf_page)?;
         
         let new_level0_root = leaf_page.root_value();
         log::trace!(

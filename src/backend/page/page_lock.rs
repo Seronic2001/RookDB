@@ -72,7 +72,12 @@ impl PageWriteLock {
 
         PageWriteLock {
             key,
-            _guard: unsafe { std::mem::transmute(guard) },
+            _guard: unsafe {
+                std::mem::transmute::<
+                    std::sync::MutexGuard<'_, ()>,
+                    std::sync::MutexGuard<'static, ()>,
+                >(guard)
+            },
         }
     }
 }

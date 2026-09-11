@@ -1,12 +1,12 @@
-/// Integration tests for HeapManager and FSM
-/// 
-/// Tests the complete flow of heap operations:
-/// - Creating a new heap
-/// - Inserting tuples with FSM-guided page selection
-/// - Retrieving tuples by coordinates
-/// - Sequential scans
-/// - FSM updates and rebuilds
-/// - Header persistence
+//! Integration tests for HeapManager and FSM
+//! 
+//! Tests the complete flow of heap operations:
+//! - Creating a new heap
+//! - Inserting tuples with FSM-guided page selection
+//! - Retrieving tuples by coordinates
+//! - Sequential scans
+//! - FSM updates and rebuilds
+//! - Header persistence
 
 use std::fs;
 use std::path::PathBuf;
@@ -151,13 +151,11 @@ fn test_heap_scan() {
         .expect("Failed to create heap");
 
     // Insert 5 tuples
-    let test_data = vec![
-        b"First".to_vec(),
+    let test_data = [b"First".to_vec(),
         b"Second".to_vec(),
         b"Third".to_vec(),
         b"Fourth".to_vec(),
-        b"Fifth".to_vec(),
-    ];
+        b"Fifth".to_vec()];
 
     for data in test_data.iter() {
         manager.insert_tuple(data).expect("Failed to insert");

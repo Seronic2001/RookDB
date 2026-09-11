@@ -16,6 +16,12 @@ pub struct BufferManager {
     pub pool: BufferPool,
 }
 
+impl Default for BufferManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BufferManager {
     /// Create a new buffer manager with default capacity (128 frames = 1 MB).
     pub fn new() -> Self {

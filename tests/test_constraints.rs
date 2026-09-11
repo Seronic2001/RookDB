@@ -247,6 +247,7 @@ fn delete_customers_by_id(
 }
 
 /// Build the decoded-row representation `validate_row_delete` expects.
+#[allow(dead_code)]
 fn decoded_row(pairs: &[(&str, &str)]) -> Vec<(String, storage_manager::executor::delete::ColumnValue)> {
     use storage_manager::executor::delete::ColumnValue;
     pairs
@@ -263,6 +264,7 @@ fn decoded_row(pairs: &[(&str, &str)]) -> Vec<(String, storage_manager::executor
         .collect()
 }
 
+#[allow(dead_code)]
 fn deleted_customer_row(id: &str) -> Vec<(String, storage_manager::executor::delete::ColumnValue)> {
     // customers rows are (id, cname)
     let mut row = decoded_row(&[("id", id)]);

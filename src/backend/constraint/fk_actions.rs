@@ -135,8 +135,8 @@ pub(crate) fn cascade_delete_child_rows(
             // Collect values for recursive cascade
             for (grandchild_table, grandchild_fk_col, child_ref_col) in &cascade_to_grandchildren {
                 let ref_pos = columns.iter().position(|c| c.name.eq_ignore_ascii_case(child_ref_col));
-                if let Some(pos) = ref_pos {
-                    if let Some(Some(dv)) = decoded.get(pos) {
+                if let Some(pos) = ref_pos
+                    && let Some(Some(dv)) = decoded.get(pos) {
                         let val_str = match dv {
                             DataValue::SmallInt(v) => v.to_string(),
                             DataValue::Int(v) => v.to_string(),
@@ -156,12 +156,11 @@ pub(crate) fn cascade_delete_child_rows(
                             val_str,
                         ));
                     }
-                }
             }
 
             // Update B+ Tree index on the child table
             if let Err(e) = update_index_on_delete(
-                db_name, child_table, columns, tuple_data, page_num as u32, i as u32,
+                db_name, child_table, columns, tuple_data, page_num, i as u32,
             ) {
                 log::warn!("[CASCADE] Failed to update child index for deleted tuple: {}", e);
             }
@@ -182,11 +181,10 @@ pub(crate) fn cascade_delete_child_rows(
         }
     }
 
-    if deleted_count > 0 {
-        if let Err(e) = increment_dead_tuple_count(&mut file, deleted_count as u32) {
+    if deleted_count > 0
+        && let Err(e) = increment_dead_tuple_count(&mut file, deleted_count as u32) {
             log::warn!("[CASCADE] Failed to increment dead tuple count: {}", e);
         }
-    }
 
     log::info!(
         "[CASCADE] Deleted {} row(s) from '{}' due to ON DELETE CASCADE on parent '{}'",
@@ -349,7 +347,7 @@ pub(crate) fn set_null_child_rows(
 
                 // Remove old B+ Tree index entries
                 if let Err(e) = update_index_on_delete(
-                    db_name, child_table, columns, tuple_data, page_num as u32, i as u32,
+                    db_name, child_table, columns, tuple_data, page_num, i as u32,
                 ) {
                     log::warn!("[SET NULL] Failed to update child index for modified tuple: {}", e);
                 }
@@ -547,7 +545,7 @@ pub(crate) fn update_child_rows_fk(
 
                 // Remove old B+ Tree index entries
                 if let Err(e) = update_index_on_delete(
-                    db_name, child_table, columns, tuple_data, page_num as u32, i as u32,
+                    db_name, child_table, columns, tuple_data, page_num, i as u32,
                 ) {
                     log::warn!("[UPDATE CASCADE] Failed to update child index: {}", e);
                 }

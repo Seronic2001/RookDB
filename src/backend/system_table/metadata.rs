@@ -23,11 +23,10 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(db_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(db_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -49,11 +48,10 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(table_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(table_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -95,11 +93,10 @@ pub fn insert_constraint_metadata(
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(db_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(db_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -122,11 +119,10 @@ pub fn insert_constraint_metadata(
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(table_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(table_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -137,7 +133,7 @@ pub fn insert_constraint_metadata(
     let constr_rows = scan_system_table("constraints", SYS_CONSTRAINTS_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let next_constr_id = constr_rows.iter().fold(1i32, |max_id, row| {
-        match row.get(0) {
+        match row.first() {
             Some(Some(crate::types::DataValue::Int(id))) => std::cmp::max(max_id, *id + 1),
             _ => max_id,
         }
@@ -185,11 +181,10 @@ pub fn insert_index_metadata(
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(db_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(db_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -212,11 +207,10 @@ pub fn insert_index_metadata(
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(table_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(table_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -227,7 +221,7 @@ pub fn insert_index_metadata(
     let idx_rows = scan_system_table("indexes", SYS_INDEXES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let next_idx_id = idx_rows.iter().fold(1i32, |max_id, row| {
-        match row.get(0) {
+        match row.first() {
             Some(Some(crate::types::DataValue::Int(id))) => std::cmp::max(max_id, *id + 1),
             _ => max_id,
         }
@@ -270,11 +264,10 @@ pub fn delete_index_metadata(
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(db_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(db_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -297,11 +290,10 @@ pub fn delete_index_metadata(
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(table_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(table_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -477,12 +469,12 @@ pub fn rename_column_in_constraints(
 
         // Reconstruct a row with the updated columns field
         let updated_row = vec![
-            decoded.get(0).and_then(|v| v.as_ref().map(|dv| value_to_string(dv))),
-            decoded.get(1).and_then(|v| v.as_ref().map(|dv| value_to_string(dv))),
-            decoded.get(2).and_then(|v| v.as_ref().map(|dv| value_to_string(dv))),
+            decoded.first().and_then(|v| v.as_ref().map(value_to_string)),
+            decoded.get(1).and_then(|v| v.as_ref().map(value_to_string)),
+            decoded.get(2).and_then(|v| v.as_ref().map(value_to_string)),
             Some(new_columns),
-            decoded.get(4).and_then(|v| v.as_ref().map(|dv| value_to_string(dv))),
-            decoded.get(5).and_then(|v| v.as_ref().map(|dv| value_to_string(dv))),
+            decoded.get(4).and_then(|v| v.as_ref().map(value_to_string)),
+            decoded.get(5).and_then(|v| v.as_ref().map(value_to_string)),
         ];
         updates.push((page_id, slot_id, updated_row));
     }
@@ -524,11 +516,10 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(db_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(db_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -543,11 +534,10 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
             Some(Some(crate::types::DataValue::Int(id))) => *id,
             _ => return None,
         };
-        if tbl_db_id == db_id {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if tbl_db_id == db_id
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).collect();
 
@@ -595,11 +585,10 @@ fn delete_rows_by_column(name: &str, schema: &[DataType], column_idx: usize, tar
         let (page_id, slot_id, raw_bytes) = result?;
         let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if let Some(Some(crate::types::DataValue::Int(tid))) = decoded.get(column_idx) {
-            if *tid == target_id {
+        if let Some(Some(crate::types::DataValue::Int(tid))) = decoded.get(column_idx)
+            && *tid == target_id {
                 to_delete.push((page_id, slot_id));
             }
-        }
     }
 
     let count = to_delete.len();
@@ -637,11 +626,10 @@ pub fn delete_referencing_foreign_keys(
             Some(Some(crate::types::DataValue::Char(n))) => n,
             _ => return None,
         };
-        if name.eq_ignore_ascii_case(db_name) {
-            if let Some(Some(crate::types::DataValue::Int(id))) = row.get(0) {
+        if name.eq_ignore_ascii_case(db_name)
+            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
                 return Some(*id);
             }
-        }
         None
     }).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound,
@@ -653,7 +641,7 @@ pub fn delete_referencing_foreign_keys(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut table_id_to_db_id = std::collections::HashMap::new();
     for row in &tbl_rows {
-        if let (Some(Some(crate::types::DataValue::Int(tid))), Some(Some(crate::types::DataValue::Int(t_db_id)))) = (row.get(0), row.get(1)) {
+        if let (Some(Some(crate::types::DataValue::Int(tid))), Some(Some(crate::types::DataValue::Int(t_db_id)))) = (row.first(), row.get(1)) {
             table_id_to_db_id.insert(*tid, *t_db_id);
         }
     }

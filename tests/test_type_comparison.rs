@@ -99,14 +99,14 @@ fn team_robustness_edge_cases_comparison() {
     );
 
     assert_eq!(
-        DataValue::DoublePrecision(OrderedF64(std::f64::INFINITY))
+        DataValue::DoublePrecision(OrderedF64(f64::INFINITY))
             .compare(&DataValue::DoublePrecision(OrderedF64(999999.99)))
             .unwrap(),
         Ordering::Greater
     );
     
     assert_eq!(
-        DataValue::Real(OrderedF32(std::f32::NEG_INFINITY))
+        DataValue::Real(OrderedF32(f32::NEG_INFINITY))
             .compare(&DataValue::Real(OrderedF32(-999999.99)))
             .unwrap(),
         Ordering::Less

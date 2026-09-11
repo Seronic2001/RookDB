@@ -73,7 +73,7 @@ fn check_in_list_and_between() {
 
     for ok in ["1000", "3000", "5500"] {
         assert!(
-            insert_single_tuple(&catalog, "idb", "staff", &[&next_id(), "x", ok]).unwrap(),
+            insert_single_tuple(&catalog, "idb", "staff", &[next_id(), "x", ok]).unwrap(),
             "value {} should pass IN/BETWEEN check",
             ok
         );

@@ -1,12 +1,12 @@
+//! Facade API for the Compaction Team
+//! 
+//! These functions deliberately hide the `HeapManager` and `FSM` 
+//! internal state implementations from other teams.
+
 use std::io;
 use std::path::PathBuf;
 
 use crate::backend::heap::HeapManager;
-
-/// Facade API for the Compaction Team
-/// 
-/// These functions deliberately hide the `HeapManager` and `FSM` 
-/// internal state implementations from other teams.
 
 /// Rebuild the table's Free Space Map (FSM) from scratch.
 /// Call this ONCE after a full table compaction/rewrite is completed.

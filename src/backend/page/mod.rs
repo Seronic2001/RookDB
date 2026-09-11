@@ -19,6 +19,12 @@ pub struct Page {
     pub data: Vec<u8>,
 }
 
+impl Default for Page {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Page {
     // Create an empty page
     pub fn new() -> Self {
@@ -108,7 +114,7 @@ pub fn get_tuple_count(page: &Page) -> std::io::Result<u32> {
         ));
     }
 
-    if (lower - PAGE_HEADER_SIZE) % ITEM_ID_SIZE != 0 {
+    if !(lower - PAGE_HEADER_SIZE).is_multiple_of(ITEM_ID_SIZE) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(

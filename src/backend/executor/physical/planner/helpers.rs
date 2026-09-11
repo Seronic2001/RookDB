@@ -137,12 +137,8 @@ pub fn infer_expr_type_from_ast(
                 "SUM" | "AVG" => Ok(crate::types::datatype::DataType::DoublePrecision),
                 "MIN" | "MAX" => {
                     // Infer from argument type if possible
-                    if let Some(arg) = args.first() {
-                        if let rook_ast::FunctionArg::Expr(expr) = arg {
-                            infer_expr_type_from_ast(expr, child_types, column_names)
-                        } else {
-                            Ok(crate::types::datatype::DataType::Int)
-                        }
+                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
+                        infer_expr_type_from_ast(expr, child_types, column_names)
                     } else {
                         Ok(crate::types::datatype::DataType::Int)
                     }
@@ -159,12 +155,8 @@ pub fn infer_expr_type_from_ast(
                 }
                 // Numeric functions
                 "ABS" | "FLOOR" | "CEIL" | "CEILING" | "ROUND" => {
-                    if let Some(arg) = args.first() {
-                        if let rook_ast::FunctionArg::Expr(expr) = arg {
-                            infer_expr_type_from_ast(expr, child_types, column_names)
-                        } else {
-                            Ok(crate::types::datatype::DataType::Int)
-                        }
+                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
+                        infer_expr_type_from_ast(expr, child_types, column_names)
                     } else {
                         Ok(crate::types::datatype::DataType::Int)
                     }
@@ -173,24 +165,16 @@ pub fn infer_expr_type_from_ast(
                 "EXTRACT" | "DATE_PART" => Ok(crate::types::datatype::DataType::Int),
                 // COALESCE — use type of first non-NULL argument
                 "COALESCE" => {
-                    if let Some(arg) = args.first() {
-                        if let rook_ast::FunctionArg::Expr(expr) = arg {
-                            infer_expr_type_from_ast(expr, child_types, column_names)
-                        } else {
-                            Ok(crate::types::datatype::DataType::Int)
-                        }
+                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
+                        infer_expr_type_from_ast(expr, child_types, column_names)
                     } else {
                         Ok(crate::types::datatype::DataType::Int)
                     }
                 }
                 // NULLIF — use type of first argument
                 "NULLIF" => {
-                    if let Some(arg) = args.first() {
-                        if let rook_ast::FunctionArg::Expr(expr) = arg {
-                            infer_expr_type_from_ast(expr, child_types, column_names)
-                        } else {
-                            Ok(crate::types::datatype::DataType::Int)
-                        }
+                    if let Some(rook_ast::FunctionArg::Expr(expr)) = args.first() {
+                        infer_expr_type_from_ast(expr, child_types, column_names)
                     } else {
                         Ok(crate::types::datatype::DataType::Int)
                     }

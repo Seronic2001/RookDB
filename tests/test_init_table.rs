@@ -65,7 +65,7 @@ fn test_init_table() {
     file.seek(SeekFrom::Start(TABLE_HEADER_SIZE as u64))
         .expect("Seek to first data page failed");
 
-    let mut page_buf = vec![0u8; PAGE_SIZE as usize];
+    let mut page_buf = vec![0u8; PAGE_SIZE];
     file.read_exact(&mut page_buf)
         .expect("Failed to read first data page");
     let _ = remove_file(TEST_FILE);

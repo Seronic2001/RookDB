@@ -1,15 +1,15 @@
-/// HeapManager - High-level API for table operations.
-/// 
-/// This module provides a complete interface for:
-/// - Inserting tuples using FSM-guided page selection 
-/// - Retrieving tuples by (page_id, slot_id)
-/// - Sequential scans across all pages
-/// - Automatic allocation of new pages with FSM registration
-/// 
-/// Key Design:
-/// - All page I/O goes through the CLOCK BufferPool for caching and eviction
-/// - Encapsulates FSM complexity; FSM-driven inserts spread load across pages
-/// - Header persistence survives crashes; FSM fork is a hint (can be rebuilt)
+//! HeapManager - High-level API for table operations.
+//! 
+//! This module provides a complete interface for:
+//! - Inserting tuples using FSM-guided page selection 
+//! - Retrieving tuples by (page_id, slot_id)
+//! - Sequential scans across all pages
+//! - Automatic allocation of new pages with FSM registration
+//! 
+//! Key Design:
+//! - All page I/O goes through the CLOCK BufferPool for caching and eviction
+//! - Encapsulates FSM complexity; FSM-driven inserts spread load across pages
+//! - Header persistence survives crashes; FSM fork is a hint (can be rebuilt)
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write, Seek, SeekFrom};
@@ -131,15 +131,13 @@ impl Iterator for HeapScanIterator {
             // report the error ONCE and advance to the next page. Returning
             // without advancing would re-enter this branch forever, hanging
             // any consumer that skips errors (e.g. `filter_map(|r| r.ok())`).
-            if self.cached_page.is_none() || self.cached_page.as_ref().unwrap().0 != self.current_page
-            {
-                if let Err(e) = self.load_page(self.current_page) {
+            if (self.cached_page.is_none() || self.cached_page.as_ref().unwrap().0 != self.current_page)
+                && let Err(e) = self.load_page(self.current_page) {
                     self.current_page += 1;
                     self.current_slot = 0;
                     self.cached_page = None;
                     return Some(Err(e));
                 }
-            }
 
             let (page_id, page) = self.cached_page.as_ref().unwrap();
 
@@ -630,8 +628,7 @@ impl HeapManager {
             return Ok((page_id, slot_id));
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::Other,
+        Err(io::Error::other(
             "Could not find or allocate page with sufficient space after 3 attempts",
         ))
     }
@@ -733,7 +730,7 @@ impl HeapManager {
 
                 // Get the tuple data to calculate freed bytes
                 let (offset, length) = get_slot_entry(page, slot_id)?;
-                freed = (length + ITEM_ID_SIZE) as u32;
+                freed = length + ITEM_ID_SIZE;
 
                 log::trace!(
                     "[HeapManager::delete_tuple] Marked slot {} as deleted, freed {} bytes",
@@ -1026,7 +1023,7 @@ mod tests {
         assert!(cat_full == 255 || cat_full == 254);
 
         let cat_half = HeapManager::bytes_to_category((PAGE_SIZE / 2) as u32);
-        assert!(cat_half >= 120 && cat_half <= 135);
+        assert!((120..=135).contains(&cat_half));
 
         let cat_zero = HeapManager::bytes_to_category(0);
         assert_eq!(cat_zero, 0);
@@ -1065,7 +1062,7 @@ mod tests {
         // Scan all tuples using HeapScanIterator with reused file handle
         let mut scanned = Vec::new();
         let mut iter = manager.scan();
-        while let Some(res) = iter.next() {
+        for res in iter.by_ref() {
             let (pid, sid, data) = res.unwrap();
             assert_eq!(data, tuple_data);
             scanned.push((pid, sid));
