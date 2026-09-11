@@ -8,14 +8,235 @@ use std::sync::{Mutex, OnceLock};
 
 use rook_ast::logical::LogicalPlan;
 use rook_ast::QueryPlan;
+use sqlparser::dialect::GenericDialect;
+use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 use crate::catalog::Catalog;
 use crate::backend::executor::insert_single_tuple;
 
 const DEFAULT_CACHE_CAPACITY: usize = 512;
 
-/// Normalize a SQL statement by replacing literals (strings, numbers) with `$1, $2, ...`
-/// and extracting parameter values in order.
+/// Normalize a SQL statement for plan-cache lookup: replace literals with
+/// `$1, $2, ...` placeholders, extract the literal values in order, and
+/// strip comments so textually different but semantically identical
+/// statements share one cache entry.
+///
+/// Tokenization is delegated to sqlparser's `Tokenizer` (GenericDialect),
+/// which understands `-- line` and `/* block */` comments, doubled-quote
+/// escapes, and identifier boundaries — the previous hand-rolled character
+/// scanner mangled digits inside comments and mis-tokenized quotes inside
+/// them. Inputs the tokenizer rejects (e.g. an unterminated string literal
+/// mid-statement) fall back to the legacy scanner so normalization never
+/// fails — the full parser will report the syntax error downstream.
 pub fn normalize_sql(sql: &str) -> (String, Vec<String>) {
+    match tokenize_for_normalization(sql) {
+        Ok(tokens) => normalize_from_tokens(sql, &tokens),
+        // Unterminated literals/comments or other tokenizer failures: fall
+        // back to the legacy scanner. The resulting key will not merge
+        // comment variants, but the full parser downstream still sees the
+        // original SQL and reports any genuine syntax error.
+        Err(_) => normalize_sql_legacy(sql),
+    }
+}
+
+/// Tokenize `sql` with sqlparser's `Tokenizer` under the project's
+/// `GenericDialect`, keeping comments as whitespace tokens so the
+/// normalizer can skip them explicitly.
+fn tokenize_for_normalization(
+    sql: &str,
+) -> Result<Vec<Token>, sqlparser::tokenizer::TokenizerError> {
+    let dialect = GenericDialect {};
+    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    tokenizer.tokenize()
+}
+
+/// Rebuild a canonical statement from sqlparser tokens: literals become
+/// `$n` placeholders, comments are dropped, whitespace runs collapse to a
+/// single space, and a trailing `;` is stripped.
+///
+/// Spacing is purely positional (independent of the source's whitespace):
+/// tokens are separated by one space except after `(` / `.`, before
+/// `)` / `,` / `;` / `.`, and before a `(` that directly follows a word
+/// (function-call / `VALUES(...)` glue). A `-`/`+` in unary position and
+/// immediately followed by a number folds into a signed literal, so
+/// `VALUES (-10)` parameterizes as one `$1` with value `-10`.
+fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
+    let _ = sql; // kept for signature symmetry with the legacy fallback
+    let mut normalized = String::with_capacity(sql.len());
+    let mut params: Vec<String> = Vec::new();
+
+    // Tokens are separator-irrelevant after comment stripping, so spacing is
+    // decided per pair of adjacent emitted tokens.
+    macro_rules! space_if_needed {
+        ($tok:expr, $prev_was_word:expr) => {
+            let glue_before = matches!(
+                $tok,
+                Token::RParen | Token::Comma | Token::SemiColon | Token::Period
+            ) || (matches!($tok, Token::LParen) && $prev_was_word);
+            let glue_after_prev =
+                normalized.ends_with('(') || normalized.ends_with('.');
+            if !normalized.is_empty() && !glue_after_prev && !glue_before {
+                normalized.push(' ');
+            }
+        };
+    }
+
+    // Was the previous *significant* token a Word? (function-call glue)
+    let mut prev_was_word = false;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        match token {
+            // Comments (`-- …` and `/* … */`) are whitespace tokens in
+            // sqlparser 0.61 (struct variants) and carry no semantics —
+            // skipped entirely (the fix).
+            Token::Whitespace(ws)
+                if matches!(
+                    ws,
+                    Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment { .. }
+                ) =>
+            {
+                i += 1;
+            }
+
+            // All other whitespace is irrelevant: spacing is positional.
+            Token::Whitespace(_) | Token::EOF => i += 1,
+
+            // Unary sign immediately followed by an unsigned number folds
+            // into a single signed literal. `a - 1` (binary) has whitespace
+            // between `-` and `1` at the token level, so it never folds;
+            // `(-10)` after `(` / `,` / `=` / operators does.
+            Token::Minus | Token::Plus
+                if i + 1 < tokens.len()
+                    && matches!(tokens[i + 1], Token::Number(_, false))
+                    && !prev_was_word =>
+            {
+                let sign = if matches!(token, Token::Minus) { "-" } else { "" };
+                if let Token::Number(value, _) = &tokens[i + 1] {
+                    space_if_needed!(token, prev_was_word);
+                    params.push(format!("{}{}", sign, value));
+                    normalized.push('$');
+                    normalized.push_str(&params.len().to_string());
+                }
+                i += 2;
+                prev_was_word = false;
+            }
+
+            Token::Word(w) => {
+                space_if_needed!(token, prev_was_word);
+                match w.quote_style {
+                    // Quoted identifiers: restore the original quoting so
+                    // downstream template parsing sees the same shape. They
+                    // are identifiers, not literals — never parameterized.
+                    Some('"') => {
+                        normalized.push('"');
+                        normalized.push_str(&w.value);
+                        normalized.push('"');
+                    }
+                    Some('`') => {
+                        normalized.push('`');
+                        normalized.push_str(&w.value);
+                        normalized.push('`');
+                    }
+                    Some('[') => {
+                        normalized.push('[');
+                        normalized.push_str(&w.value);
+                        normalized.push(']');
+                    }
+                    _ => normalized.push_str(&w.value),
+                }
+                prev_was_word = true;
+                i += 1;
+            }
+
+            // Numeric literal — the token value includes the sign when the
+            // tokenizer reports the "long" (signed) form.
+            Token::Number(value, _long) => {
+                space_if_needed!(token, prev_was_word);
+                params.push(value.clone());
+                normalized.push('$');
+                normalized.push_str(&params.len().to_string());
+                prev_was_word = false;
+                i += 1;
+            }
+
+            // String-ish literals: the token already holds the unquoted,
+            // unescaped content (sqlparser folds '' → '). Parameterize.
+            Token::SingleQuotedString(v)
+            | Token::NationalStringLiteral(v)
+            | Token::HexStringLiteral(v)
+            | Token::EscapedStringLiteral(v) => {
+                space_if_needed!(token, prev_was_word);
+                params.push(v.clone());
+                normalized.push('$');
+                normalized.push_str(&params.len().to_string());
+                prev_was_word = false;
+                i += 1;
+            }
+
+            // Double-quoted strings (non-identifier dialects): keep the
+            // quoting — not a literal.
+            Token::DoubleQuotedString(v) => {
+                space_if_needed!(token, prev_was_word);
+                normalized.push('"');
+                normalized.push_str(v);
+                normalized.push('"');
+                prev_was_word = false;
+                i += 1;
+            }
+
+            // Pre-existing positional placeholders pass through untouched
+            // (the legacy scanner mangled these into `$$N`). A numbered
+            // placeholder reserves its slot in `params` so subsequent
+            // extracted literals keep consistent `$n` numbering.
+            Token::Placeholder(p) => {
+                space_if_needed!(token, prev_was_word);
+                normalized.push_str(p);
+                if let Ok(n) = p
+                    .strip_prefix('$')
+                    .ok_or(())
+                    .and_then(|s| s.parse::<usize>().map_err(|_| ()))
+                {
+                    while params.len() < n {
+                        params.push(String::new()); // reserved, never consumed
+                    }
+                }
+                prev_was_word = false;
+                i += 1;
+            }
+
+            // Semicolon: strip when it only terminates the statement;
+            // interior separators are kept (multi-statement scripts).
+            Token::SemiColon => {
+                let rest_is_noise = tokens[i + 1..]
+                    .iter()
+                    .all(|t| matches!(t, Token::Whitespace(_) | Token::EOF));
+                if !rest_is_noise {
+                    space_if_needed!(token, prev_was_word);
+                    normalized.push(';');
+                    prev_was_word = false;
+                }
+                i += 1;
+            }
+
+            // Operators and punctuation: sqlparser's `Display` reconstructs
+            // the canonical text (e.g. `=`, `(`, `,`).
+            _ => {
+                space_if_needed!(token, prev_was_word);
+                normalized.push_str(&token.to_string());
+                prev_was_word = false;
+                i += 1;
+            }
+        }
+    }
+
+    (normalized.trim().to_string(), params)
+}
+
+/// Legacy hand-rolled normalizer kept as a fallback for inputs the
+/// sqlparser tokenizer rejects (e.g. unterminated string literals).
+/// It is comment-blind: digits inside comments become parameters and a
+/// quote inside a comment opens a bogus string literal.
+fn normalize_sql_legacy(sql: &str) -> (String, Vec<String>) {
     let mut normalized = String::with_capacity(sql.len());
     let mut params = Vec::new();
     let chars: Vec<char> = sql.chars().collect();
@@ -432,7 +653,7 @@ mod tests {
     fn test_normalize_sql_insert() {
         let sql = "INSERT INTO staff VALUES (1, 'user_000001', 100);";
         let (norm, params) = normalize_sql(sql);
-        assert_eq!(norm, "INSERT INTO staff VALUES ($1, $2, $3)");
+        assert_eq!(norm, "INSERT INTO staff VALUES($1, $2, $3)");
         assert_eq!(params, vec!["1", "user_000001", "100"]);
     }
 
@@ -456,7 +677,90 @@ mod tests {
     fn test_normalize_sql_strings_with_quotes() {
         let sql = "INSERT INTO users VALUES ('O''Reilly', -10)";
         let (norm, params) = normalize_sql(sql);
-        assert_eq!(norm, "INSERT INTO users VALUES ($1, $2)");
+        assert_eq!(norm, "INSERT INTO users VALUES($1, $2)");
         assert_eq!(params, vec!["O'Reilly", "-10"]);
+    }
+
+    #[test]
+    fn test_normalize_sql_strips_line_comment() {
+        // Digits inside a line comment must NOT become parameters.
+        let (norm, params) = normalize_sql(
+            "SELECT id FROM staff -- lookup user 42\nWHERE id = 7",
+        );
+        assert_eq!(norm, "SELECT id FROM staff WHERE id = $1");
+        assert_eq!(params, vec!["7"]);
+    }
+
+    #[test]
+    fn test_normalize_sql_strips_block_comment() {
+        let (norm, params) = normalize_sql(
+            "SELECT /* version 2, tuning 'quotes' 123 */ id FROM staff WHERE id = 5",
+        );
+        assert_eq!(norm, "SELECT id FROM staff WHERE id = $1");
+        assert_eq!(params, vec!["5"]);
+    }
+
+    #[test]
+    fn test_normalize_sql_comment_variants_share_cache_key() {
+        // Semantically identical statements with different comments (or no
+        // comments) must normalize to the same key — this is the whole point
+        // of comment handling.
+        let a = normalize_sql("SELECT * FROM t WHERE x = 1 /* fast path */").0;
+        let b = normalize_sql("SELECT * FROM t -- slow path\nWHERE x = 2").0;
+        let c = normalize_sql("SELECT * FROM t WHERE x = 3").0;
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+    }
+
+    #[test]
+    fn test_normalize_sql_comment_between_tokens_separates() {
+        // A comment where a space would be must not glue tokens together.
+        let (norm, params) = normalize_sql("SELECT a/*c*/+1 FROM t");
+        assert_eq!(norm, "SELECT a + $1 FROM t");
+        assert_eq!(params, vec!["1"]);
+    }
+
+    #[test]
+    fn test_normalize_sql_string_containing_comment_markers() {
+        // Comment markers INSIDE a string literal are string content, not
+        // comments — the literal is parameterized, nothing is stripped.
+        let (norm, params) = normalize_sql("SELECT * FROM t WHERE s = 'has -- dashes'");
+        assert_eq!(norm, "SELECT * FROM t WHERE s = $1");
+        assert_eq!(params, vec!["has -- dashes"]);
+    }
+
+    #[test]
+    fn test_normalize_sql_numbered_placeholder_preserved() {
+        // Pre-existing positional placeholders survive (legacy scanner
+        // mangled `$1` into `$$1`) and reserve their slot so extracted
+        // literals keep consistent numbering. The empty string is the
+        // reserved slot — placeholders are never substituted by the cache.
+        let (norm, params) = normalize_sql("SELECT * FROM t WHERE id = $1 AND n = 2");
+        assert_eq!(norm, "SELECT * FROM t WHERE id = $1 AND n = $2");
+        assert_eq!(params, vec!["", "2"]);
+    }
+
+    #[test]
+    fn test_normalize_sql_whitespace_insensitive() {
+        let a = normalize_sql("SELECT  id,name  FROM  t").0;
+        let b = normalize_sql("SELECT id, name FROM t").0;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_normalize_sql_keyword_case_preserved() {
+        // The normalizer intentionally does not case-fold; case-variant SQL
+        // simply occupies two cache slots (same behavior as before).
+        let a = normalize_sql("select * from t where x = 1").0;
+        let b = normalize_sql("SELECT * FROM t WHERE x = 1").0;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_normalize_sql_unterminated_string_falls_back() {
+        // Tokenizer rejects the unterminated literal → legacy scanner runs;
+        // result must still be a sane key, not a panic.
+        let (norm, _params) = normalize_sql("SELECT 'oops FROM t");
+        assert!(norm.starts_with("SELECT"));
     }
 }

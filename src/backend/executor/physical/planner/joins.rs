@@ -14,6 +14,7 @@ use super::super::operators::{
     AggregateFunction,
     infer_aggregate_output_type,
 };
+use crate::backend::error::{RookError, RookResult};
 use crate::types::datatype::DataType;
 use super::PhysicalPlanner;
 use super::helpers::{ast_expr_to_output_name, infer_expr_type_from_ast};
@@ -28,7 +29,7 @@ impl PhysicalPlanner {
         &self,
         j: &LogicalJoin,
         cte_registry: &mut std::collections::HashMap<String, Vec<super::super::tuple::Tuple>>,
-    ) -> Result<Box<dyn PhysicalOperator>, String> {
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
         let left = self.plan_internal(&j.left, cte_registry)?;
         let right = self.plan_internal(&j.right, cte_registry)?;
 
@@ -136,7 +137,7 @@ impl PhysicalPlanner {
         &self,
         a: &LogicalAggregate,
         cte_registry: &mut std::collections::HashMap<String, Vec<super::super::tuple::Tuple>>,
-    ) -> Result<Box<dyn PhysicalOperator>, String> {
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
         let child = self.plan_internal(&a.child, cte_registry)?;
         let child_schema = child.schema();
         let column_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
@@ -153,13 +154,15 @@ impl PhysicalPlanner {
             let data_type = match expr_node {
                 rook_ast::ExprNode::Column(name) => {
                     let idx = column_names.iter().position(|c| c == name)
-                        .ok_or_else(|| format!("Column '{}' not found in GROUP BY", name))?;
+                        .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
                     child_types[idx].clone()
                 }
                 rook_ast::ExprNode::Compound(parts) => {
-                    let name = parts.last().ok_or_else(|| "Empty compound identifier".to_string())?;
+                    let name = parts.last().ok_or_else(|| {
+                        RookError::Internal("Empty compound identifier".to_string())
+                    })?;
                     let idx = column_names.iter().position(|c| c == name)
-                        .ok_or_else(|| format!("Column '{}' not found in GROUP BY", name))?;
+                        .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
                     child_types[idx].clone()
                 }
                 rook_ast::ExprNode::Constant(cv) => {
@@ -173,19 +176,27 @@ impl PhysicalPlanner {
                 }
                 rook_ast::ExprNode::Cast { data_type, .. } => {
                     data_type.parse::<DataType>()
-                        .map_err(|e| format!("Invalid CAST target type '{}': {}", data_type, e))?
+                        .map_err(|e| RookError::TypeMismatch(format!(
+                            "Invalid CAST target type '{}': {}", data_type, e
+                        )))?
                 }
                 rook_ast::ExprNode::Binary { .. } => DataType::Int,
                 // Scalar subqueries are not expected in GROUP BY expressions
                 rook_ast::ExprNode::ScalarSubquery(_) => {
-                    return Err("Scalar subqueries are not allowed in GROUP BY".to_string());
+                    return Err(RookError::Internal(
+                        "Scalar subqueries are not allowed in GROUP BY".to_string(),
+                    ));
                 }
                 // Aggregate functions in GROUP BY are not valid SQL — return error
                 rook_ast::ExprNode::Function { .. } => {
-                    return Err("Aggregate function calls are not allowed in GROUP BY".to_string());
+                    return Err(RookError::Internal(
+                        "Aggregate function calls are not allowed in GROUP BY".to_string(),
+                    ));
                 }
                 rook_ast::ExprNode::Case { .. } => {
-                    return Err("CASE expressions are not allowed in GROUP BY".to_string());
+                    return Err(RookError::Internal(
+                        "CASE expressions are not allowed in GROUP BY".to_string(),
+                    ));
                 }
             };
             group_by_exprs.push(expr);
@@ -290,7 +301,7 @@ impl PhysicalPlanner {
         &self,
         rc: &LogicalRecursiveCte,
         cte_registry: &mut std::collections::HashMap<String, Vec<super::super::tuple::Tuple>>,
-    ) -> Result<Box<dyn PhysicalOperator>, String> {
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
         log::info!("[Volcano] Planning recursive CTE '{}'", rc.name);
         let cte_key = rc.name.to_ascii_lowercase();
         // Use the recursive CTE name as the table qualifier so that

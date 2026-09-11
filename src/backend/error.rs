@@ -67,6 +67,16 @@ pub enum RookError {
     TypeMismatch(String),
     /// Underlying storage I/O failure.
     Io(std::io::Error),
+    /// An error with additional human-readable context attached.
+    ///
+    /// Produced by [`RookError::with_context`]; the inner error keeps its
+    /// semantics — the accessors (`is_io`, `is_constraint_violation`,
+    /// `constraint_kind`) match through to the source — while `Display`
+    /// renders `"context: source"`.
+    Contextual {
+        context: String,
+        source: Box<RookError>,
+    },
     /// Anything not yet covered by a structured variant.
     Internal(String),
 }
@@ -102,7 +112,21 @@ impl RookError {
 
     /// `true` when the failure came from the storage layer.
     pub fn is_io(&self) -> bool {
-        matches!(self, RookError::Io(_))
+        match self {
+            RookError::Io(_) => true,
+            RookError::Contextual { source, .. } => source.is_io(),
+            _ => false,
+        }
+    }
+
+    /// Attach human-readable context to this error, preserving its variant
+    /// semantics (see [`RookError::Contextual`]). Contexts chain when applied
+    /// repeatedly: the most recent context renders first.
+    pub fn with_context(self, context: impl Into<String>) -> Self {
+        RookError::Contextual {
+            context: context.into(),
+            source: Box::new(self),
+        }
     }
 }
 
@@ -116,6 +140,7 @@ impl fmt::Display for RookError {
             RookError::InvalidIdentifier(name) => write!(f, "Invalid identifier '{}'", name),
             RookError::TypeMismatch(message) => f.write_str(message),
             RookError::Io(e) => write!(f, "I/O error: {}", e),
+            RookError::Contextual { context, source } => write!(f, "{}: {}", context, source),
             RookError::Internal(message) => f.write_str(message),
         }
     }
@@ -125,6 +150,7 @@ impl std::error::Error for RookError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RookError::Io(e) => Some(e),
+            RookError::Contextual { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
@@ -196,6 +222,30 @@ mod tests {
 
         let e2: RookError = "UNIQUE constraint violated: value '1' dup".into();
         assert!(matches!(e2, RookError::Internal(_)));
+    }
+
+    #[test]
+    fn with_context_preserves_semantics_and_renders_first() {
+        let io = RookError::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file",
+        ));
+        let ctx = io.with_context("Failed to open heap for table 'users'");
+
+        // Semantics preserved through the wrapper
+        assert!(ctx.is_io());
+        assert_eq!(ctx.constraint_kind(), None);
+        // Context renders first, source after
+        assert_eq!(
+            ctx.to_string(),
+            "Failed to open heap for table 'users': I/O error: no such file"
+        );
+        // std::error::Error::source chains to the inner error (one hop at a
+        // time: Contextual → Io → std::io::Error)
+        let src = std::error::Error::source(&ctx).expect("contextual error has a source");
+        let inner = src.downcast_ref::<RookError>().expect("source is a RookError");
+        assert!(inner.is_io());
+        assert!(std::error::Error::source(inner).is_some(), "Io wraps the io::Error");
     }
 
     #[test]

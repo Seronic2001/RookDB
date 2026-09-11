@@ -2,6 +2,7 @@
 //!
 //! These are standalone utility functions used across multiple planner modules.
 
+use crate::backend::error::{RookError, RookResult};
 use crate::types::datatype::DataType;
 use crate::types::DataValue;
 
@@ -87,23 +88,25 @@ pub fn infer_expr_type_from_ast(
     expr: &rook_ast::ExprNode,
     child_types: &[crate::types::datatype::DataType],
     column_names: &[String],
-) -> Result<crate::types::datatype::DataType, String> {
+) -> RookResult<crate::types::datatype::DataType> {
     match expr {
         rook_ast::ExprNode::Column(name) => {
             let idx = column_names.iter().position(|c| c == name)
-                .ok_or_else(|| format!("Column '{}' not found", name))?;
+                .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
             Ok(child_types[idx].clone())
         }
         rook_ast::ExprNode::Compound(parts) => {
-            let name = parts.last().ok_or_else(|| "Empty compound identifier".to_string())?;
+            let name = parts.last().ok_or_else(|| {
+                RookError::Internal("Empty compound identifier".to_string())
+            })?;
             let idx = column_names.iter().position(|c| c == name)
-                .ok_or_else(|| format!("Column '{}' not found", name))?;
+                .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
             Ok(child_types[idx].clone())
         }
         rook_ast::ExprNode::Constant(cv) => {
             match cv {
                 rook_ast::ConstantValue::Null => {
-                    Err("Cannot infer type for NULL literal".to_string())
+                    Err(RookError::Internal("Cannot infer type for NULL literal".to_string()))
                 }
                 rook_ast::ConstantValue::Int(_) => Ok(crate::types::datatype::DataType::Int),
                 rook_ast::ConstantValue::Float(_) => Ok(crate::types::datatype::DataType::DoublePrecision),
@@ -120,13 +123,17 @@ pub fn infer_expr_type_from_ast(
         }
         rook_ast::ExprNode::Cast { data_type, .. } => {
             data_type.parse::<crate::types::datatype::DataType>()
-                .map_err(|e| format!("Invalid CAST target type '{}': {}", data_type, e))
+                .map_err(|e| RookError::TypeMismatch(format!(
+                    "Invalid CAST target type '{}': {}", data_type, e
+                )))
         }
         // Scalar subqueries are materialized before this function is called,
         // so any remaining ScalarSubquery node would have been replaced with
         // a Constant. This is a fallback for the unimplemented case.
         rook_ast::ExprNode::ScalarSubquery(_) => {
-            Err("Scalar subqueries must be materialized before type inference".to_string())
+            Err(RookError::Internal(
+                "Scalar subqueries must be materialized before type inference".to_string(),
+            ))
         }
         // Scalar / aggregate function — infer result type from the function name
         rook_ast::ExprNode::Function { name, args, .. } => {
@@ -188,7 +195,7 @@ pub fn infer_expr_type_from_ast(
         }
         rook_ast::ExprNode::Case { .. } => {
             // For CASE expressions, infer from first THEN branch (simplistic)
-            Err("Cannot infer type for CASE expression".to_string())
+            Err(RookError::Internal("Cannot infer type for CASE expression".to_string()))
         }
     }
 }

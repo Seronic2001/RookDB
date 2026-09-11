@@ -32,6 +32,7 @@ use super::operators::{
 };
 
 use crate::backend::catalog::types::Catalog;
+use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
 use self::helpers::infer_expr_type_from_ast;
@@ -57,7 +58,7 @@ impl PhysicalPlanner {
     /// Plan a logical query plan into a physical operator tree.
     ///
     /// Returns the root of the operator tree.
-    pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<Box<dyn PhysicalOperator>, String> {
+    pub fn plan(&self, logical_plan: &LogicalPlan) -> RookResult<Box<dyn PhysicalOperator>> {
         // Start with an empty CTE registry — CTEs are materialised on demand
         // as the planner descends into LogicalCte nodes.
         let mut cte_registry: std::collections::HashMap<String, Vec<super::tuple::Tuple>> =
@@ -69,7 +70,7 @@ impl PhysicalPlanner {
         &self,
         plan: &LogicalPlan,
         cte_registry: &mut std::collections::HashMap<String, Vec<super::tuple::Tuple>>,
-    ) -> Result<Box<dyn PhysicalOperator>, String> {
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
         match plan {
             LogicalPlan::TableScan(ts) => self.plan_table_scan(ts),
 
@@ -147,13 +148,13 @@ impl PhysicalPlanner {
                     match &ob.expr {
                         rook_ast::ExprNode::Column(name) => {
                             let idx = column_names.iter().position(|n| n == name)
-                                .ok_or_else(|| format!("Sort column '{}' not found", name))?;
+                                .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
                             sort_keys.push((idx, !ob.ascending));
                         }
                         rook_ast::ExprNode::Compound(parts) => {
                             let name = parts.last().cloned().unwrap_or_default();
                             let idx = column_names.iter().position(|n| n == &name)
-                                .ok_or_else(|| format!("Sort column '{}' not found", name))?;
+                                .ok_or_else(|| RookError::NotFound { entity: "Column", name })?;
                             sort_keys.push((idx, !ob.ascending));
                         }
                         complex_expr => {
@@ -326,12 +327,10 @@ impl PhysicalPlanner {
                         .iter()
                         .map(|row| {
                             row.iter()
-                                .map(|node| {
-                                    expr_from_ast(node, &[]).map_err(|e| e.to_string())
-                                })
-                                .collect::<Result<Vec<_>, _>>()
+                                .map(|node| expr_from_ast(node, &[]))
+                                .collect::<RookResult<Vec<_>>>()
                         })
-                        .collect::<Result<Vec<_>, String>>()?;
+                        .collect::<RookResult<Vec<_>>>()?;
                     Box::new(ValuesOperator::new(compiled, schema))
                 } else {
                     self.plan_internal(&inp.child, cte_registry)?
@@ -357,7 +356,9 @@ impl PhysicalPlanner {
                 let tuples = cte_registry
                     .get(&cs.name.to_ascii_lowercase())
                     .cloned()
-                    .ok_or_else(|| format!("CTE '{}' not found in registry during physical planning", cs.name))?;
+                    .ok_or_else(|| RookError::Internal(format!(
+                        "CTE '{}' not found in registry during physical planning", cs.name
+                    )))?;
 
                 // Build the schema for CteScanOperator from the CteScan node.
                 // The CTE name serves as the table qualifier so that table-qualified
@@ -398,7 +399,7 @@ impl PhysicalPlanner {
     /// uses an `IndexScanOperator` with `FullScan` mode instead of a
     /// sequential scan.  This allows the B+ Tree index to drive tuple
     /// retrieval in key order.
-    pub(crate) fn plan_table_scan(&self, ts: &LogicalTableScan) -> Result<Box<dyn PhysicalOperator>, String> {
+    pub(crate) fn plan_table_scan(&self, ts: &LogicalTableScan) -> RookResult<Box<dyn PhysicalOperator>> {
         // ── System table path ─────────────────────────────────────────────
         if let Some(sys_name) = &ts.system_table_name {
             // Virtual single-row table: no heap file needed
@@ -410,7 +411,10 @@ impl PhysicalPlanner {
                 sys_name
             ));
             if !heap_path.exists() {
-                return Err(format!("System table heap file not found: {:?}", heap_path));
+                return Err(RookError::NotFound {
+                    entity: "System table",
+                    name: sys_name.clone(),
+                });
             }
             // Use the system table's actual physical schema for deserialisation
             // (so INT columns are decoded as Int, BOOL as Bool, etc.) but keep
@@ -441,7 +445,9 @@ impl PhysicalPlanner {
             }
             let schema_types: Vec<DataType> = sys_schema.to_vec();
             let heap_manager = HeapManager::open(heap_path)
-                .map_err(|e| format!("Failed to open system table '{}': {}", sys_name, e))?;
+                .map_err(|e| RookError::Io(e).with_context(format!(
+                    "Failed to open system table '{}'", sys_name
+                )))?;
             return Ok(Box::new(SeqScanOperator::new_with_mapping(
                 heap_manager,
                 schema_types,
@@ -470,7 +476,7 @@ impl PhysicalPlanner {
         ));
 
         if !heap_path.exists() {
-            return Err(format!("Heap file not found: {:?}", heap_path));
+            return Err(RookError::NotFound { entity: "Table", name: ts.table.clone() });
         }
 
         // Check for any index files (named or legacy) alongside the heap file
@@ -495,7 +501,9 @@ impl PhysicalPlanner {
 
                 crate::backend::cache::checkpoint();
                 let mut btree = BTree::open(index_path)
-                    .map_err(|e| format!("Failed to open index for table '{}': {}", ts.table, e))?;
+                    .map_err(|e| RookError::Io(e).with_context(format!(
+                        "Failed to open index for table '{}'", ts.table
+                    )))?;
 
                 // Set the key type from the indexed column (NOT the first table column)
                 let idx_col_name = &named_indexes[0].1;
@@ -506,7 +514,9 @@ impl PhysicalPlanner {
                 }
 
                 let heap_manager = HeapManager::open(heap_path)
-                    .map_err(|e| format!("Failed to open heap for table '{}': {}", ts.table, e))?;
+                    .map_err(|e| RookError::Io(e).with_context(format!(
+                        "Failed to open heap for table '{}'", ts.table
+                    )))?;
 
                 return Ok(Box::new(IndexScanOperator::new(
                     btree,
@@ -531,14 +541,18 @@ impl PhysicalPlanner {
 
             crate::backend::cache::checkpoint();
             let mut btree = BTree::open(legacy_index_path)
-                .map_err(|e| format!("Failed to open legacy index for table '{}': {}", ts.table, e))?;
+                .map_err(|e| RookError::Io(e).with_context(format!(
+                    "Failed to open legacy index for table '{}'", ts.table
+                )))?;
 
             if let Some(first_col) = table_schema.first() {
                 btree.set_key_type(first_col.data_type.clone());
             }
 
             let heap_manager = HeapManager::open(heap_path)
-                .map_err(|e| format!("Failed to open heap for table '{}': {}", ts.table, e))?;
+                .map_err(|e| RookError::Io(e).with_context(format!(
+                    "Failed to open heap for table '{}'", ts.table
+                )))?;
 
             return Ok(Box::new(IndexScanOperator::new(
                 btree,
@@ -554,7 +568,9 @@ impl PhysicalPlanner {
         );
 
         let heap_manager = HeapManager::open(heap_path)
-            .map_err(|e| format!("Failed to open heap for table '{}': {}", ts.table, e))?;
+            .map_err(|e| RookError::Io(e).with_context(format!(
+                "Failed to open heap for table '{}'", ts.table
+            )))?;
 
         Ok(Box::new(SeqScanOperator::new(heap_manager, column_info)))
     }
@@ -637,11 +653,11 @@ impl PhysicalPlanner {
     }
 
     /// Resolve the table's schema from the catalog.
-    pub(crate) fn resolve_table_schema(&self, table_name: &str) -> Result<Vec<crate::backend::catalog::types::Column>, String> {
+    pub(crate) fn resolve_table_schema(&self, table_name: &str) -> RookResult<Vec<crate::backend::catalog::types::Column>> {
         let db = self.catalog.databases.get(&self.db_name)
-            .ok_or_else(|| format!("Database '{}' not found", self.db_name))?;
+            .ok_or_else(|| RookError::NotFound { entity: "Database", name: self.db_name.clone() })?;
         let table = db.tables.get(table_name)
-            .ok_or_else(|| format!("Table '{}' not found in database '{}'", table_name, self.db_name))?;
+            .ok_or_else(|| RookError::NotFound { entity: "Table", name: table_name.to_string() })?;
         Ok(table.columns.clone())
     }
 
@@ -652,7 +668,7 @@ impl PhysicalPlanner {
         &self,
         pred_node: &rook_ast::PredicateNode,
         schema: &[ColumnInfo],
-    ) -> Result<Predicate, String> {
+    ) -> RookResult<Predicate> {
         let column_names: Vec<String> = schema.iter().map(|c| c.name.clone()).collect();
         self.build_predicate_with_subqueries(pred_node, &column_names, schema)
     }
@@ -668,7 +684,7 @@ impl PhysicalPlanner {
         expr: &rook_ast::ExprNode,
         column_names: &[String],
         child_types: &[DataType],
-    ) -> Result<(Expr, DataType), String> {
+    ) -> RookResult<(Expr, DataType)> {
         match expr {
             // Top-level scalar subquery: materialize and create Expr::Constant directly
             rook_ast::ExprNode::ScalarSubquery(info) => {
@@ -699,7 +715,9 @@ impl PhysicalPlanner {
                 let inner = self.materialize_nested_subqueries(inner)?;
                 let inner_expr = expr_from_ast(&inner, column_names)?;
                 let target_dt: DataType = data_type.parse()
-                    .map_err(|e: String| format!("Invalid CAST target type '{}': {}", data_type, e))?;
+                    .map_err(|e: String| RookError::TypeMismatch(format!(
+                        "Invalid CAST target type '{}': {}", data_type, e
+                    )))?;
                 Ok((Expr::Cast(Box::new(inner_expr), target_dt.clone()), target_dt))
             }
             // All other expression types: use the standard converter

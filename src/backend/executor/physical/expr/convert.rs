@@ -1,6 +1,7 @@
 //! Conversion functions from `rook_ast` expression/predicate nodes to physical
 //! `Expr` and `Predicate` types.
 
+use crate::backend::error::{RookError, RookResult};
 use crate::types::value::DataValue;
 
 use super::Expr;
@@ -11,14 +12,14 @@ use super::predicate::{Predicate, ComparisonOp, BooleanTest};
 pub fn expr_from_ast(
     node: &rook_ast::ExprNode,
     column_names: &[String],
-) -> Result<Expr, String> {
+) -> RookResult<Expr> {
     match node {
         rook_ast::ExprNode::Column(name) => {
             // Unqualified column reference — just store the column name.
             // Resolution happens at evaluation time against the tuple's schema.
             // Verify the column exists in the schema for early error detection.
             if !column_names.iter().any(|c| c == name) {
-                return Err(format!("Column '{}' not found", name));
+                return Err(RookError::NotFound { entity: "Column", name: name.clone() });
             }
             Ok(Expr::Column {
                 table: None,
@@ -27,7 +28,9 @@ pub fn expr_from_ast(
         }
         rook_ast::ExprNode::Compound(parts) => {
             // Qualified column reference — extract table and column name.
-            let column = parts.last().ok_or_else(|| "Empty compound identifier".to_string())?;
+            let column = parts.last().ok_or_else(|| {
+                RookError::Internal("Empty compound identifier".to_string())
+            })?;
             let table = if parts.len() >= 2 {
                 Some(parts[parts.len() - 2].clone())
             } else {
@@ -35,7 +38,7 @@ pub fn expr_from_ast(
             };
             // Verify the column exists in the schema for early error detection.
             if !column_names.iter().any(|c| c == column) {
-                return Err(format!("Column '{}' not found (available: {:?})", column, column_names));
+                return Err(RookError::NotFound { entity: "Column", name: column.clone() });
             }
             Ok(Expr::Column {
                 table,
@@ -61,12 +64,16 @@ pub fn expr_from_ast(
         rook_ast::ExprNode::Cast { expr, data_type } => {
             let inner = expr_from_ast(expr, column_names)?;
             let target_dt: crate::types::datatype::DataType = data_type.parse()
-                .map_err(|e: String| format!("Invalid CAST target type '{}': {}", data_type, e))?;
+                .map_err(|e: String| RookError::TypeMismatch(format!(
+                    "Invalid CAST target type '{}': {}", data_type, e
+                )))?;
             Ok(Expr::Cast(Box::new(inner), target_dt))
         }
         // Scalar subqueries should be materialized before reaching this function.
         rook_ast::ExprNode::ScalarSubquery(_) => {
-            Err("Scalar subqueries must be materialized before expr_from_ast".to_string())
+            Err(RookError::Internal(
+                "Scalar subqueries must be materialized before expr_from_ast".to_string(),
+            ))
         }
         // Scalar function calls — convert each argument and create an Expr::Function.
         // Aggregate functions (COUNT, SUM, AVG, MIN, MAX) are handled by the
@@ -118,7 +125,7 @@ pub fn expr_from_ast(
 pub fn predicate_from_ast(
     node: &rook_ast::PredicateNode,
     column_names: &[String],
-) -> Result<Predicate, String> {
+) -> RookResult<Predicate> {
     match node {
         rook_ast::PredicateNode::BinaryOp { left, op, right } => {
             let l = predicate_from_ast(left, column_names)?;
@@ -163,7 +170,7 @@ pub fn predicate_from_ast(
         }
         rook_ast::PredicateNode::InList { expr, list } => {
             let e = expr_from_ast(expr, column_names)?;
-            let items: Result<Vec<Expr>, String> = list.iter()
+            let items: RookResult<Vec<Expr>> = list.iter()
                 .map(|item| expr_from_ast(item, column_names))
                 .collect();
             let items = items?;
@@ -209,12 +216,14 @@ pub fn predicate_from_ast(
         // PhysicalPlanner before reaching this converter. If they appear
         // here, something went wrong in the planning pipeline.
         rook_ast::PredicateNode::Exists(_) | rook_ast::PredicateNode::InSubquery { .. } => {
-            Err("Subquery predicates must be materialized before predicate_from_ast".to_string())
+            Err(RookError::Internal(
+                "Subquery predicates must be materialized before predicate_from_ast".to_string(),
+            ))
         }
     }
 }
 
-fn constant_from_ast(cv: &rook_ast::ConstantValue) -> Result<Option<DataValue>, String> {
+fn constant_from_ast(cv: &rook_ast::ConstantValue) -> RookResult<Option<DataValue>> {
     match cv {
         rook_ast::ConstantValue::Null => Ok(None),
         rook_ast::ConstantValue::Int(i) => Ok(Some(DataValue::Int(*i as i32))),

@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [dependencies]
 rook-ast = { path = "../rook-ast" }
+sqlparser = { version = "0.61.0", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

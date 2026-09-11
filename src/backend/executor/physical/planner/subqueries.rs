@@ -10,6 +10,7 @@ use std::rc::Rc;
 use super::super::tuple::ColumnInfo;
 use super::super::expr::{Predicate, Expr, ComparisonOp, expr_from_ast, predicate_from_ast};
 use super::super::engine::execute_plan_collect;
+use crate::backend::error::{RookError, RookResult};
 use crate::types::datatype::DataType;
 use crate::types::DataValue;
 use super::super::operators::{
@@ -26,7 +27,7 @@ impl PhysicalPlanner {
         node: &rook_ast::PredicateNode,
         column_names: &[String],
         schema: &[ColumnInfo],
-    ) -> Result<Predicate, String> {
+    ) -> RookResult<Predicate> {
         match node {
             rook_ast::PredicateNode::BinaryOp { left, op, right } => {
                 let l = self.build_predicate_with_subqueries(left, column_names, schema)?;
@@ -116,16 +117,17 @@ impl PhysicalPlanner {
     pub(crate) fn materialize_exists_subquery(
         &self,
         select: &rook_ast::SelectPlan,
-    ) -> Result<bool, String> {
+    ) -> RookResult<bool> {
         // Build QueryPlan around the SelectPlan
         let query_plan = rook_ast::QueryPlan::Select(select.clone());
 
         // Plan the inner query into a LogicalPlan
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| format!("Failed to plan EXISTS subquery: {}", e.message))?;
+            .map_err(|e| RookError::Internal(e.message)
+                .with_context("Failed to plan EXISTS subquery"))?;
 
         // Execute the plan and check if any tuples are produced
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name).map_err(|e| e.to_string())?;
+        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
         Ok(!tuples.is_empty())
     }
 
@@ -134,14 +136,15 @@ impl PhysicalPlanner {
     pub(crate) fn materialize_in_subquery(
         &self,
         select: &rook_ast::SelectPlan,
-    ) -> Result<Vec<Option<DataValue>>, String> {
+    ) -> RookResult<Vec<Option<DataValue>>> {
         let query_plan = rook_ast::QueryPlan::Select(select.clone());
 
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| format!("Failed to plan IN subquery: {}", e.message))?;
+            .map_err(|e| RookError::Internal(e.message)
+                .with_context("Failed to plan IN subquery"))?;
 
         // Execute and collect tuples
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name).map_err(|e| e.to_string())?;
+        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
 
         // Extract the first column value from each tuple
         let values: Vec<Option<DataValue>> = tuples
@@ -161,14 +164,15 @@ impl PhysicalPlanner {
     pub(crate) fn materialize_scalar_subquery(
         &self,
         select: &rook_ast::SelectPlan,
-    ) -> Result<(Option<DataValue>, DataType), String> {
+    ) -> RookResult<(Option<DataValue>, DataType)> {
         log::info!("[Planner] Materializing scalar subquery");
         let query_plan = rook_ast::QueryPlan::Select(select.clone());
 
         let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-            .map_err(|e| format!("Failed to plan scalar subquery: {}", e.message))?;
+            .map_err(|e| RookError::Internal(e.message)
+                .with_context("Failed to plan scalar subquery"))?;
 
-        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name).map_err(|e| e.to_string())?;
+        let tuples = execute_plan_collect(&logical_plan, &self.catalog, &self.db_name)?;
 
         match tuples.len() {
             0 => Ok((None, DataType::Int)), // NULL → default to Int
@@ -179,10 +183,10 @@ impl PhysicalPlanner {
                 let data_type = value.as_ref().map(|v| v.data_type()).unwrap_or(DataType::Int);
                 Ok((value, data_type))
             }
-            n => Err(format!(
+            n => Err(RookError::Internal(format!(
                 "Scalar subquery returned more than one row (got {})",
                 n
-            )),
+            ))),
         }
     }
 
@@ -192,7 +196,7 @@ impl PhysicalPlanner {
     pub(crate) fn materialize_nested_subqueries(
         &self,
         expr: &rook_ast::ExprNode,
-    ) -> Result<rook_ast::ExprNode, String> {
+    ) -> RookResult<rook_ast::ExprNode> {
         match expr {
             rook_ast::ExprNode::ScalarSubquery(info) => {
                 let (value, _) = self.materialize_scalar_subquery(&info.select)?;
@@ -366,14 +370,14 @@ impl PhysicalPlanner {
         &self,
         subquery_info: &rook_ast::SubqueryInfo,
         outer_schema: &[ColumnInfo],
-    ) -> Result<Predicate, String> {
+    ) -> RookResult<Predicate> {
         let select = &subquery_info.select;
 
         // ── 1. Determine inner table (or its alias) and column info ──
         let inner_tref = select
             .from
             .first()
-            .ok_or_else(|| "EXISTS subquery has no FROM table".to_string())?;
+            .ok_or_else(|| RookError::Internal("EXISTS subquery has no FROM table".to_string()))?;
         // Use alias if present, since predicates reference the alias not the raw table name
         let inner_table_alias = inner_tref.alias.as_deref().unwrap_or(&inner_tref.name).to_string();
         let inner_table_name = inner_tref.name.clone();
@@ -392,11 +396,15 @@ impl PhysicalPlanner {
                 &inner_col_names,
             )?
         } else {
-            return Err("Correlated EXISTS subquery has no WHERE clause".to_string());
+            return Err(RookError::Internal(
+                "Correlated EXISTS subquery has no WHERE clause".to_string(),
+            ));
         };
 
         if correlation_pairs.is_empty() {
-            return Err("No correlation found in EXISTS subquery".to_string());
+            return Err(RookError::Internal(
+                "No correlation found in EXISTS subquery".to_string(),
+            ));
         }
 
         // ── 3. Build the inner plan directly as a SeqScan ──────────────
@@ -425,23 +433,18 @@ impl PhysicalPlanner {
             let _inner_col_idx = inner_col_names
                 .iter()
                 .position(|n| n.eq_ignore_ascii_case(inner_col_name))
-                .ok_or_else(|| {
-                    format!(
-                        "Inner column '{}' not found in table '{}'",
-                        inner_col_name, inner_table_name
-                    )
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: inner_col_name.clone(),
                 })?;
 
             // Resolve outer column index
             let outer_col_idx = outer_schema
                 .iter()
                 .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
-                .ok_or_else(|| {
-                    format!(
-                        "Outer column '{}' not found in outer schema (available: {:?})",
-                        outer_col_name,
-                        outer_schema.iter().map(|c| &c.name).collect::<Vec<_>>()
-                    )
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: outer_col_name.clone(),
                 })?;
 
             let param = Rc::new(RefCell::new(None));
@@ -498,14 +501,14 @@ impl PhysicalPlanner {
         lhs_expr: Expr,
         negated: bool,
         outer_schema: &[ColumnInfo],
-    ) -> Result<Predicate, String> {
+    ) -> RookResult<Predicate> {
         let select = &subquery.select;
 
         // ── 1. Determine inner table (or its alias) and column info ──
         let inner_tref = select
             .from
             .first()
-            .ok_or_else(|| "IN subquery has no FROM table".to_string())?;
+            .ok_or_else(|| RookError::Internal("IN subquery has no FROM table".to_string()))?;
         // Use alias if present, since predicates reference the alias not the raw table name
         let inner_table_alias = inner_tref.alias.as_deref().unwrap_or(&inner_tref.name).to_string();
         let inner_table_name = inner_tref.name.clone();
@@ -524,11 +527,15 @@ impl PhysicalPlanner {
                 &inner_col_names,
             )?
         } else {
-            return Err("Correlated IN subquery has no WHERE clause".to_string());
+            return Err(RookError::Internal(
+                "Correlated IN subquery has no WHERE clause".to_string(),
+            ));
         };
 
         if correlation_pairs.is_empty() {
-            return Err("No correlation found in IN subquery".to_string());
+            return Err(RookError::Internal(
+                "No correlation found in IN subquery".to_string(),
+            ));
         }
 
         // ── 3. Build the inner plan (no WHERE clause, just SeqScan) ────
@@ -538,7 +545,8 @@ impl PhysicalPlanner {
         let query_plan = rook_ast::QueryPlan::Select(inner_select);
         let logical_plan =
             crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-                .map_err(|e| format!("Failed to plan correlated IN subquery: {}", e.message))?;
+                .map_err(|e| RookError::Internal(e.message)
+                    .with_context("Failed to plan correlated IN subquery"))?;
 
         let inner_planner = PhysicalPlanner::new(self.catalog.clone(), self.db_name.clone());
         let inner_base = inner_planner.plan(&logical_plan)?;
@@ -552,21 +560,17 @@ impl PhysicalPlanner {
             let _inner_col_idx = inner_col_names
                 .iter()
                 .position(|n| n.eq_ignore_ascii_case(inner_col_name))
-                .ok_or_else(|| {
-                    format!(
-                        "Inner column '{}' not found in table '{}'",
-                        inner_col_name, inner_table_name
-                    )
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: inner_col_name.clone(),
                 })?;
 
             let outer_col_idx = outer_schema
                 .iter()
                 .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
-                .ok_or_else(|| {
-                    format!(
-                        "Outer column '{}' not found in outer schema",
-                        outer_col_name
-                    )
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: outer_col_name.clone(),
                 })?;
 
             let param = Rc::new(RefCell::new(None));
@@ -626,13 +630,13 @@ impl PhysicalPlanner {
         node: &rook_ast::PredicateNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-    ) -> Result<Vec<(String, String, rook_ast::ComparisonOp)>, String> {
+    ) -> RookResult<Vec<(String, String, rook_ast::ComparisonOp)>> {
         let mut pairs = Vec::new();
         self.collect_correlations(node, inner_table_name, inner_col_names, &mut pairs)?;
         if pairs.is_empty() {
-            return Err(
-                "No correlation found in subquery predicate".to_string()
-            );
+            return Err(RookError::Internal(
+                "No correlation found in subquery predicate".to_string(),
+            ));
         }
         Ok(pairs)
     }
@@ -644,7 +648,7 @@ impl PhysicalPlanner {
         inner_table_name: &str,
         inner_col_names: &[String],
         pairs: &mut Vec<(String, String, rook_ast::ComparisonOp)>,
-    ) -> Result<(), String> {
+    ) -> RookResult<()> {
         match node {
             rook_ast::PredicateNode::Compare { left, op, right } => {
                 if let Ok((inner_name, outer_name)) =
@@ -699,13 +703,13 @@ impl PhysicalPlanner {
         node: &rook_ast::PredicateNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-    ) -> Result<(String, String, rook_ast::ComparisonOp), String> {
+    ) -> RookResult<(String, String, rook_ast::ComparisonOp)> {
         let pairs = self.extract_all_correlations(node, inner_table_name, inner_col_names)?;
         if pairs.is_empty() {
-            return Err(
+            return Err(RookError::Internal(
                 "Correlated subquery predicate must contain a column comparison"
                     .to_string(),
-            );
+            ));
         }
         Ok(pairs[0].clone())
     }
@@ -718,7 +722,7 @@ impl PhysicalPlanner {
         right: &rook_ast::ExprNode,
         inner_table_name: &str,
         inner_col_names: &[String],
-    ) -> Result<(String, String), String> {
+    ) -> RookResult<(String, String)> {
         // Check (left = inner, right = outer)
         if let Some(inner_name) = self.extract_column_name_if_inner(left, inner_table_name, inner_col_names)
             && let Some(outer_name) =
@@ -736,10 +740,10 @@ impl PhysicalPlanner {
                 return Ok((inner_name, outer_name));
             }
 
-        Err(
+        Err(RookError::Internal(
             "Could not resolve inner/outer columns in correlated subquery predicate"
                 .to_string(),
-        )
+        ))
     }
 
     /// If `expr` references an inner table column, return the column name.

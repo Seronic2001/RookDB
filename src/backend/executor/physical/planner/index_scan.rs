@@ -13,6 +13,7 @@ use super::super::operators::{IndexScanOperator, IndexScanMode, PhysicalOperator
 use crate::types::Comparable;
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
+use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::HeapManager;
 use crate::backend::index::BTree;
 use crate::types::{DataType, DataValue};
@@ -27,7 +28,7 @@ impl PhysicalPlanner {
         &self,
         ts: &LogicalTableScan,
         pred_node: &rook_ast::PredicateNode,
-    ) -> Result<Option<Box<dyn PhysicalOperator>>, String> {
+    ) -> RookResult<Option<Box<dyn PhysicalOperator>>> {
         // Only works for regular user tables
         if ts.system_table_name.is_some() {
             return Ok(None);
@@ -152,7 +153,9 @@ impl PhysicalPlanner {
 
             crate::backend::cache::checkpoint();
             let mut btree = BTree::open(idx_path.clone())
-                .map_err(|e| format!("Failed to open index: {}", e))?;
+                .map_err(|e| RookError::Io(e).with_context(format!(
+                    "opening index {} for table '{}'", idx_path.display(), ts.table
+                )))?;
             // Set key type(s) from the INDEXED column(s) (NOT the first table column)
             if !best_key_types.is_empty() {
                 btree.set_key_types(best_key_types.clone());
@@ -162,8 +165,10 @@ impl PhysicalPlanner {
                 btree.set_key_type(first_col.data_type.clone());
             }
 
-            let heap_manager = HeapManager::open(heap_path)
-                .map_err(|e| format!("Failed to open heap: {}", e))?;
+            let heap_manager = HeapManager::open(heap_path.clone())
+                .map_err(|e| RookError::Io(e).with_context(format!(
+                    "opening heap {} for table '{}'", heap_path.display(), ts.table
+                )))?;
 
             return Ok(Some(Box::new(IndexScanOperator::new(
                 btree, heap_manager, mode, column_info,
