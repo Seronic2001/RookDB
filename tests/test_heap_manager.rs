@@ -187,6 +187,35 @@ fn test_heap_scan() {
 }
 
 #[test]
+fn test_heap_scan_without_explicit_flush() {
+    let name = "scan_unflushed";
+    cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
+
+    let path = PathBuf::from(format!("heap_test_{}.dat", name));
+    let mut manager = HeapManager::create(path.clone())
+        .expect("Failed to create heap");
+
+    for i in 0..10 {
+        let data = format!("UnflushedRow{}", i).into_bytes();
+        manager.insert_tuple(&data).expect("Failed to insert");
+    }
+
+    // Do NOT call manager.flush() explicitly; scan() should automatically
+    // flush dirty buffer pool pages so direct-I/O scan yields all inserted rows.
+    let mut count = 0;
+    for result in manager.scan() {
+        assert!(result.is_ok(), "Scan error: {:?}", result.err());
+        count += 1;
+    }
+
+    assert_eq!(count, 10, "Should have scanned all 10 tuples without manual flush");
+
+    cleanup_test_files(name);
+    let _cleanup = HeapCleanup(name.to_string());
+}
+
+#[test]
 fn test_heap_header_persistence() {
     let name = "header_persistence";
     cleanup_test_files(name);

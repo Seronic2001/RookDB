@@ -435,6 +435,9 @@ fn main() -> io::Result<()> {
     }
     let large_elapsed = large_start.elapsed().as_secs_f64();
 
+    // Flush changes to disk before read benchmark phases
+    manager.flush()?;
+
     // Correctness + robustness check: oversized tuple should fail
     let oversized = vec![0xEE; 9000];
     let oversized_tuple_rejected = manager.insert_tuple(&oversized).is_err();

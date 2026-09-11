@@ -789,7 +789,15 @@ impl HeapManager {
     pub fn scan(&self) -> HeapScanIterator {
         log::trace!("[HeapManager::scan] Creating scan iterator");
         crate::backend::cache::checkpoint();
-        HeapScanIterator::new(self.file_path.clone(), self.header.page_count)
+        let total_pages = {
+            let mut pool = Self::lock_pool(&self.pool);
+            if self.header_dirty || pool.has_dirty() {
+                let _ = write_header_via_pool(&mut pool, &self.header);
+                let _ = pool.flush_all();
+            }
+            pool.total_pages().max(self.header.page_count)
+        };
+        HeapScanIterator::new(self.file_path.clone(), total_pages)
     }
 
     /// Search for a page with available space (for testing/debugging).
