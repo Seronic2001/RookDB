@@ -206,15 +206,37 @@ impl PhysicalPlanner {
                     }
                 } else {
                     // Simple case: all sort keys are column references
-                    let sort_op = SortOperator::new(child, sort_keys);
-
-                    if let Some(limit) = s.limit {
-                        log::info!("[Volcano] Sort has limit={}, wrapping in LimitOperator", limit);
-                        Ok(Box::new(LimitOperator::new(
-                            Box::new(sort_op), limit as usize, 0,
-                        )))
+                    let already_sorted = if let Some(child_order) = child.ordering() {
+                        sort_keys.len() <= child_order.len()
+                            && sort_keys.iter().zip(&child_order).all(|(req, actual)| req == actual)
                     } else {
-                        Ok(Box::new(sort_op))
+                        false
+                    };
+
+                    if already_sorted {
+                        log::info!(
+                            "[Volcano] Child already sorted by {:?}, eliminating SortOperator",
+                            sort_keys
+                        );
+                        if let Some(limit) = s.limit {
+                            log::info!("[Volcano] Pipelining into LimitOperator without SortOperator");
+                            Ok(Box::new(LimitOperator::new(
+                                child, limit as usize, 0,
+                            )))
+                        } else {
+                            Ok(child)
+                        }
+                    } else {
+                        let sort_op = SortOperator::new(child, sort_keys);
+
+                        if let Some(limit) = s.limit {
+                            log::info!("[Volcano] Sort has limit={}, wrapping in LimitOperator", limit);
+                            Ok(Box::new(LimitOperator::new(
+                                Box::new(sort_op), limit as usize, 0,
+                            )))
+                        } else {
+                            Ok(Box::new(sort_op))
+                        }
                     }
                 }
             }
@@ -518,11 +540,16 @@ impl PhysicalPlanner {
                         "Failed to open heap for table '{}'", ts.table
                     )))?;
 
+                let indexed_cols: Vec<usize> = column_info.iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(idx_col_name))
+                    .into_iter().collect();
+
                 return Ok(Box::new(IndexScanOperator::new(
                     btree,
                     heap_manager,
                     IndexScanMode::FullScan,
                     column_info,
+                    indexed_cols,
                 )));
             }
         }
@@ -554,11 +581,13 @@ impl PhysicalPlanner {
                     "Failed to open heap for table '{}'", ts.table
                 )))?;
 
+            let indexed_cols: Vec<usize> = if column_info.is_empty() { Vec::new() } else { vec![0] };
             return Ok(Box::new(IndexScanOperator::new(
                 btree,
                 heap_manager,
                 IndexScanMode::FullScan,
                 column_info,
+                indexed_cols,
             )));
         }
 

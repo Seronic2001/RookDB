@@ -41,4 +41,11 @@ pub trait PhysicalOperator {
 
     /// A human-readable name for the operator (for debug printing).
     fn name(&self) -> &'static str;
+
+    /// Physical ordering of output tuples: list of (column_index, is_descending).
+    /// Returns `None` if output is unordered or ordering is unknown.
+    fn ordering(&self) -> Option<Vec<(usize, bool)>> {
+        None
+    }
 }
+

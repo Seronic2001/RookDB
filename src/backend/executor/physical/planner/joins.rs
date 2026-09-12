@@ -8,6 +8,7 @@ use super::super::operators::{
     PhysicalOperator,
     NestedLoopJoinOperator,
     HashJoinOperator,
+    IndexNestedLoopJoinOperator,
     JoinType as PhysicalJoinType,
     AggregateOperator,
     AggregateInfo,
@@ -97,7 +98,76 @@ impl PhysicalPlanner {
             if predicate.is_some() { "yes" } else { "no" }
         );
 
-        // Use a hash join when the condition contains at least one
+        // 1. Try IndexNestedLoopJoin when inner side is a single-table scan with an index on the join key
+        // and outer side is small (O3 in DEEP_DIVE.md).
+        if matches!(join_type, PhysicalJoinType::Inner | PhysicalJoinType::Left)
+            && let Some(pred) = &predicate {
+                let left_schema = left.schema().to_vec();
+                let right_schema = right.schema().to_vec();
+                if let Some((build_keys, probe_keys, residual)) =
+                    extract_equi_join_keys(pred, &left_schema, &right_schema)
+                    && build_keys.len() == 1 && probe_keys.len() == 1
+                    && let Expr::Column { column: ref outer_col, .. } = build_keys[0]
+                    && let Expr::Column { column: ref inner_col, .. } = probe_keys[0]
+                {
+                    if let LogicalPlan::TableScan(ref inner_ts) = *j.right {
+                        let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
+                            &self.db_name, &inner_ts.table
+                        ).unwrap_or_default();
+
+                        let matched_idx = named_indexes.iter().find(|(_, cols, _)| {
+                            cols.first().map(|c| c.eq_ignore_ascii_case(inner_col)).unwrap_or(false)
+                        });
+
+                        let outer_card = left.estimate_cardinality();
+                        let is_outer_small = outer_card <= 5000
+                            || matches!(j.left.as_ref(), LogicalPlan::Limit(_) | LogicalPlan::Filter(_));
+
+                        if let Some((idx_name, _, _)) = matched_idx {
+                            if is_outer_small {
+                                let idx_path = std::path::PathBuf::from(format!(
+                                    "database/base/{}/{}.{}.idx", self.db_name, inner_ts.table, idx_name
+                                ));
+                                let heap_path = std::path::PathBuf::from(format!(
+                                    "database/base/{}/{}.dat", self.db_name, inner_ts.table
+                                ));
+                                if idx_path.exists() && heap_path.exists() {
+                                    if let Some(outer_key_idx) = left_schema.iter().position(|c| c.name.eq_ignore_ascii_case(outer_col)) {
+                                        crate::backend::cache::checkpoint();
+                                        let mut btree = crate::backend::index::btree::BTree::open(idx_path.clone())
+                                            .map_err(|e| RookError::Io(e).with_context(format!(
+                                                "opening index {} for table '{}'", idx_path.display(), inner_ts.table
+                                            )))?;
+                                        if let Some(idx_col) = right_schema.iter().find(|c| c.name.eq_ignore_ascii_case(inner_col)) {
+                                            btree.set_key_type(idx_col.data_type.clone());
+                                        }
+                                        let heap_manager = crate::backend::heap::heap_manager::HeapManager::open(heap_path.clone())
+                                            .map_err(|e| RookError::Io(e).with_context(format!(
+                                                "opening heap {} for table '{}'", heap_path.display(), inner_ts.table
+                                            )))?;
+
+                                        log::info!(
+                                            "[Volcano] Using IndexNestedLoopJoin: outer_card={}, inner table '{}', index '{}'",
+                                            outer_card, inner_ts.table, idx_name
+                                        );
+                                        return Ok(Box::new(IndexNestedLoopJoinOperator::new(
+                                            left,
+                                            btree,
+                                            heap_manager,
+                                            outer_key_idx,
+                                            right_schema,
+                                            residual,
+                                            join_type,
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+        // 2. Use a hash join when the condition contains at least one
         // cross-side equality conjunct (INNER joins only) — turns O(n·m)
         // nested-loop joins into O(n+m). Remaining non-equality conjuncts are
         // evaluated as a post-join filter by HashJoinOperator.
@@ -123,7 +193,7 @@ impl PhysicalPlanner {
                     }
             }
 
-        // Use NestedLoopJoin for all join types
+        // 3. Fallback: NestedLoopJoin for all join types
         Ok(Box::new(NestedLoopJoinOperator::new(
             left,
             right,

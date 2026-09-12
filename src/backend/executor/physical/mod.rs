@@ -44,7 +44,7 @@ pub use operators::{PhysicalOperator, SeqScanOperator, FilterOperator, Projectio
                     LimitOperator, DistinctOperator, SortOperator, NullOperator, SingleRowOperator,
                     CteScanOperator,
                     AggregateOperator, AggregateInfo, AggregateFunction, infer_aggregate_output_type,
-                    NestedLoopJoinOperator, HashJoinOperator, JoinType,
+                    NestedLoopJoinOperator, HashJoinOperator, IndexNestedLoopJoinOperator, JoinType,
                     SetOpOperator, SetOpType,
                     SubqueryExecOperator, SubqueryType,
                     IndexScanOperator, IndexScanMode};

@@ -64,6 +64,7 @@ impl PhysicalPlanner {
         // Try named indexes first (dynamic selection — M2)
         let mut best_idx_name: Option<String> = None;
         let mut best_col_name: Option<String> = None;
+        let mut best_col_names: Vec<String> = Vec::new();
         let mut best_key_types: Vec<DataType> = Vec::new();
         let mut best_mode: Option<IndexScanMode> = None;
 
@@ -79,6 +80,7 @@ impl PhysicalPlanner {
                     if should_replace {
                         best_idx_name = Some(idx_name.clone());
                         best_col_name = Some(col_names.join(","));
+                        best_col_names = col_names.clone();
                         best_key_types = col_names.iter()
                             .map(|cn| table_schema.iter()
                                 .find(|c| c.name.eq_ignore_ascii_case(cn))
@@ -106,6 +108,7 @@ impl PhysicalPlanner {
                 if should_replace {
                     best_idx_name = Some(idx_name.clone());
                     best_col_name = Some(col_name.clone());
+                    best_col_names = vec![col_name.clone()];
                     best_key_types.clear();
                     best_mode = Some(mode);
                 }
@@ -130,7 +133,8 @@ impl PhysicalPlanner {
                         if let Some(mode) = self.extract_index_mode_from_predicate(pred_node, &meta.column_name, col_type) {
                             let col_name = meta.column_name.clone();
                             best_mode = Some(mode);
-                            best_col_name = Some(col_name);
+                            best_col_name = Some(col_name.clone());
+                            best_col_names = vec![col_name];
                             best_idx_name = Some(format!("idx_{}_{}", ts.table, meta.column_name));
                         }
                     }
@@ -170,8 +174,12 @@ impl PhysicalPlanner {
                     "opening heap {} for table '{}'", heap_path.display(), ts.table
                 )))?;
 
+            let indexed_cols: Vec<usize> = best_col_names.iter()
+                .filter_map(|cn| column_info.iter().position(|ci| ci.name.eq_ignore_ascii_case(cn)))
+                .collect();
+
             return Ok(Some(Box::new(IndexScanOperator::new(
-                btree, heap_manager, mode, column_info,
+                btree, heap_manager, mode, column_info, indexed_cols,
             ))));
         }
 

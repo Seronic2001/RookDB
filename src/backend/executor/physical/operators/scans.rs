@@ -211,6 +211,8 @@ pub struct IndexScanOperator {
     column_info: Vec<ColumnInfo>,
     /// Data types for deserialising raw tuple bytes.
     schema_types: Vec<DataType>,
+    /// Column indices in `column_info` that form the index key.
+    pub indexed_cols: Vec<usize>,
     /// Materialized list of heap tuple locations from the index.
     results: Vec<(u32, u32)>,
     /// Current read position in results.
@@ -226,11 +228,13 @@ impl IndexScanOperator {
     /// `heap_manager` provides access to the heap file for fetching tuple data.
     /// `mode` specifies point lookup or range scan.
     /// `column_info` contains the full table schema (used for output tuple deserialization).
+    /// `indexed_cols` specifies the column indices of the index keys in `column_info`.
     pub fn new(
         btree: BTree,
         heap_manager: HeapManager,
         mode: IndexScanMode,
         column_info: Vec<ColumnInfo>,
+        indexed_cols: Vec<usize>,
     ) -> Self {
         let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
         Self {
@@ -239,6 +243,7 @@ impl IndexScanOperator {
             mode,
             column_info,
             schema_types,
+            indexed_cols,
             results: Vec::new(),
             pos: 0,
             loaded: false,
@@ -340,4 +345,24 @@ impl PhysicalOperator for IndexScanOperator {
             IndexScanMode::FullScan => "IndexScan(Full)",
         }
     }
+
+    fn ordering(&self) -> Option<Vec<(usize, bool)>> {
+        match &self.mode {
+            IndexScanMode::RangeLookup(..) | IndexScanMode::FullScan => {
+                if self.indexed_cols.is_empty() {
+                    None
+                } else {
+                    Some(self.indexed_cols.iter().map(|&c| (c, false)).collect())
+                }
+            }
+            IndexScanMode::PointLookup(_) | IndexScanMode::CompositePointLookup(_) => {
+                if self.indexed_cols.is_empty() {
+                    None
+                } else {
+                    Some(self.indexed_cols.iter().map(|&c| (c, false)).collect())
+                }
+            }
+        }
+    }
 }
+

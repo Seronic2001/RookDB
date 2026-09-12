@@ -216,7 +216,12 @@ impl PhysicalOperator for FilterOperator {
     fn name(&self) -> &'static str {
         "Filter"
     }
+
+    fn ordering(&self) -> Option<Vec<(usize, bool)>> {
+        self.child.ordering()
+    }
 }
+
 
 // ── Projection Operator ───────────────────────────────────────────────────────
 
@@ -373,6 +378,26 @@ impl PhysicalOperator for ProjectionOperator {
     fn name(&self) -> &'static str {
         "Project"
     }
+
+    fn ordering(&self) -> Option<Vec<(usize, bool)>> {
+        if let Some(child_order) = self.child.ordering() {
+            let mut mapped_order = Vec::new();
+            for (child_idx, desc) in child_order {
+                let child_col_name = self.child_schema.get(child_idx).map(|c| &c.name)?;
+                if let Some(pos) = self.projections.iter().position(|(expr, _, _)| {
+                    matches!(expr, Expr::Column { column, .. } if column == child_col_name)
+                }) {
+                    mapped_order.push((pos, desc));
+                } else {
+                    break;
+                }
+            }
+            if !mapped_order.is_empty() {
+                return Some(mapped_order);
+            }
+        }
+        None
+    }
 }
 
 // ── Limit Operator ────────────────────────────────────────────────────────────
@@ -427,6 +452,10 @@ impl PhysicalOperator for LimitOperator {
 
     fn name(&self) -> &'static str {
         "Limit"
+    }
+
+    fn ordering(&self) -> Option<Vec<(usize, bool)>> {
+        self.child.ordering()
     }
 }
 

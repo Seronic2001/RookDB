@@ -121,28 +121,43 @@ impl SortOperator {
             return Ok(());
         }
 
-        // Sort in place
-        self.buffer.sort_by(|a, b| {
-            for &(key_idx, descending) in &self.sort_keys {
-                let av = a.values.get(key_idx).and_then(|v| v.as_ref());
-                let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
-                let ordering = match (av, bv) {
-                    (Some(a_val), Some(b_val)) => {
-                        compare_nullable(Some(a_val), Some(b_val))
-                            .unwrap_or(None)
-                            .unwrap_or(Ordering::Equal)
+        // Check if child already satisfies ordering
+        let already_sorted = if let Some(child_order) = self.child.ordering() {
+            self.sort_keys.len() <= child_order.len()
+                && self.sort_keys.iter().zip(&child_order).all(|(req, actual)| req == actual)
+        } else {
+            false
+        };
+
+        if already_sorted {
+            log::debug!(
+                "[Sort] Child output already satisfies sort keys {:?}, skipping sort",
+                self.sort_keys
+            );
+        } else {
+            // Sort in place
+            self.buffer.sort_by(|a, b| {
+                for &(key_idx, descending) in &self.sort_keys {
+                    let av = a.values.get(key_idx).and_then(|v| v.as_ref());
+                    let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
+                    let ordering = match (av, bv) {
+                        (Some(a_val), Some(b_val)) => {
+                            compare_nullable(Some(a_val), Some(b_val))
+                                .unwrap_or(None)
+                                .unwrap_or(Ordering::Equal)
+                        }
+                        (None, None) => Ordering::Equal,
+                        (None, Some(_)) => Ordering::Less,
+                        (Some(_), None) => Ordering::Greater,
+                    };
+                    let ordering = if descending { ordering.reverse() } else { ordering };
+                    if ordering != Ordering::Equal {
+                        return ordering;
                     }
-                    (None, None) => Ordering::Equal,
-                    (None, Some(_)) => Ordering::Less,
-                    (Some(_), None) => Ordering::Greater,
-                };
-                let ordering = if descending { ordering.reverse() } else { ordering };
-                if ordering != Ordering::Equal {
-                    return ordering;
                 }
-            }
-            Ordering::Equal
-        });
+                Ordering::Equal
+            });
+        }
 
         self.loaded = true;
         Ok(())
@@ -224,4 +239,9 @@ impl PhysicalOperator for SortOperator {
     fn name(&self) -> &'static str {
         "Sort"
     }
+
+    fn ordering(&self) -> Option<Vec<(usize, bool)>> {
+        Some(self.sort_keys.clone())
+    }
 }
+

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::backend::error::RookResult;
+use crate::backend::error::{RookError, RookResult};
+use crate::backend::heap::heap_manager::HeapManager;
+use crate::backend::index::btree::BTree;
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
@@ -846,6 +848,189 @@ impl PhysicalOperator for HashJoinOperator {
         "HashJoin"
     }
 }
+
+// ── IndexNestedLoopJoin Operator ─────────────────────────────────────────────
+
+/// An index-nested-loop join operator for equality joins where the inner side
+/// has a B+ Tree index on the join key.
+///
+/// For each tuple from the outer child, probes the inner index using the outer
+/// tuple's join key, fetches matching inner tuples directly from the heap,
+/// evaluates any residual predicate, and yields the joined tuple.
+///
+/// Supports INNER and LEFT joins.
+pub struct IndexNestedLoopJoinOperator {
+    outer: Box<dyn PhysicalOperator>,
+    btree: BTree,
+    heap_manager: HeapManager,
+    outer_key_idx: usize,
+    inner_schema: Vec<ColumnInfo>,
+    inner_schema_types: Vec<DataType>,
+    output_schema: Vec<ColumnInfo>,
+    residual_predicate: Option<Predicate>,
+    join_type: JoinType,
+
+    // Runtime state
+    current_outer: Option<Tuple>,
+    inner_matches: Vec<(u32, u32)>,
+    match_pos: usize,
+    had_match: bool,
+    exhausted: bool,
+}
+
+impl IndexNestedLoopJoinOperator {
+    pub fn new(
+        outer: Box<dyn PhysicalOperator>,
+        btree: BTree,
+        heap_manager: HeapManager,
+        outer_key_idx: usize,
+        inner_schema: Vec<ColumnInfo>,
+        residual_predicate: Option<Predicate>,
+        join_type: JoinType,
+    ) -> Self {
+        let mut output_schema = outer.schema().to_vec();
+        output_schema.extend(inner_schema.iter().cloned());
+        let inner_schema_types: Vec<DataType> = inner_schema.iter().map(|c| c.data_type.clone()).collect();
+
+        Self {
+            outer,
+            btree,
+            heap_manager,
+            outer_key_idx,
+            inner_schema,
+            inner_schema_types,
+            output_schema,
+            residual_predicate,
+            join_type,
+            current_outer: None,
+            inner_matches: Vec::new(),
+            match_pos: 0,
+            had_match: false,
+            exhausted: false,
+        }
+    }
+}
+
+impl PhysicalOperator for IndexNestedLoopJoinOperator {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
+        if self.exhausted {
+            return Ok(None);
+        }
+
+        loop {
+            // If we have a current outer tuple, try to yield matching inner tuples
+            if let Some(ref outer_tuple) = self.current_outer {
+                while self.match_pos < self.inner_matches.len() {
+                    let (page_id, slot_id) = self.inner_matches[self.match_pos];
+                    self.match_pos += 1;
+
+                    let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id)
+                        .map_err(|e| RookError::Internal(format!("Failed to fetch heap tuple (page={}, slot={}): {}", page_id, slot_id, e)))?;
+                    let inner_values = crate::types::deserialize_nullable_row(&self.inner_schema_types, &raw_bytes)
+                        .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
+
+                    let mut joined_values = outer_tuple.values.clone();
+                    joined_values.extend(inner_values);
+                    let candidate = Tuple::new(joined_values);
+
+                    if let Some(ref pred) = self.residual_predicate {
+                        if let Some(true) = evaluate_predicate(pred, &candidate, &self.output_schema)? {
+                            self.had_match = true;
+                            return Ok(Some(candidate));
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        self.had_match = true;
+                        return Ok(Some(candidate));
+                    }
+                }
+
+                // If LEFT join and no inner row matched, emit outer row with NULLs
+                if !self.had_match && self.join_type == JoinType::Left {
+                    let mut null_values = outer_tuple.values.clone();
+                    for _ in 0..self.inner_schema.len() {
+                        null_values.push(None);
+                    }
+                    self.current_outer = None;
+                    return Ok(Some(Tuple::new(null_values)));
+                }
+
+                self.current_outer = None;
+            }
+
+            // Pull next outer tuple
+            match self.outer.next()? {
+                Some(outer_tuple) => {
+                    let key_opt = outer_tuple.values.get(self.outer_key_idx).and_then(|v| v.clone());
+                    match key_opt {
+                        Some(key_val) => {
+                            let tids = self.btree.search_range(&key_val, &key_val)
+                                .map_err(|e| RookError::Internal(format!("Index lookup failed in INLJ: {}", e)))?;
+                            self.current_outer = Some(outer_tuple);
+                            self.inner_matches = tids;
+                            self.match_pos = 0;
+                            self.had_match = false;
+                        }
+                        None => {
+                            // NULL outer key never matches any inner key
+                            if self.join_type == JoinType::Left {
+                                let mut null_values = outer_tuple.values.clone();
+                                for _ in 0..self.inner_schema.len() {
+                                    null_values.push(None);
+                                }
+                                return Ok(Some(Tuple::new(null_values)));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    self.exhausted = true;
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
+        while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+            match self.next()? {
+                Some(tuple) => batch.push(tuple),
+                None => break,
+            }
+        }
+        Ok(batch.len())
+    }
+
+    fn schema(&self) -> &[ColumnInfo] {
+        &self.output_schema
+    }
+
+    fn reset(&mut self) -> RookResult<()> {
+        self.outer.reset()?;
+        self.current_outer = None;
+        self.inner_matches.clear();
+        self.match_pos = 0;
+        self.had_match = false;
+        self.exhausted = false;
+        Ok(())
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        self.outer.estimate_cardinality()
+    }
+
+    fn name(&self) -> &'static str {
+        "IndexNestedLoopJoin"
+    }
+
+    fn ordering(&self) -> Option<Vec<(usize, bool)>> {
+        self.outer.ordering()
+    }
+}
+
 
 // ── Spill tests ──────────────────────────────────────────────────────────────
 
