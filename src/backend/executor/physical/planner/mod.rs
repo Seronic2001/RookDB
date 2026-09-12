@@ -1159,14 +1159,14 @@ mod tests {
     #[test]
     fn test_ast_constant_int_to_data_value() {
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Int(42));
-        assert_eq!(dv, crate::types::value::DataValue::Int(42));
+        assert_eq!(dv, Some(crate::types::value::DataValue::Int(42)));
     }
 
     #[test]
     fn test_ast_constant_bigint_to_data_value() {
         // Larger than i32::MAX should become BigInt
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Int(3_000_000_000));
-        assert_eq!(dv, crate::types::value::DataValue::BigInt(3_000_000_000));
+        assert_eq!(dv, Some(crate::types::value::DataValue::BigInt(3_000_000_000)));
     }
 
     #[test]
@@ -1174,7 +1174,7 @@ mod tests {
     fn test_ast_constant_float_to_data_value() {
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Float(3.14));
         match dv {
-            crate::types::value::DataValue::DoublePrecision(v) => {
+            Some(crate::types::value::DataValue::DoublePrecision(v)) => {
                 assert!((v.0 - 3.14).abs() < 0.001);
             }
             _ => panic!("Expected DoublePrecision"),
@@ -1184,19 +1184,19 @@ mod tests {
     #[test]
     fn test_ast_constant_text_to_data_value() {
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Text("hello".to_string()));
-        assert_eq!(dv, crate::types::value::DataValue::Varchar("hello".to_string()));
+        assert_eq!(dv, Some(crate::types::value::DataValue::Varchar("hello".to_string())));
     }
 
     #[test]
     fn test_ast_constant_bool_to_data_value() {
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Boolean(true));
-        assert_eq!(dv, crate::types::value::DataValue::Bool(true));
+        assert_eq!(dv, Some(crate::types::value::DataValue::Bool(true)));
     }
 
     #[test]
     fn test_ast_constant_null_to_data_value() {
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Null);
-        assert_eq!(dv, crate::types::value::DataValue::Int(0), "Null defaults to Int(0)");
+        assert_eq!(dv, None, "Null maps to None");
     }
 
     // ── try_plan_index_scan_with_predicate edge cases ─────────────────────

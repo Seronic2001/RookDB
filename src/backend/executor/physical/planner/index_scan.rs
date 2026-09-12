@@ -71,7 +71,13 @@ impl PhysicalPlanner {
         for (idx_name, col_names, _is_unique) in &named_indexes {
             // Composite index: equality on ALL key columns → exact lookup.
             if col_names.len() > 1 {
-                if let Some(key_values) = self.extract_composite_point_key(pred_node, col_names) {
+                let current_key_types: Vec<DataType> = col_names.iter()
+                    .map(|cn| table_schema.iter()
+                        .find(|c| c.name.eq_ignore_ascii_case(cn))
+                        .map(|c| c.data_type.clone())
+                        .unwrap_or(DataType::Int))
+                    .collect();
+                if let Some(key_values) = self.extract_composite_point_key(pred_node, col_names, &current_key_types) {
                     let priority = 0; // most selective
                     let should_replace = match &best_mode {
                         Some(existing) => priority < Self::scan_mode_priority(existing),
@@ -81,12 +87,7 @@ impl PhysicalPlanner {
                         best_idx_name = Some(idx_name.clone());
                         best_col_name = Some(col_names.join(","));
                         best_col_names = col_names.clone();
-                        best_key_types = col_names.iter()
-                            .map(|cn| table_schema.iter()
-                                .find(|c| c.name.eq_ignore_ascii_case(cn))
-                                .map(|c| c.data_type.clone())
-                                .unwrap_or(DataType::Int))
-                            .collect();
+                        best_key_types = current_key_types;
                         best_mode = Some(IndexScanMode::CompositePointLookup(key_values));
                     }
                 }
@@ -195,6 +196,7 @@ impl PhysicalPlanner {
         &self,
         pred: &rook_ast::PredicateNode,
         col_names: &[String],
+        key_types: &[DataType],
     ) -> Option<Vec<DataValue>> {
         // Flatten the conjunction into individual comparison predicates.
         fn flatten<'p>(pred: &'p rook_ast::PredicateNode, out: &mut Vec<&'p rook_ast::PredicateNode>) {
@@ -215,7 +217,8 @@ impl PhysicalPlanner {
         flatten(pred, &mut conjuncts);
 
         let mut key = Vec::with_capacity(col_names.len());
-        for wanted in col_names {
+        for (col_idx, wanted) in col_names.iter().enumerate() {
+            let col_type = key_types.get(col_idx).unwrap_or(&DataType::Int);
             let mut found: Option<DataValue> = None;
             for c in &conjuncts {
                 if let rook_ast::PredicateNode::Compare { left, op: rook_ast::ComparisonOp::Eq, right } = c {
@@ -234,7 +237,8 @@ impl PhysicalPlanner {
                         _ => continue,
                     };
                     if leaf.eq_ignore_ascii_case(wanted) {
-                        found = Some(Self::ast_constant_to_data_value(const_val));
+                        let dv = Self::ast_constant_to_data_value(const_val)?;
+                        found = Self::coerce_to_key_type(dv, col_type);
                         break;
                     }
                 }
@@ -304,7 +308,8 @@ impl PhysicalPlanner {
                     return None;
                 }
 
-                let dv = Self::ast_constant_to_data_value(const_val);
+                let dv = Self::ast_constant_to_data_value(const_val)?;
+                let dv = Self::coerce_to_key_type(dv, col_type)?;
 
                 match op {
                     rook_ast::ComparisonOp::Eq => Some(IndexScanMode::PointLookup(dv)),
@@ -351,11 +356,17 @@ impl PhysicalPlanner {
 
                 // Both bounds must be constants
                 let low_val = match low.as_ref() {
-                    rook_ast::ExprNode::Constant(cv) => Self::ast_constant_to_data_value(cv),
+                    rook_ast::ExprNode::Constant(cv) => {
+                        let dv = Self::ast_constant_to_data_value(cv)?;
+                        Self::coerce_to_key_type(dv, col_type)?
+                    }
                     _ => return None,
                 };
                 let high_val = match high.as_ref() {
-                    rook_ast::ExprNode::Constant(cv) => Self::ast_constant_to_data_value(cv),
+                    rook_ast::ExprNode::Constant(cv) => {
+                        let dv = Self::ast_constant_to_data_value(cv)?;
+                        Self::coerce_to_key_type(dv, col_type)?
+                    }
                     _ => return None,
                 };
 
@@ -379,9 +390,9 @@ impl PhysicalPlanner {
                 // Single-element IN list: col IN (val) → PointLookup(val)
                 if list.len() == 1
                     && let rook_ast::ExprNode::Constant(cv) = &list[0] {
-                        return Some(IndexScanMode::PointLookup(
-                            Self::ast_constant_to_data_value(cv),
-                        ));
+                        let dv = Self::ast_constant_to_data_value(cv)?;
+                        let dv = Self::coerce_to_key_type(dv, col_type)?;
+                        return Some(IndexScanMode::PointLookup(dv));
                     }
 
                 // Multi-element IN lists are not directly accelerated.
@@ -450,24 +461,87 @@ impl PhysicalPlanner {
         }
     }
 
-    /// Convert an AST ConstantValue to a DataValue.
-    pub(crate) fn ast_constant_to_data_value(cv: &rook_ast::ConstantValue) -> crate::types::value::DataValue {
+    /// Coerce a DataValue to the target column/key DataType (e.g. space-padding CHAR(n)).
+    pub(crate) fn coerce_to_key_type(dv: DataValue, target_type: &DataType) -> Option<DataValue> {
+        match target_type {
+            DataType::Char(n) | DataType::Character(n) => {
+                let s = match dv {
+                    DataValue::Char(s) | DataValue::Varchar(s) => s,
+                    _ => return None,
+                };
+                let width = *n as usize;
+                if s.len() > width {
+                    return None;
+                }
+                let mut padded = s;
+                if padded.len() < width {
+                    padded.push_str(&" ".repeat(width - padded.len()));
+                }
+                Some(DataValue::Char(padded))
+            }
+            DataType::Varchar(_) => match dv {
+                DataValue::Char(s) | DataValue::Varchar(s) => Some(DataValue::Varchar(s)),
+                _ => None,
+            },
+            DataType::SmallInt => match dv {
+                DataValue::SmallInt(i) => Some(DataValue::SmallInt(i)),
+                DataValue::Int(i) if i >= i16::MIN as i32 && i <= i16::MAX as i32 => {
+                    Some(DataValue::SmallInt(i as i16))
+                }
+                DataValue::BigInt(i) if i >= i16::MIN as i64 && i <= i16::MAX as i64 => {
+                    Some(DataValue::SmallInt(i as i16))
+                }
+                _ => None,
+            },
+            DataType::Int => match dv {
+                DataValue::SmallInt(i) => Some(DataValue::Int(i as i32)),
+                DataValue::Int(i) => Some(DataValue::Int(i)),
+                DataValue::BigInt(i) if i >= i32::MIN as i64 && i <= i32::MAX as i64 => {
+                    Some(DataValue::Int(i as i32))
+                }
+                _ => None,
+            },
+            DataType::BigInt => match dv {
+                DataValue::SmallInt(i) => Some(DataValue::BigInt(i as i64)),
+                DataValue::Int(i) => Some(DataValue::BigInt(i as i64)),
+                DataValue::BigInt(i) => Some(DataValue::BigInt(i)),
+                _ => None,
+            },
+            DataType::DoublePrecision => match dv {
+                DataValue::Real(r) => Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(r.0 as f64))),
+                DataValue::DoublePrecision(d) => Some(DataValue::DoublePrecision(d)),
+                DataValue::Int(i) => Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(i as f64))),
+                DataValue::BigInt(i) => Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(i as f64))),
+                _ => None,
+            },
+            DataType::Real => match dv {
+                DataValue::Real(r) => Some(DataValue::Real(r)),
+                DataValue::DoublePrecision(d) => Some(DataValue::Real(crate::types::value::OrderedF32(d.0 as f32))),
+                DataValue::Int(i) => Some(DataValue::Real(crate::types::value::OrderedF32(i as f32))),
+                _ => None,
+            },
+            _ => Some(dv),
+        }
+    }
+
+    /// Convert an AST ConstantValue to a DataValue (None for Null).
+    pub(crate) fn ast_constant_to_data_value(cv: &rook_ast::ConstantValue) -> Option<crate::types::value::DataValue> {
         match cv {
-            rook_ast::ConstantValue::Null => crate::types::value::DataValue::Int(0),
+            rook_ast::ConstantValue::Null => None,
             rook_ast::ConstantValue::Int(i) => {
                 if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
-                    crate::types::value::DataValue::Int(*i as i32)
+                    Some(crate::types::value::DataValue::Int(*i as i32))
                 } else {
-                    crate::types::value::DataValue::BigInt(*i)
+                    Some(crate::types::value::DataValue::BigInt(*i))
                 }
             }
             rook_ast::ConstantValue::Float(f) => {
-                crate::types::value::DataValue::DoublePrecision(
+                Some(crate::types::value::DataValue::DoublePrecision(
                     crate::types::value::OrderedF64(*f),
-                )
+                ))
             }
-            rook_ast::ConstantValue::Text(s) => crate::types::value::DataValue::Varchar(s.clone()),
-            rook_ast::ConstantValue::Boolean(b) => crate::types::value::DataValue::Bool(*b),
+            rook_ast::ConstantValue::Text(s) => Some(crate::types::value::DataValue::Varchar(s.clone())),
+            rook_ast::ConstantValue::Boolean(b) => Some(crate::types::value::DataValue::Bool(*b)),
         }
     }
 }

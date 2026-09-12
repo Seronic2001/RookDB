@@ -50,10 +50,16 @@ pub enum ArithOp {
 ///   `age = 25`           → `SetExpr::Literal(Int(25))`
 ///   `age = age + 1`      → `SetExpr::Expr { col: "age", op: Add, rhs: Int(1) }`
 ///   `salary = salary * 1.10` → `SetExpr::Expr { col: "salary", op: Mul, rhs_f: 1.10 }`
+///   `tag = tag`          → `SetExpr::Column("tag")`
+///   `tag = NULL`         → `SetExpr::Null`
 #[derive(Debug, Clone)]
 pub enum SetExpr {
     /// A constant value.
     Literal(ColumnValue),
+    /// A reference to another column (or self) in the current row.
+    Column(String),
+    /// SQL NULL literal.
+    Null,
     /// `<src_col> <op> <rhs>` evaluated against the current row.
     /// `rhs_f` is used for floating-point multipliers (Mul / Div);
     /// `rhs_i` is used for integer Add / Sub.
@@ -84,142 +90,182 @@ pub struct UpdateResult {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-
-
-fn decode_tuple(
-    tuple_data: &[u8],
+fn values_to_column_values(
     columns: &[crate::catalog::types::Column],
+    values: &[Option<DataValue>],
 ) -> Vec<(String, ColumnValue)> {
-
-    let schema: Vec<DataType> = columns
+    columns
         .iter()
-        .map(|c| c.data_type.clone())
-        .collect();
-
-    let decoded = match deserialize_nullable_row(&schema, tuple_data) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut result = Vec::new();
-
-    for (col, value) in columns.iter().zip(decoded.iter()) {
-        let converted = match value {
-            Some(DataValue::Int(v)) => ColumnValue::Int(*v),
-
-            Some(DataValue::Varchar(s))
-            | Some(DataValue::Char(s)) => {
-                ColumnValue::Text(s.clone())
-            }
-
-            Some(other) => ColumnValue::Text(format!("{:?}", other)),
-
-            None => ColumnValue::Text("NULL".to_string()),
-        };
-
-        result.push((col.name.clone(), converted));
-    }
-
-    result
+        .zip(values.iter())
+        .map(|(col, val)| {
+            let cv = match val {
+                Some(DataValue::Int(n)) => ColumnValue::Int(*n),
+                Some(DataValue::SmallInt(n)) => ColumnValue::Int(*n as i32),
+                Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => {
+                    ColumnValue::Text(s.clone())
+                }
+                Some(other) => ColumnValue::Text(format!("{}", other)),
+                None => ColumnValue::Text("NULL".to_string()),
+            };
+            (col.name.clone(), cv)
+        })
+        .collect()
 }
 
-
-/// Re-encode a decoded tuple back into the real on-disk row format.
-fn encode_tuple(
-    decoded: &[(String, ColumnValue)],
+/// Apply `assignments` directly to typed row values, preserving all types natively.
+fn apply_assignments_typed(
     columns: &[crate::catalog::types::Column],
-) -> Vec<u8> {
+    mut values: Vec<Option<DataValue>>,
+    assignments: &[SetAssignment],
+) -> Vec<Option<DataValue>> {
+    for asgn in assignments {
+        let Some(target_idx) = columns.iter().position(|c| c.name.eq_ignore_ascii_case(&asgn.column)) else {
+            continue;
+        };
+        let target_type = &columns[target_idx].data_type;
 
-    // Build schema
-    let schema: Vec<DataType> = columns
-        .iter()
-        .map(|c| c.data_type.clone())
-        .collect();
-
-    // Build typed values in schema order
-    let mut values: Vec<Option<DataValue>> = Vec::new();
-
-    for col in columns {
-        let val = decoded
-            .iter()
-            .find(|(name, _)| name == &col.name)
-            .map(|(_, v)| v);
-
-        let typed = match val {
-            Some(ColumnValue::Int(n)) => {
-                match &col.data_type {
+        let new_val: Option<DataValue> = match &asgn.expr {
+            SetExpr::Null => None,
+            SetExpr::Literal(cv) => match cv {
+                ColumnValue::Int(n) => match target_type {
                     DataType::SmallInt => Some(DataValue::SmallInt(*n as i16)),
                     DataType::Int => Some(DataValue::Int(*n)),
                     DataType::BigInt => Some(DataValue::BigInt(*n as i64)),
                     DataType::Real => Some(DataValue::Real(OrderedF32(*n as f32))),
                     DataType::DoublePrecision => Some(DataValue::DoublePrecision(OrderedF64(*n as f64))),
+                    DataType::Numeric { scale, .. } => {
+                        let factor = 10_i128.pow(*scale as u32);
+                        Some(DataValue::Numeric(crate::types::value::NumericValue {
+                            unscaled: *n as i128 * factor,
+                            scale: *scale,
+                        }))
+                    }
                     _ => Some(DataValue::Int(*n)),
-                }
-            }
-
-            Some(ColumnValue::Text(s)) => {
-                if s.eq_ignore_ascii_case("NULL") {
-                    None
+                },
+                ColumnValue::Text(s) => match target_type {
+                    DataType::Char(n) => {
+                        let mut padded = s.clone();
+                        if padded.len() < *n as usize {
+                            padded.push_str(&" ".repeat(*n as usize - padded.len()));
+                        }
+                        Some(DataValue::Char(padded))
+                    }
+                    DataType::Character(n) => {
+                        let mut padded = s.clone();
+                        if padded.len() < *n as usize {
+                            padded.push_str(&" ".repeat(*n as usize - padded.len()));
+                        }
+                        Some(DataValue::Char(padded))
+                    }
+                    DataType::Varchar(_) => Some(DataValue::Varchar(s.clone())),
+                    _ => super::create_index::parse_string_to_value(target_type, s).ok(),
+                },
+                ColumnValue::List(_) => None,
+            },
+            SetExpr::Column(src_col) => {
+                if let Some(src_idx) = columns.iter().position(|c| c.name.eq_ignore_ascii_case(src_col)) {
+                    values[src_idx].clone()
                 } else {
-                    // Use parse_string_to_value for proper type-aware parsing
-                    super::create_index::parse_string_to_value(&col.data_type, s).ok()
+                    continue;
                 }
             }
-
-            Some(ColumnValue::List(_)) => None,
-            None => None,
-        };
-
-        values.push(typed);
-    }
-
-    serialize_nullable_typed_row(&schema, &values)
-        .unwrap_or_default()
-}
-
-/// Apply `assignments` to a decoded row, returning the new row.
-/// Arithmetic expressions are evaluated against the *current* column values.
-fn apply_assignments(
-    mut decoded: Vec<(String, ColumnValue)>,
-    assignments: &[SetAssignment],
-) -> Vec<(String, ColumnValue)> {
-    for asgn in assignments {
-        let new_val = match &asgn.expr {
-            SetExpr::Literal(v) => v.clone(),
             SetExpr::Expr { src_col, op, rhs_i, rhs_f } => {
-                // Look up current value of src_col
-                let cur = decoded.iter().find(|(name, _)| name == src_col)
-                    .map(|(_, v)| v.clone());
-                match cur {
-                    Some(ColumnValue::Int(n)) => {
+                let src_val = columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(src_col))
+                    .and_then(|idx| values.get(idx).cloned().flatten());
+
+                match src_val {
+                    None => None, // SQL semantics: arithmetic on NULL produces NULL!
+                    Some(DataValue::Int(n)) => {
                         let result = match op {
                             ArithOp::Add => (n as i64 + rhs_i) as i32,
                             ArithOp::Sub => (n as i64 - rhs_i) as i32,
                             ArithOp::Mul => (n as f64 * rhs_f) as i32,
                             ArithOp::Div => if *rhs_f == 0.0 { n } else { (n as f64 / rhs_f) as i32 },
                         };
-                        ColumnValue::Int(result)
+                        Some(DataValue::Int(result))
                     }
-                    Some(ColumnValue::Text(s)) => {
-                        // Text + int → append; Text * int → repeat
+                    Some(DataValue::SmallInt(n)) => {
+                        let result = match op {
+                            ArithOp::Add => (n as i64 + rhs_i) as i16,
+                            ArithOp::Sub => (n as i64 - rhs_i) as i16,
+                            ArithOp::Mul => (n as f64 * rhs_f) as i16,
+                            ArithOp::Div => if *rhs_f == 0.0 { n } else { (n as f64 / rhs_f) as i16 },
+                        };
+                        Some(DataValue::SmallInt(result))
+                    }
+                    Some(DataValue::BigInt(n)) => {
+                        let result = match op {
+                            ArithOp::Add => n + rhs_i,
+                            ArithOp::Sub => n - rhs_i,
+                            ArithOp::Mul => (n as f64 * rhs_f) as i64,
+                            ArithOp::Div => if *rhs_f == 0.0 { n } else { (n as f64 / rhs_f) as i64 },
+                        };
+                        Some(DataValue::BigInt(result))
+                    }
+                    Some(DataValue::Real(r)) => {
+                        let cur = r.0 as f64;
+                        let result = match op {
+                            ArithOp::Add => cur + *rhs_i as f64,
+                            ArithOp::Sub => cur - *rhs_i as f64,
+                            ArithOp::Mul => cur * rhs_f,
+                            ArithOp::Div => if *rhs_f == 0.0 { cur } else { cur / rhs_f },
+                        };
+                        Some(DataValue::Real(OrderedF32(result as f32)))
+                    }
+                    Some(DataValue::DoublePrecision(d)) => {
+                        let cur = d.0;
+                        let result = match op {
+                            ArithOp::Add => cur + *rhs_i as f64,
+                            ArithOp::Sub => cur - *rhs_i as f64,
+                            ArithOp::Mul => cur * rhs_f,
+                            ArithOp::Div => if *rhs_f == 0.0 { cur } else { cur / rhs_f },
+                        };
+                        Some(DataValue::DoublePrecision(OrderedF64(result)))
+                    }
+                    Some(DataValue::Varchar(s)) => {
                         let result = match op {
                             ArithOp::Add => format!("{}{}", s, rhs_i),
-                            ArithOp::Sub => s.chars().take(
-                                (s.len() as i64 - rhs_i).max(0) as usize
-                            ).collect(),
+                            ArithOp::Sub => {
+                                let total_chars = s.chars().count();
+                                let take_count = (total_chars as i64 - rhs_i).max(0) as usize;
+                                s.chars().take(take_count).collect()
+                            }
                             _ => s.clone(),
                         };
-                        ColumnValue::Text(result)
+                        Some(DataValue::Varchar(result))
                     }
-                    _ => continue, // column not found, skip
+                    Some(DataValue::Char(s)) => {
+                        let trimmed = s.trim_end();
+                        let result = match op {
+                            ArithOp::Add => format!("{}{}", trimmed, rhs_i),
+                            ArithOp::Sub => {
+                                let total_chars = trimmed.chars().count();
+                                let take_count = (total_chars as i64 - rhs_i).max(0) as usize;
+                                trimmed.chars().take(take_count).collect()
+                            }
+                            _ => trimmed.to_string(),
+                        };
+                        let width = if let DataType::Char(w) | DataType::Character(w) = target_type {
+                            *w as usize
+                        } else {
+                            result.len()
+                        };
+                        let mut padded = result;
+                        if padded.len() < width {
+                            padded.push_str(&" ".repeat(width - padded.len()));
+                        }
+                        Some(DataValue::Char(padded))
+                    }
+                    Some(other) => Some(other),
                 }
             }
         };
-        if let Some(entry) = decoded.iter_mut().find(|(name, _)| *name == asgn.column) {
-            entry.1 = new_val;
-        }
+
+        values[target_idx] = new_val;
     }
-    decoded
+    values
 }
 
 struct PendingUpdate {
@@ -255,9 +301,11 @@ fn update_log_details(
 
 /// Parse a comma-separated SET clause string into `SetAssignment`s.
 ///
-/// Handles both literal and expression-based assignments:
+/// Handles literal, column-reference, and expression-based assignments:
 ///   `salary = 60000`               → `Literal(Int(60000))`
 ///   `name = 'Alice'`               → `Literal(Text("Alice"))`
+///   `tag = tag`                    → `Column("tag")`
+///   `tag = NULL`                   → `Null`
 ///   `age = age + 1`                → `Expr { src: age, op: Add, rhs_i: 1 }`
 ///   `salary = salary * 1.10`       → `Expr { src: salary, op: Mul, rhs_f: 1.10 }`
 ///   `score = score - 5, age = age + 1`  → two assignments
@@ -274,28 +322,34 @@ pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
         // Find the FIRST '=' (the assignment operator)
         let eq_pos = part.find('=')?;
         let col = part[..eq_pos].trim().to_string();
-        let rhs = part[eq_pos + 1..].trim().to_string();
+        let rhs = part[eq_pos + 1..].trim();
 
         if col.is_empty() || rhs.is_empty() { continue; }
 
-        // Try to detect arithmetic expression: `src_col OP value`
-        // where OP is one of + - * /
-        // e.g. "age + 1", "salary * 1.10", "score - 5"
-        let expr = try_parse_arith_expr(&rhs)
-            .and_then(|(src, op, rhs_str)| {
-                let rhs_f: f64 = rhs_str.parse().ok()?;
-                let rhs_i: i64 = rhs_f as i64;
-                Some(SetExpr::Expr { src_col: src, op, rhs_i, rhs_f })
-            })
-            .unwrap_or_else(|| {
-                // Literal value
-                let v = rhs.trim_matches('\'').to_string();
-                if let Ok(n) = v.parse::<i32>() {
-                    SetExpr::Literal(ColumnValue::Int(n))
-                } else {
-                    SetExpr::Literal(ColumnValue::Text(v))
-                }
-            });
+        let expr = if let Some((src, op, rhs_str)) = try_parse_arith_expr(rhs) {
+            let rhs_f: f64 = rhs_str.parse().ok()?;
+            let rhs_i: i64 = rhs_f as i64;
+            SetExpr::Expr { src_col: src, op, rhs_i, rhs_f }
+        } else if rhs.eq_ignore_ascii_case("null") {
+            SetExpr::Null
+        } else if (rhs.starts_with('\'') && rhs.ends_with('\'') && rhs.len() >= 2)
+            || (rhs.starts_with('"') && rhs.ends_with('"') && rhs.len() >= 2) {
+            let inner = &rhs[1..rhs.len() - 1];
+            SetExpr::Literal(ColumnValue::Text(inner.to_string()))
+        } else if let Ok(n) = rhs.parse::<i32>() {
+            SetExpr::Literal(ColumnValue::Int(n))
+        } else if let Ok(n) = rhs.parse::<i64>() {
+            if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
+                SetExpr::Literal(ColumnValue::Int(n as i32))
+            } else {
+                SetExpr::Literal(ColumnValue::Text(rhs.to_string()))
+            }
+        } else if rhs.parse::<f64>().is_ok() {
+            SetExpr::Literal(ColumnValue::Text(rhs.to_string()))
+        } else {
+            // Unquoted string that is not numeric or NULL: column reference!
+            SetExpr::Column(rhs.to_string())
+        };
 
         assignments.push(SetAssignment { column: col, expr });
     }
@@ -401,16 +455,25 @@ pub fn update_by_pointers(
         }
 
         let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
-        let decoded = decode_tuple(&tuple_data, columns);
-        let updated_decoded = apply_assignments(decoded.clone(), assignments);
-        let new_bytes = encode_tuple(&updated_decoded, columns);
+        let schema: Vec<DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
+        let decoded = match deserialize_nullable_row(&schema, &tuple_data) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let updated_values = apply_assignments_typed(columns, decoded.clone(), assignments);
+        let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        let old_decoded = values_to_column_values(columns, &decoded);
+        let updated_decoded = values_to_column_values(columns, &updated_values);
 
         // Constraint validation
-        let new_strings: Vec<String> = updated_decoded.iter().map(|(_name, val)| {
+        let new_strings: Vec<String> = updated_values.iter().map(|val| {
             match val {
-                ColumnValue::Int(n) => n.to_string(),
-                ColumnValue::Text(s) => s.clone(),
-                ColumnValue::List(_) => "[list]".to_string(),
+                Some(dv) => dv.to_string(),
+                None => "NULL".to_string(),
             }
         }).collect();
         let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
@@ -428,7 +491,7 @@ pub fn update_by_pointers(
             pointer: TuplePointer { page_id: page_num, slot_index },
             old_tuple_data: tuple_data,
             new_bytes,
-            old_decoded: decoded,
+            old_decoded,
             updated_decoded,
         });
 
