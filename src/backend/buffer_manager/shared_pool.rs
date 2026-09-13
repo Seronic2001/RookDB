@@ -80,7 +80,17 @@ pub fn get_or_create(file_path: &Path) -> io::Result<SharedPool> {
         reg.retain(|_, weak| weak.upgrade().is_some());
         reg.get(&key).and_then(Weak::upgrade)
     }) {
-        return Ok(shared);
+        let is_stale = {
+            let pool = shared.lock().unwrap_or_else(|p| p.into_inner());
+            pool.is_file_stale(file_path)
+        };
+        if is_stale {
+            with_registry(|reg| {
+                reg.remove(&key);
+            });
+        } else {
+            return Ok(shared);
+        }
     }
 
     let file = std::fs::OpenOptions::new()

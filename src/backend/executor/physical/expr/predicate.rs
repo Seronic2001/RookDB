@@ -361,25 +361,43 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
                     plan_ref.reset().map_err(|e| format!("Correlated IN reset error: {}", e))?;
 
                     let mut found = false;
+                    let mut saw_null = false;
                     while let Some(inner_tuple) =
                         plan_ref.next().map_err(|e| format!("Correlated IN error: {}", e))?
                     {
-                        if let Some(val) = inner_tuple.values.into_iter().next().flatten() {
-                            let is_equal = compare_nullable(Some(&val), Some(&lhs_dv))
-                                .map_err(|e| e.to_string())?
-                                .map(|o| o == Ordering::Equal)
-                                .unwrap_or(false);
-                            if is_equal {
-                                found = true;
-                                break;
+                        match inner_tuple.values.into_iter().next().flatten() {
+                            Some(val) => {
+                                let is_equal = compare_nullable(Some(&val), Some(&lhs_dv))
+                                    .map_err(|e| e.to_string())?
+                                    .map(|o| o == Ordering::Equal)
+                                    .unwrap_or(false);
+                                if is_equal {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            None => {
+                                saw_null = true;
                             }
                         }
                     }
 
                     if *negated {
-                        Ok(Some(!found))
+                        if found {
+                            Ok(Some(false))
+                        } else if saw_null {
+                            Ok(None)
+                        } else {
+                            Ok(Some(true))
+                        }
                     } else {
-                        Ok(Some(found))
+                        if found {
+                            Ok(Some(true))
+                        } else if saw_null {
+                            Ok(None)
+                        } else {
+                            Ok(Some(false))
+                        }
                     }
                 }
             }

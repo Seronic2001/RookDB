@@ -253,6 +253,29 @@ impl BufferPool {
         self.file.is_some()
     }
 
+    /// Check if the underlying open file handle is stale compared to the file
+    /// currently at `path` on disk (e.g. if the file was replaced by rename/swap).
+    pub fn is_file_stale(&self, path: &Path) -> bool {
+        if let Some(open_file) = &self.file {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if let (Ok(open_meta), Ok(disk_meta)) = (open_file.metadata(), std::fs::metadata(path)) {
+                    return open_meta.ino() != disk_meta.ino() || open_meta.dev() != disk_meta.dev();
+                }
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if let (Ok(open_meta), Ok(disk_meta)) = (open_file.metadata(), std::fs::metadata(path)) {
+                    return open_meta.file_index() != disk_meta.file_index()
+                        || open_meta.volume_serial_number() != disk_meta.volume_serial_number();
+                }
+            }
+        }
+        false
+    }
+
     /// Return the total number of pages tracked by this pool.
     pub fn total_pages(&self) -> u32 {
         self.total_pages

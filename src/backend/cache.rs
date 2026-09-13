@@ -86,6 +86,12 @@ pub fn with_heap<T>(
     // Fast path: existing entry.
     {
         let mut cache = lock(heap_cache());
+        if let Some(entry) = cache.get(&key) {
+            if entry.manager.is_file_stale(path) {
+                cache.remove(&key);
+                crate::backend::buffer_manager::shared_pool::invalidate(path);
+            }
+        }
         if let Some(entry) = cache.get_mut(&key) {
             entry.manager.reload_header()?;
             let result = f(&mut entry.manager)?;
@@ -101,6 +107,12 @@ pub fn with_heap<T>(
     // Miss: open outside the map lock, then insert (double-check).
     let mut manager = HeapManager::open(path.to_path_buf())?;
     let mut cache = lock(heap_cache());
+    if let Some(entry) = cache.get(&key) {
+        if entry.manager.is_file_stale(path) {
+            cache.remove(&key);
+            crate::backend::buffer_manager::shared_pool::invalidate(path);
+        }
+    }
     if let Some(entry) = cache.get_mut(&key) {
         // Raced with another opener in between; use the resident one.
         entry.manager.reload_header()?;
