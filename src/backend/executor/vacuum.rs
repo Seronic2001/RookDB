@@ -170,6 +170,9 @@ fn rebuild_indexes(db_name: &str, table_name: &str) -> Result<usize, String> {
             continue;
         }
 
+        // Drop any stale cached handle before truncating/recreating the index file.
+        crate::backend::cache::evict_btree(&idx_path);
+
         // Fresh tree over the post-compaction heap.
         let mut btree = BTree::create_composite(idx_path.clone(), key_types)
             .map_err(|e| format!("Failed to recreate index '{}': {}", idx_name, e))?;
@@ -204,6 +207,7 @@ fn rebuild_indexes(db_name: &str, table_name: &str) -> Result<usize, String> {
         btree
             .sync()
             .map_err(|e| format!("Failed to sync rebuilt index '{}': {}", idx_name, e))?;
+        crate::backend::cache::evict_btree(&idx_path);
         log::info!("[Vacuum] Rebuilt index '{}' with {} entries", idx_name, entries);
         rebuilt += 1;
     }

@@ -657,37 +657,40 @@ impl HeapManager {
             let frame_id = pool.fetch_page(page_id)?;
 
             // Validate slot_id and extract tuple
-            let page = pool.get_page(frame_id);
-            let tuple_count = get_tuple_count(page)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            let extract_res = (|| -> io::Result<Vec<u8>> {
+                let page = pool.get_page(frame_id);
+                let tuple_count = get_tuple_count(page)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-            if slot_id >= tuple_count {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Slot {} out of bounds (tuple_count={})", slot_id, tuple_count),
-                ));
-            }
+                if slot_id >= tuple_count {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Slot {} out of bounds (tuple_count={})", slot_id, tuple_count),
+                    ));
+                }
 
-            let (offset, length) = get_slot_entry(page, slot_id)?;
+                let (offset, length) = get_slot_entry(page, slot_id)?;
 
-            if offset == 0 && length == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Tuple at page {}, slot {} is deleted or slot is unused", page_id, slot_id),
-                ));
-            }
+                if offset == 0 && length == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Tuple at page {}, slot {} is deleted or slot is unused", page_id, slot_id),
+                    ));
+                }
 
-            if offset as usize + length as usize > PAGE_SIZE {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Tuple bounds exceed page: offset={}, length={}", offset, length),
-                ));
-            }
+                if offset as usize + length as usize > PAGE_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Tuple bounds exceed page: offset={}, length={}", offset, length),
+                    ));
+                }
 
-            let data = page.data[offset as usize..(offset + length) as usize].to_vec();
-            // Unpin (not dirty — we only read)
+                Ok(page.data[offset as usize..(offset + length) as usize].to_vec())
+            })();
+
+            // Always unpin (not dirty — we only read) before handling error/returning
             pool.unpin(frame_id, false);
-            data
+            extract_res?
         };
 
         log::trace!(
@@ -724,13 +727,12 @@ impl HeapManager {
             let mut pool = Self::lock_pool(&self.pool);
             let frame_id = pool.fetch_page(page_id)?;
 
-            let freed;
-            {
+            let delete_res = (|| -> io::Result<u32> {
                 let page = pool.get_page_mut(frame_id);
 
                 // Get the tuple data to calculate freed bytes
                 let (offset, length) = get_slot_entry(page, slot_id)?;
-                freed = length + ITEM_ID_SIZE;
+                let freed = length + ITEM_ID_SIZE;
 
                 log::trace!(
                     "[HeapManager::delete_tuple] Marked slot {} as deleted, freed {} bytes",
@@ -759,23 +761,34 @@ impl HeapManager {
                     page.data[0..4].copy_from_slice(&lower.to_le_bytes());
                     log::trace!("[HeapManager::delete_tuple] Reclaimed slot space, lower moved to {}", lower);
                 }
+
+                Ok(freed)
+            })();
+
+            match delete_res {
+                Ok(freed) => {
+                    // Unpin dirty (we modified the page)
+                    pool.unpin(frame_id, true);
+
+                    // We DO NOT update the FSM — dead slots are hidden until compaction
+
+                    // Decrement tuple counter
+                    if self.header.total_tuples > 0 {
+                        self.header.total_tuples -= 1;
+                        self.header_dirty = true;
+                    }
+
+                    // Sync header to disk via buffer pool
+                    write_header_via_pool(&mut pool, &self.header)?;
+
+                    freed_bytes = freed;
+                }
+                Err(e) => {
+                    // Unpin clean on error so the pin is not leaked
+                    pool.unpin(frame_id, false);
+                    return Err(e);
+                }
             }
-
-            // Unpin dirty (we modified the page)
-            pool.unpin(frame_id, true);
-
-            // We DO NOT update the FSM — dead slots are hidden until compaction
-
-            // Decrement tuple counter
-            if self.header.total_tuples > 0 {
-                self.header.total_tuples -= 1;
-                self.header_dirty = true;
-            }
-
-            // Sync header to disk via buffer pool
-            write_header_via_pool(&mut pool, &self.header)?;
-
-            freed_bytes = freed;
         }
 
         Ok(freed_bytes)

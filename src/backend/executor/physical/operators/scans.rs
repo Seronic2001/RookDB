@@ -358,7 +358,7 @@ impl PhysicalOperator for IndexScanOperator {
 
     fn ordering(&self) -> Option<Vec<(usize, bool)>> {
         match &self.mode {
-            IndexScanMode::RangeLookup(..) | IndexScanMode::FullScan => {
+            IndexScanMode::RangeLookup(..) => {
                 if self.indexed_cols.is_empty() {
                     None
                 } else {
@@ -372,6 +372,7 @@ impl PhysicalOperator for IndexScanOperator {
                     Some(self.indexed_cols.iter().map(|&c| (c, false)).collect())
                 }
             }
+            IndexScanMode::FullScan => None,
         }
     }
 }
