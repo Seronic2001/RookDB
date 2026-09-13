@@ -328,6 +328,25 @@ pub fn abs(value: &DataValue) -> Result<DataValue, FunctionError> {
     }
 }
 
+fn round_int(val: i64, places: i32) -> i64 {
+    if places >= 0 {
+        return val;
+    }
+    let exp = (-places) as u32;
+    if exp >= 19 {
+        return 0;
+    }
+    let div = 10_i64.pow(exp);
+    let q = val / div;
+    let r = (val % div).abs();
+    let rounded = if r * 2 >= div {
+        q + val.signum()
+    } else {
+        q
+    };
+    rounded * div
+}
+
 /// Round a numeric value to `places` decimal points.
 ///
 /// For integer types (`SMALLINT`, `INT`, `BIGINT`) the value is returned unchanged.
@@ -336,8 +355,9 @@ pub fn abs(value: &DataValue) -> Result<DataValue, FunctionError> {
 /// and the result scale is reduced to `max(places, 0)`.
 pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError> {
     match value {
-        // Integers are already whole numbers — no rounding needed
-        DataValue::SmallInt(_) | DataValue::Int(_) | DataValue::BigInt(_) => Ok(value.clone()),
+        DataValue::SmallInt(v) => Ok(DataValue::SmallInt(round_int(*v as i64, places) as i16)),
+        DataValue::Int(v) => Ok(DataValue::Int(round_int(*v as i64, places) as i32)),
+        DataValue::BigInt(v) => Ok(DataValue::BigInt(round_int(*v, places))),
         DataValue::Real(v) => {
             let factor = 10_f32.powi(places);
             Ok(DataValue::Real(crate::types::value::OrderedF32(
@@ -351,25 +371,49 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
             )))
         }
         DataValue::Numeric(v) => {
-            let target_scale = places.max(0) as u8;
-            if target_scale >= v.scale {
-                // No rounding needed — target has more or equal precision
-                return Ok(DataValue::Numeric(v.clone()));
-            }
-            let delta = (v.scale - target_scale) as u32;
-            let div = pow10(delta);
-            let q = v.unscaled / div;
-            let r = v.unscaled.abs() % div;
-            // Half-up rounding: round up if remainder >= half the divider
-            let rounded = if r * 2 >= div {
-                q + v.unscaled.signum()
+            if places < 0 {
+                let exp = (-places) as u32;
+                let delta = v.scale as u32 + exp;
+                if delta >= 38 {
+                    return Ok(DataValue::Numeric(crate::types::value::NumericValue {
+                        unscaled: 0,
+                        scale: 0,
+                    }));
+                }
+                let div = pow10(delta);
+                let q = v.unscaled / div;
+                let r = v.unscaled.abs() % div;
+                let rounded = if r * 2 >= div {
+                    q + v.unscaled.signum()
+                } else {
+                    q
+                };
+                let mult = pow10(exp);
+                Ok(DataValue::Numeric(crate::types::value::NumericValue {
+                    unscaled: rounded * mult,
+                    scale: 0,
+                }))
             } else {
-                q
-            };
-            Ok(DataValue::Numeric(crate::types::value::NumericValue {
-                unscaled: rounded,
-                scale: target_scale,
-            }))
+                let target_scale = places as u8;
+                if target_scale >= v.scale {
+                    // No rounding needed — target has more or equal precision
+                    return Ok(DataValue::Numeric(v.clone()));
+                }
+                let delta = (v.scale - target_scale) as u32;
+                let div = pow10(delta);
+                let q = v.unscaled / div;
+                let r = v.unscaled.abs() % div;
+                // Half-up rounding: round up if remainder >= half the divider
+                let rounded = if r * 2 >= div {
+                    q + v.unscaled.signum()
+                } else {
+                    q
+                };
+                Ok(DataValue::Numeric(crate::types::value::NumericValue {
+                    unscaled: rounded,
+                    scale: target_scale,
+                }))
+            }
         }
         _ => Err(FunctionError::TypeMismatch {
             expected: "numeric type".to_string(),
@@ -501,12 +545,12 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
         DataValue::Timestamp(ts) => {
             // Check if already truncated
             let is_already = match part {
-                DatePart::Year => ts.month() == 1 && ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0,
-                DatePart::Month => ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0,
-                DatePart::Day => ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0,
-                DatePart::Hour => ts.minute() == 0 && ts.second() == 0,
-                DatePart::Minute => ts.second() == 0,
-                DatePart::Second => true,
+                DatePart::Year => ts.month() == 1 && ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
+                DatePart::Month => ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
+                DatePart::Day => ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
+                DatePart::Hour => ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
+                DatePart::Minute => ts.second() == 0 && ts.nanosecond() == 0,
+                DatePart::Second => ts.nanosecond() == 0,
             };
             if is_already {
                 return Ok(DataValue::Timestamp(*ts));
@@ -514,15 +558,29 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
             // Floor and advance
             match date_trunc_floor(value, part) {
                 Ok(DataValue::Timestamp(floored)) => {
-                    let advanced_duration = match part {
-                        DatePart::Year => chrono::Duration::days(365), // approximate
-                        DatePart::Month => chrono::Duration::days(31),
-                        DatePart::Day => chrono::Duration::days(1),
-                        DatePart::Hour => chrono::Duration::hours(1),
-                        DatePart::Minute => chrono::Duration::minutes(1),
-                        DatePart::Second => chrono::Duration::seconds(1),
+                    let advanced = match part {
+                        DatePart::Year => {
+                            chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
+                                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                        }
+                        DatePart::Month => {
+                            let next_date = if floored.month() == 12 {
+                                chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
+                            } else {
+                                chrono::NaiveDate::from_ymd_opt(floored.year(), floored.month() + 1, 1)
+                            };
+                            next_date.and_then(|d| d.and_hms_opt(0, 0, 0))
+                        }
+                        DatePart::Day => {
+                            floored.date().succ_opt().and_then(|d| d.and_hms_opt(0, 0, 0))
+                        }
+                        DatePart::Hour => floored.checked_add_signed(chrono::Duration::hours(1)),
+                        DatePart::Minute => floored.checked_add_signed(chrono::Duration::minutes(1)),
+                        DatePart::Second => floored.checked_add_signed(chrono::Duration::seconds(1)),
                     };
-                    Ok(DataValue::Timestamp(floored + advanced_duration))
+                    Ok(DataValue::Timestamp(advanced.ok_or_else(|| {
+                        FunctionError::InvalidArgument("Invalid timestamp after ceiling".to_string())
+                    })?))
                 }
                 _ => Err(FunctionError::InvalidArgument(
                     "Cannot compute CEILING for timestamp".to_string()

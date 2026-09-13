@@ -242,7 +242,6 @@ pub(crate) fn set_null_child_rows(
     use crate::disk::{read_page, write_page};
     use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, SLOT_FLAG_DELETED};
     use crate::table::page_count;
-    use crate::backend::executor::create_index::update_index_on_delete;
     use crate::catalog::types::Column;
     use std::collections::HashSet;
     use std::fs::OpenOptions;
@@ -290,6 +289,7 @@ pub(crate) fn set_null_child_rows(
     let mut updated_count = 0usize;
 
     let mut recursive_values: Vec<(String, String, String)> = Vec::new();
+    let mut pending_inserts: Vec<(Vec<u8>, Vec<u8>, u32, u32)> = Vec::new();
 
     for page_num in 1..total_pages {
         let mut page = Page::new();
@@ -311,9 +311,9 @@ pub(crate) fn set_null_child_rows(
                     continue;
                 }
 
-                let tuple_data = &page.data[offset as usize..(offset + length) as usize];
+                let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
 
-                let decoded = match crate::types::deserialize_nullable_row(&schema_types, tuple_data) {
+                let decoded = match crate::types::deserialize_nullable_row(&schema_types, &tuple_data) {
                     Ok(d) => d,
                     Err(_) => continue,
                 };
@@ -354,13 +354,6 @@ pub(crate) fn set_null_child_rows(
                     ));
                 }
 
-                // Remove old B+ Tree index entries
-                if let Err(e) = update_index_on_delete(
-                    db_name, child_table, columns, tuple_data, page_num, i as u32,
-                ) {
-                    log::warn!("[SET NULL] Failed to update child index for modified tuple: {}", e);
-                }
-
                 // Build new values with FK column set to NULL
                 let mut new_values: Vec<Option<DataValue>> = Vec::with_capacity(columns.len());
                 for (j, dv_opt) in decoded.iter().enumerate() {
@@ -395,15 +388,19 @@ pub(crate) fn set_null_child_rows(
                         let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
                         page.data[base + 4..base + 6].copy_from_slice(&(new_len as u16).to_le_bytes());
                     }
+                    let _ = crate::backend::executor::create_index::update_index_on_update(
+                        db_name, child_table, columns, &tuple_data, &new_bytes, page_num, i as u32, page_num, i as u32,
+                    );
                 } else {
                     log::warn!(
-                        "[SET NULL] New tuple larger than old ({} > {}); marking slot as deleted",
+                        "[SET NULL] New tuple larger than old ({} > {}); relocating slot",
                         new_len, old_len
                     );
                     let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
                     let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
                     let new_flags = flags | SLOT_FLAG_DELETED;
                     page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
+                    pending_inserts.push((tuple_data, new_bytes, page_num, i as u32));
                 }
 
                 modified = true;
@@ -420,6 +417,22 @@ pub(crate) fn set_null_child_rows(
     }
 
     drop(file);
+    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
+
+    for (old_bytes, new_bytes, old_page, old_slot) in pending_inserts {
+        match crate::backend::executor::compaction_api::insert_raw_tuple(
+            db_name, child_table, &new_bytes,
+        ) {
+            Ok((new_page_id, new_slot_id)) => {
+                let _ = crate::backend::executor::create_index::update_index_on_update(
+                    db_name, child_table, columns, &old_bytes, &new_bytes, old_page, old_slot, new_page_id, new_slot_id,
+                );
+            }
+            Err(e) => {
+                log::error!("[SET NULL] Failed to relocate grown child tuple: {}", e);
+            }
+        }
+    }
     let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     log::info!(
@@ -473,7 +486,6 @@ pub(crate) fn update_child_rows_fk(
     use crate::disk::{read_page, write_page};
     use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, SLOT_FLAG_DELETED};
     use crate::table::page_count;
-    use crate::backend::executor::create_index::update_index_on_delete;
     use crate::catalog::types::Column;
     use std::fs::OpenOptions;
 
@@ -504,6 +516,7 @@ pub(crate) fn update_child_rows_fk(
 
     let total_pages = page_count(&mut file).map_err(|e| e.to_string())?;
     let mut total_updated = 0usize;
+    let mut pending_inserts: Vec<(Vec<u8>, Vec<u8>, u32, u32)> = Vec::new();
 
     for page_num in 1..total_pages {
         let mut page = Page::new();
@@ -525,9 +538,9 @@ pub(crate) fn update_child_rows_fk(
                     continue;
                 }
 
-                let tuple_data = &page.data[offset as usize..(offset + length) as usize];
+                let tuple_data = page.data[offset as usize..(offset + length) as usize].to_vec();
 
-                let decoded = match crate::types::deserialize_nullable_row(&schema_types, tuple_data) {
+                let decoded = match crate::types::deserialize_nullable_row(&schema_types, &tuple_data) {
                     Ok(d) => d,
                     Err(_) => continue,
                 };
@@ -556,13 +569,6 @@ pub(crate) fn update_child_rows_fk(
 
                 if !matches {
                     continue;
-                }
-
-                // Remove old B+ Tree index entries
-                if let Err(e) = update_index_on_delete(
-                    db_name, child_table, columns, tuple_data, page_num, i as u32,
-                ) {
-                    log::warn!("[UPDATE CASCADE] Failed to update child index: {}", e);
                 }
 
                 // Build new values with FK column set to new value
@@ -605,15 +611,19 @@ pub(crate) fn update_child_rows_fk(
                         let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
                         page.data[base + 4..base + 6].copy_from_slice(&(new_len as u16).to_le_bytes());
                     }
+                    let _ = crate::backend::executor::create_index::update_index_on_update(
+                        db_name, child_table, columns, &tuple_data, &new_bytes, page_num, i as u32, page_num, i as u32,
+                    );
                 } else {
                     log::warn!(
-                        "[UPDATE CASCADE] New tuple larger than old ({} > {}); marking slot as deleted",
+                        "[UPDATE CASCADE] New tuple larger than old ({} > {}); relocating slot",
                         new_len, old_len
                     );
                     let base = PAGE_HEADER_SIZE as usize + i * ITEM_ID_SIZE as usize;
                     let flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
                     let new_flags = flags | SLOT_FLAG_DELETED;
                     page.data[base + 6..base + 8].copy_from_slice(&new_flags.to_le_bytes());
+                    pending_inserts.push((tuple_data, new_bytes, page_num, i as u32));
                 }
 
                 modified = true;
@@ -630,6 +640,22 @@ pub(crate) fn update_child_rows_fk(
     }
 
     drop(file);
+    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
+
+    for (old_bytes, new_bytes, old_page, old_slot) in pending_inserts {
+        match crate::backend::executor::compaction_api::insert_raw_tuple(
+            db_name, child_table, &new_bytes,
+        ) {
+            Ok((new_page_id, new_slot_id)) => {
+                let _ = crate::backend::executor::create_index::update_index_on_update(
+                    db_name, child_table, columns, &old_bytes, &new_bytes, old_page, old_slot, new_page_id, new_slot_id,
+                );
+            }
+            Err(e) => {
+                log::error!("[UPDATE CASCADE] Failed to relocate grown child tuple: {}", e);
+            }
+        }
+    }
     let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     log::info!(

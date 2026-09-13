@@ -83,10 +83,31 @@ pub fn load_csv(
     let reader = BufReader::new(csv_file);
     let mut lines = reader.lines();
 
-    // Skip header line
+    // Skip header line if present
     log::info!(" Reading CSV header...");
-    if let Some(Ok(header)) = lines.next() {
-        log::info!(" Header: {}", header);
+    let mut first_row: Option<String> = None;
+    for line_res in lines.by_ref() {
+        let line = match line_res {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("Error reading CSV line: {}", e);
+                return Err(e);
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = parse_csv_line(&line);
+        let is_header = parsed.len() == columns.len()
+            && parsed.iter().zip(columns.iter()).all(|(v, col)| {
+                col.name.eq_ignore_ascii_case(v.trim().trim_matches('"'))
+            });
+        if is_header {
+            log::info!(" Header detected: {}", line);
+        } else {
+            first_row = Some(line);
+        }
+        break;
     }
 
     // --- 3a. Open HeapManager for FSM-aware insertion ---
@@ -102,13 +123,17 @@ pub fn load_csv(
         }
     };
 
+    let has_header = first_row.is_none();
+    let mut line_idx = if has_header { 1 } else { 0 };
+    let rows_iter = first_row.into_iter().map(Ok).chain(lines);
+
     // --- 4. Iterate through rows with detailed validation ---
     let mut inserted = 0u32;
     let mut skipped = 0u32;
     let mut failed = 0u32;
 
-    for (line_num, line) in lines.enumerate() {
-        let line_idx = line_num + 2; // +2 because we skipped header and start from line 2
+    for line in rows_iter {
+        line_idx += 1;
 
         let row = match line {
             Ok(r) => r,
@@ -125,7 +150,7 @@ pub fn load_csv(
             continue;
         }
 
-        let values: Vec<&str> = row.split(',').map(|v| v.trim()).collect();
+        let values: Vec<String> = parse_csv_line(&row);
 
         if values.len() != columns.len() {
             log::warn!(
@@ -138,10 +163,16 @@ pub fn load_csv(
             continue;
         }
 
+        let values_ref: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+
         // --- 5. Validate each value before serialization ---
         let mut validation_passed = true;
-        for (col_idx, (val, col)) in values.iter().zip(columns.iter()).enumerate() {
+        for (col_idx, (val, col)) in values_ref.iter().zip(columns.iter()).enumerate() {
             let data_type = &col.data_type;
+            let trimmed = val.trim();
+            if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
+                continue;
+            }
             if let Err(validation_err) = validate_value(data_type, val) {
                 log::warn!(
                     "[CSV LOADER] Line {}, Column {} ('{}'): {} Value: '{}'",
@@ -162,11 +193,25 @@ pub fn load_csv(
             continue;
         }
 
+        // Constraint validation: NOT NULL, UNIQUE, FK, CHECK
+        if let Err(e) = crate::backend::constraint::validate_row_insert(
+            catalog, db_name, table_name, &values_ref,
+        ) {
+            log::warn!("Line {}: Constraint violation: {}", line_idx, e);
+            failed += 1;
+            continue;
+        }
+
         // --- 6. Serialize row based on schema ---
         let mut row_ok = true;
 
-        for (val, col) in values.iter().zip(columns.iter()) {
-            match DataValue::parse_and_encode(&col.data_type, val) {
+        for (val, col) in values_ref.iter().zip(columns.iter()) {
+            let data_type = &col.data_type;
+            let trimmed = val.trim();
+            if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
+                continue;
+            }
+            match DataValue::parse_and_encode(data_type, val) {
                 Ok(_) => {}
                 Err(e) => {
                     println!("Skipping row {}: column '{}' — {}", line_idx, col.name, e);
@@ -177,6 +222,7 @@ pub fn load_csv(
         }
 
         if !row_ok {
+            failed += 1;
             continue;
         }
 
@@ -188,7 +234,14 @@ pub fn load_csv(
 
         // Build nullable value list
         let nullable_values: Vec<Option<&str>> =
-            values.iter().map(|v| Some(*v)).collect();
+            values_ref.iter().zip(columns.iter()).map(|(v, col)| {
+                let trimmed = v.trim();
+                if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
+                    None
+                } else {
+                    Some(*v)
+                }
+            }).collect();
 
         // Serialize using tuple layout serializer
         let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {
@@ -209,7 +262,7 @@ pub fn load_csv(
             Ok((page_id, slot_id)) => {
                 // Update any existing B+ Tree index
                 if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
-                    db_name, table_name, &values, page_id, slot_id,
+                    db_name, table_name, &values_ref, page_id, slot_id,
                 ) {
                     log::warn!("Failed to update index for row {}: {}", line_idx, e);
                 }
@@ -380,4 +433,72 @@ pub fn insert_single_tuple(
             Ok(false)
         }
     }
+}
+
+/// RFC-4180 compliant CSV line parser.
+/// Handles quoted fields, embedded commas, doubled quotes (`""`), and backslash-escaped quotes (`\"`).
+pub fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+
+    while i < n {
+        // Skip leading whitespace before field
+        while i < n && (chars[i] == ' ' || chars[i] == '\t') {
+            i += 1;
+        }
+        if i >= n {
+            break;
+        }
+
+        if chars[i] == '"' {
+            i += 1; // consume opening quote
+            let mut field = String::new();
+            while i < n {
+                if chars[i] == '"' {
+                    if i + 1 < n && chars[i + 1] == '"' {
+                        field.push('"');
+                        i += 2;
+                    } else {
+                        // closing quote
+                        i += 1;
+                        break;
+                    }
+                } else if chars[i] == '\\' && i + 1 < n && chars[i + 1] == '"' {
+                    field.push('"');
+                    i += 2;
+                } else {
+                    field.push(chars[i]);
+                    i += 1;
+                }
+            }
+            // Skip trailing whitespace after closing quote up to comma or end
+            while i < n && (chars[i] == ' ' || chars[i] == '\t') {
+                i += 1;
+            }
+            fields.push(field);
+            if i < n && chars[i] == ',' {
+                i += 1; // consume delimiter
+                if i == n {
+                    fields.push(String::new());
+                }
+            }
+        } else {
+            let mut field = String::new();
+            while i < n && chars[i] != ',' {
+                field.push(chars[i]);
+                i += 1;
+            }
+            fields.push(field.trim().to_string());
+            if i < n && chars[i] == ',' {
+                i += 1; // consume delimiter
+                if i == n {
+                    fields.push(String::new());
+                }
+            }
+        }
+    }
+
+    fields
 }

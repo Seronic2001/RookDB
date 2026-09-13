@@ -268,8 +268,11 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
             let val = expr.evaluate(tuple, schema)?;
             match val {
                 None => Ok(None), // NULL LIKE anything → UNKNOWN
-                Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => {
-                    Ok(Some(like_match(s.trim(), pattern, *escape_char)))
+                Some(DataValue::Varchar(s)) => {
+                    Ok(Some(like_match(&s, pattern, *escape_char)))
+                }
+                Some(DataValue::Char(s)) => {
+                    Ok(Some(like_match(s.trim_end(), pattern, *escape_char)))
                 }
                 Some(_) => Ok(None), // non-string type → UNKNOWN
             }
@@ -290,6 +293,7 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
                             .unwrap_or(false),
                         None => false,
                     });
+                    let has_nulls = values.iter().any(|v| v.is_none());
                     if *negated {
                         // NOT IN with NULLs in the value list must return UNKNOWN
                         // per SQL-99 three-valued logic.
@@ -298,17 +302,17 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
                         // with UNKNOWN produces UNKNOWN unless we found a match.
                         if found {
                             Ok(Some(false))  // NOT IN failed because match found
+                        } else if has_nulls {
+                            Ok(None)  // UNKNOWN because NULL in list
                         } else {
-                            // Check if there are any NULLs in the value list
-                            let has_nulls = values.iter().any(|v| v.is_none());
-                            if has_nulls {
-                                Ok(None)  // UNKNOWN because NULL in list
-                            } else {
-                                Ok(Some(true))  // definitely not in list
-                            }
+                            Ok(Some(true))  // definitely not in list
                         }
+                    } else if found {
+                        Ok(Some(true))
+                    } else if has_nulls {
+                        Ok(None)
                     } else {
-                        Ok(Some(found))
+                        Ok(Some(false))
                     }
                 }
             }

@@ -492,11 +492,20 @@ impl HashJoinOperator {
         for expr in keys {
             let val = expr.evaluate(tuple, schema)?;
             match val {
-                Some(dv) => parts.push(dv),
+                Some(dv) => parts.push(Self::canonicalize_hash_key(dv)),
                 None => return Ok(None),  // NULL key → can never match (NULL != NULL)
             }
         }
         Ok(Some(parts))
+    }
+
+    fn canonicalize_hash_key(dv: DataValue) -> DataValue {
+        match dv {
+            DataValue::SmallInt(v) => DataValue::BigInt(v as i64),
+            DataValue::Int(v) => DataValue::BigInt(v as i64),
+            DataValue::Char(s) => DataValue::Varchar(s.trim_end().to_string()),
+            other => other,
+        }
     }
 
     /// Build the hash table from the build side.

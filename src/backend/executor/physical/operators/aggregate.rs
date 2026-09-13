@@ -6,7 +6,7 @@ use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
 
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, NumericValue};
 use crate::types::datatype::DataType;
 use crate::types::comparison::compare_nullable;
 
@@ -37,6 +37,26 @@ pub struct AggregateInfo {
 
 // ── PerGroupState ─────────────────────────────────────────────────────────────
 
+fn add_numeric(a: NumericValue, b: NumericValue) -> Result<NumericValue, String> {
+    let target_scale = a.scale.max(b.scale);
+    let scale_val = |unscaled: i128, cur_scale: u8| -> Result<i128, String> {
+        if cur_scale == target_scale {
+            Ok(unscaled)
+        } else {
+            let diff = (target_scale - cur_scale) as u32;
+            let factor = 10_i128.checked_pow(diff).ok_or_else(|| "Numeric scale overflow".to_string())?;
+            unscaled.checked_mul(factor).ok_or_else(|| "Numeric scale overflow".to_string())
+        }
+    };
+    let a_scaled = scale_val(a.unscaled, a.scale)?;
+    let b_scaled = scale_val(b.unscaled, b.scale)?;
+    let sum = a_scaled.checked_add(b_scaled).ok_or_else(|| "Numeric addition overflow".to_string())?;
+    Ok(NumericValue {
+        unscaled: sum,
+        scale: target_scale,
+    })
+}
+
 /// Per-group partial aggregate state.
 #[derive(Debug, Clone)]
 pub struct PerGroupState {
@@ -47,6 +67,7 @@ pub struct PerGroupState {
     pub(super) sum_int: i128,
     pub(super) sum_float: f64,
     pub(super) sum_is_float: bool,
+    pub(super) sum_numeric: Option<NumericValue>,
     pub(super) min: Option<DataValue>,
     pub(super) max: Option<DataValue>,
 }
@@ -67,6 +88,7 @@ impl PerGroupState {
             sum_int: 0,
             sum_float: 0.0,
             sum_is_float: false,
+            sum_numeric: None,
             min: None,
             max: None,
         }
@@ -90,14 +112,74 @@ impl PerGroupState {
 
         if matches!(function, AggregateFunction::Sum | AggregateFunction::Avg) {
             match val {
-                DataValue::SmallInt(v) => { self.sum_int += *v as i128; self.has_sum = true; }
-                DataValue::Int(v) => { self.sum_int += *v as i128; self.has_sum = true; }
-                DataValue::BigInt(v) => { self.sum_int += *v as i128; self.has_sum = true; }
-                DataValue::Real(v) => { self.sum_float += v.0 as f64; self.sum_is_float = true; self.has_sum = true; }
-                DataValue::DoublePrecision(v) => { self.sum_float += v.0; self.sum_is_float = true; self.has_sum = true; }
+                DataValue::SmallInt(v) => {
+                    if self.sum_is_float {
+                        self.sum_float += *v as f64;
+                    } else if let Some(num) = self.sum_numeric.take() {
+                        let v_num = NumericValue { unscaled: *v as i128, scale: 0 };
+                        self.sum_numeric = Some(add_numeric(num, v_num)?);
+                    } else {
+                        self.sum_int += *v as i128;
+                    }
+                    self.has_sum = true;
+                }
+                DataValue::Int(v) => {
+                    if self.sum_is_float {
+                        self.sum_float += *v as f64;
+                    } else if let Some(num) = self.sum_numeric.take() {
+                        let v_num = NumericValue { unscaled: *v as i128, scale: 0 };
+                        self.sum_numeric = Some(add_numeric(num, v_num)?);
+                    } else {
+                        self.sum_int += *v as i128;
+                    }
+                    self.has_sum = true;
+                }
+                DataValue::BigInt(v) => {
+                    if self.sum_is_float {
+                        self.sum_float += *v as f64;
+                    } else if let Some(num) = self.sum_numeric.take() {
+                        let v_num = NumericValue { unscaled: *v as i128, scale: 0 };
+                        self.sum_numeric = Some(add_numeric(num, v_num)?);
+                    } else {
+                        self.sum_int += *v as i128;
+                    }
+                    self.has_sum = true;
+                }
+                DataValue::Real(v) => {
+                    if !self.sum_is_float {
+                        self.sum_is_float = true;
+                        self.sum_float += self.sum_int as f64;
+                        self.sum_int = 0;
+                        if let Some(num) = self.sum_numeric.take() {
+                            self.sum_float += num.unscaled as f64 / 10f64.powi(num.scale as i32);
+                        }
+                    }
+                    self.sum_float += v.0 as f64;
+                    self.has_sum = true;
+                }
+                DataValue::DoublePrecision(v) => {
+                    if !self.sum_is_float {
+                        self.sum_is_float = true;
+                        self.sum_float += self.sum_int as f64;
+                        self.sum_int = 0;
+                        if let Some(num) = self.sum_numeric.take() {
+                            self.sum_float += num.unscaled as f64 / 10f64.powi(num.scale as i32);
+                        }
+                    }
+                    self.sum_float += v.0;
+                    self.has_sum = true;
+                }
                 DataValue::Numeric(v) => {
-                    self.sum_float += v.unscaled as f64 / 10f64.powi(v.scale as i32);
-                    self.sum_is_float = true;
+                    if self.sum_is_float {
+                        self.sum_float += v.unscaled as f64 / 10f64.powi(v.scale as i32);
+                    } else {
+                        let current = self.sum_numeric.take().unwrap_or_else(|| {
+                            let n = NumericValue { unscaled: self.sum_int, scale: 0 };
+                            self.sum_int = 0;
+                            n
+                        });
+                        self.sum_numeric = Some(add_numeric(current, v.clone())?);
+                    }
                     self.has_sum = true;
                 }
                 _ => return Err(format!("Cannot SUM/AVG non-numeric type: {:?}", val)),
@@ -148,17 +230,24 @@ impl PerGroupState {
             AggregateFunction::Sum => {
                 if !self.has_sum { return None; }
                 if self.sum_is_float {
-                    Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(self.sum_float)))
+                    let total = self.sum_float + (self.sum_int as f64);
+                    Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(total)))
+                } else if let Some(num) = &self.sum_numeric {
+                    Some(DataValue::Numeric(num.clone()))
                 } else {
-                    let v = if self.sum_int > i64::MAX as i128 { i64::MAX }
-                        else if self.sum_int < i64::MIN as i128 { i64::MIN }
-                        else { self.sum_int as i64 };
+                    let v = i64::try_from(self.sum_int).ok()?;
                     Some(DataValue::BigInt(v))
                 }
             }
             AggregateFunction::Avg => {
                 if self.non_null_count == 0 || !self.has_sum { return None; }
-                let total = if self.sum_is_float { self.sum_float } else { self.sum_int as f64 };
+                let total = if self.sum_is_float {
+                    self.sum_float + (self.sum_int as f64)
+                } else if let Some(num) = &self.sum_numeric {
+                    num.unscaled as f64 / 10f64.powi(num.scale as i32)
+                } else {
+                    self.sum_int as f64
+                };
                 Some(DataValue::DoublePrecision(
                     crate::types::value::OrderedF64(total / self.non_null_count as f64)
                 ))
@@ -180,7 +269,8 @@ pub fn infer_aggregate_output_type(
             Some(DataType::SmallInt) | Some(DataType::Int) | Some(DataType::BigInt) => DataType::BigInt,
             Some(DataType::Real) => DataType::Real,
             Some(DataType::DoublePrecision) => DataType::DoublePrecision,
-            Some(DataType::Numeric { .. }) | Some(DataType::Decimal { .. }) => DataType::DoublePrecision,
+            Some(DataType::Numeric { precision, scale }) => DataType::Numeric { precision: *precision, scale: *scale },
+            Some(DataType::Decimal { precision, scale }) => DataType::Decimal { precision: *precision, scale: *scale },
             _ => DataType::BigInt,
         },
         AggregateFunction::Avg => DataType::DoublePrecision,

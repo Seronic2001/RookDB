@@ -267,10 +267,16 @@ fn evaluate_scalar_function(
         }
         "POSITION" | "CHARINDEX" => {
             let mut iter = evaluated.into_iter();
-            let substring = iter.next().flatten()
-                .ok_or_else(|| "POSITION requires a non-NULL substring argument".to_string())?;
-            let value = iter.next().flatten()
-                .ok_or_else(|| "POSITION requires a non-NULL string argument".to_string())?;
+            let substring = match iter.next() {
+                Some(Some(dv)) => dv,
+                Some(None) => return Ok(None),
+                None => return Err("POSITION requires at least 1 argument".to_string()),
+            };
+            let value = match iter.next() {
+                Some(Some(dv)) => dv,
+                Some(None) => return Ok(None),
+                None => return Err("POSITION requires 2 arguments".to_string()),
+            };
             let pos = crate::types::functions::position(&value, &substring)
                 .map_err(|e| format!("POSITION error: {}", e))?;
             Ok(Some(DataValue::Int(pos)))
@@ -445,39 +451,43 @@ fn evaluate_scalar_function(
         // ── 2-argument functions ────────────────────────────────────────
         "SUBSTRING" | "SUBSTR" => {
             let mut iter = evaluated.into_iter();
-            let val = iter.next().flatten()
-                .ok_or_else(|| "SUBSTRING requires a non-NULL string argument".to_string())?;
-            let start = match iter.next().flatten() {
-                Some(DataValue::Int(s)) => {
+            let val = match iter.next() {
+                Some(Some(dv)) => dv,
+                Some(None) => return Ok(None),
+                None => return Err("SUBSTRING requires a string argument".to_string()),
+            };
+            let start = match iter.next() {
+                Some(Some(DataValue::Int(s))) => {
                     if s <= 0 {
                         return Err("SUBSTRING start position must be >= 1".to_string());
                     }
                     s as usize
                 }
-                Some(DataValue::BigInt(s)) => {
+                Some(Some(DataValue::BigInt(s))) => {
                     if s <= 0 {
                         return Err("SUBSTRING start position must be >= 1".to_string());
                     }
                     s as usize
                 }
+                Some(None) => return Ok(None),
                 _ => return Err("SUBSTRING requires integer start position".to_string()),
             };
-            let len = match iter.next().flatten() {
-                Some(DataValue::Int(l)) => {
+            let len = match iter.next() {
+                Some(Some(DataValue::Int(l))) => {
                     if l < 0 {
                         return Ok(None);
                     }
                     l as usize
                 }
-                Some(DataValue::BigInt(l)) => {
+                Some(Some(DataValue::BigInt(l))) => {
                     if l < 0 {
                         return Ok(None);
                     }
                     l as usize
                 }
+                Some(None) => return Ok(None),
                 // Default: rest of string (use string length via evaluating the value first)
                 None => {
-                    // Re-evaluate to get the actual string length for default
                     match &val {
                         DataValue::Varchar(s) | DataValue::Char(s) => s.chars().count(),
                         _ => return Err("SUBSTRING requires a string value".to_string()),
@@ -491,11 +501,15 @@ fn evaluate_scalar_function(
         }
         "ROUND" => {
             let mut iter = evaluated.into_iter();
-            let val = iter.next().flatten()
-                .ok_or_else(|| "ROUND requires a non-NULL numeric argument".to_string())?;
-            let places = match iter.next().flatten() {
-                Some(DataValue::Int(p)) => p,
-                Some(DataValue::BigInt(p)) => p as i32,
+            let val = match iter.next() {
+                Some(Some(dv)) => dv,
+                Some(None) => return Ok(None),
+                None => return Err("ROUND requires a numeric argument".to_string()),
+            };
+            let places = match iter.next() {
+                Some(Some(DataValue::Int(p))) => p,
+                Some(Some(DataValue::BigInt(p))) => p as i32,
+                Some(None) => return Ok(None),
                 None => 0,
                 _ => return Err("ROUND requires integer places".to_string()),
             };
@@ -514,12 +528,16 @@ fn evaluate_scalar_function(
                 return Err("EXTRACT requires 2 arguments: (part, value)".to_string());
             }
             let mut iter = evaluated.into_iter();
-            let part_str = match iter.next().flatten() {
-                Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => s.to_uppercase(),
+            let part_str = match iter.next() {
+                Some(Some(DataValue::Varchar(s))) | Some(Some(DataValue::Char(s))) => s.to_uppercase(),
+                Some(None) => return Ok(None),
                 _ => return Err("EXTRACT first argument must be a string (YEAR/MONTH/DAY/etc.)".to_string()),
             };
-            let val = iter.next().flatten()
-                .ok_or_else(|| "EXTRACT requires a non-NULL date/time value".to_string())?;
+            let val = match iter.next() {
+                Some(Some(dv)) => dv,
+                Some(None) => return Ok(None),
+                None => return Err("EXTRACT requires 2 arguments".to_string()),
+            };
 
             let part = match part_str.as_str() {
                 "YEAR" => crate::types::functions::DatePart::Year,
