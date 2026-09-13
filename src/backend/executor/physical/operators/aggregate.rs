@@ -357,6 +357,17 @@ impl AggregateOperator {
             }
         }
 
+        // Global aggregate over empty input: SQL standard requires exactly 1 row
+        if self.group_by_exprs.is_empty() && self.groups.is_empty() {
+            let agg_states = (0..self.aggregates.len())
+                .map(|_| PerGroupState::new())
+                .collect();
+            self.groups.push(GroupEntry {
+                key_values: Vec::new(),
+                agg_states,
+            });
+        }
+
         self.consumed = true;
         self.materialise()?;
         Ok(())

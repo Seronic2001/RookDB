@@ -233,7 +233,7 @@ pub fn position(value: &DataValue, substring: &DataValue) -> Result<i32, Functio
         }
     };
     match s.find(sub) {
-        Some(idx) => Ok(idx as i32 + 1), // 1-based SQL position
+        Some(byte_idx) => Ok(s[..byte_idx].chars().count() as i32 + 1), // 1-based SQL character position
         None => Ok(0),
     }
 }

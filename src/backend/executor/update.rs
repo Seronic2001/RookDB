@@ -326,16 +326,18 @@ pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
 
         if col.is_empty() || rhs.is_empty() { continue; }
 
-        let expr = if let Some((src, op, rhs_str)) = try_parse_arith_expr(rhs) {
+        let expr = if rhs.starts_with('\'') && rhs.ends_with('\'') && rhs.len() >= 2 {
+            let inner = &rhs[1..rhs.len() - 1];
+            SetExpr::Literal(ColumnValue::Text(inner.replace("''", "'")))
+        } else if rhs.starts_with('"') && rhs.ends_with('"') && rhs.len() >= 2 {
+            let inner = &rhs[1..rhs.len() - 1];
+            SetExpr::Literal(ColumnValue::Text(inner.replace("\"\"", "\"")))
+        } else if rhs.eq_ignore_ascii_case("null") {
+            SetExpr::Null
+        } else if let Some((src, op, rhs_str)) = try_parse_arith_expr(rhs) {
             let rhs_f: f64 = rhs_str.parse().ok()?;
             let rhs_i: i64 = rhs_f as i64;
             SetExpr::Expr { src_col: src, op, rhs_i, rhs_f }
-        } else if rhs.eq_ignore_ascii_case("null") {
-            SetExpr::Null
-        } else if (rhs.starts_with('\'') && rhs.ends_with('\'') && rhs.len() >= 2)
-            || (rhs.starts_with('"') && rhs.ends_with('"') && rhs.len() >= 2) {
-            let inner = &rhs[1..rhs.len() - 1];
-            SetExpr::Literal(ColumnValue::Text(inner.to_string()))
         } else if let Ok(n) = rhs.parse::<i32>() {
             SetExpr::Literal(ColumnValue::Int(n))
         } else if let Ok(n) = rhs.parse::<i64>() {
@@ -357,16 +359,23 @@ pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
     if assignments.is_empty() { None } else { Some(assignments) }
 }
 
-/// Split a SET clause by commas, but NOT commas inside parentheses.
+/// Split a SET clause by commas, but NOT commas inside parentheses or string literals.
 fn split_set_parts(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
     let mut start = 0usize;
     for (i, ch) in s.char_indices() {
         match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => { parts.push(&s[start..i]); start = i + 1; }
+            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+            '"' if !in_single_quote => in_double_quote = !in_double_quote,
+            '(' if !in_single_quote && !in_double_quote => depth += 1,
+            ')' if !in_single_quote && !in_double_quote => depth = depth.saturating_sub(1),
+            ',' if depth == 0 && !in_single_quote && !in_double_quote => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
             _ => {}
         }
     }
@@ -377,6 +386,10 @@ fn split_set_parts(s: &str) -> Vec<&str> {
 /// Try to parse an arithmetic expression like `age + 1`, `age+1`, or `salary * 1.10`.
 /// Returns `(src_col, op, rhs_str)` or `None`.
 fn try_parse_arith_expr(rhs: &str) -> Option<(String, ArithOp, String)> {
+    if rhs.starts_with('\'') || rhs.starts_with('"') {
+        return None;
+    }
+
     // .trim() on both sides makes spaced and unspaced forms identical,
     // so we only need the bare operator symbol.
     // pos > 0 guard prevents treating a leading sign (e.g. "-5") as an expression.

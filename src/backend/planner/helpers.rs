@@ -100,35 +100,47 @@ pub fn expand_projections(
     projections: &[SelectExpr],
     current_plan: &LogicalPlan,
 ) -> Result<Vec<NamedExpr>, PlanError> {
-    let schema = derive_schema(current_plan);
+    let qualified_schema = derive_qualified_schema(current_plan);
 
     let mut result = Vec::new();
     for item in projections {
         match item {
             SelectExpr::Wildcard => {
-                for col in &schema.columns {
+                for (table, col) in &qualified_schema {
+                    let expr = match table {
+                        Some(tbl) => ExprNode::Compound(vec![tbl.clone(), col.name.clone()]),
+                        None => ExprNode::Column(col.name.clone()),
+                    };
                     result.push(NamedExpr {
                         name: col.name.clone(),
-                        expr: ExprNode::Column(col.name.clone()),
+                        expr,
                     });
                 }
             }
             SelectExpr::QualifiedWildcard(prefix) => {
-                let _prefix_lower = prefix.to_lowercase();
-                for col in &schema.columns {
-                    let col_table = col.name.split('.').next().unwrap_or("");
-                    if col_table.eq_ignore_ascii_case(prefix) {
+                let mut matched = false;
+                for (table, col) in &qualified_schema {
+                    let is_match = match table {
+                        Some(tbl) => tbl.eq_ignore_ascii_case(prefix),
+                        None => col.name.split('.').next().map(|p| p.eq_ignore_ascii_case(prefix)).unwrap_or(false),
+                    };
+                    if is_match {
+                        matched = true;
                         result.push(NamedExpr {
                             name: col.name.clone(),
                             expr: ExprNode::Compound(vec![prefix.clone(), col.name.clone()]),
                         });
                     }
                 }
-                if result.is_empty() {
-                    for col in &schema.columns {
+                if !matched {
+                    for (table, col) in &qualified_schema {
+                        let expr = match table {
+                            Some(tbl) => ExprNode::Compound(vec![tbl.clone(), col.name.clone()]),
+                            None => ExprNode::Column(col.name.clone()),
+                        };
                         result.push(NamedExpr {
                             name: col.name.clone(),
-                            expr: ExprNode::Column(col.name.clone()),
+                            expr,
                         });
                     }
                 }
@@ -223,6 +235,66 @@ pub fn derive_schema(plan: &LogicalPlan) -> ColumnSchema {
         LogicalPlan::RecursiveCte(rc) => derive_schema(&rc.outer),
         LogicalPlan::CteScan(cs) => cs.schema.clone(),
         LogicalPlan::Insert(inp) => derive_schema(&inp.child),
+    }
+}
+
+/// Derive a schema paired with optional source table qualifiers from a logical plan.
+pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, ColumnInfo)> {
+    match plan {
+        LogicalPlan::TableScan(t) => {
+            let tbl = t.alias.clone().unwrap_or_else(|| t.table.clone());
+            t.schema.columns.iter().map(|c| (Some(tbl.clone()), c.clone())).collect()
+        }
+        LogicalPlan::Filter(f) => derive_qualified_schema(&f.child),
+        LogicalPlan::Project(p) => {
+            p.expressions.iter().map(|expr| {
+                let table = match &expr.expr {
+                    ExprNode::Compound(parts) if parts.len() >= 2 => {
+                        Some(parts[parts.len() - 2].clone())
+                    }
+                    _ => None,
+                };
+                (table, ColumnInfo {
+                    name: expr.name.clone(),
+                    data_type: "UNKNOWN".to_string(),
+                    nullable: true,
+                })
+            }).collect()
+        }
+        LogicalPlan::Join(j) => {
+            let mut cols = derive_qualified_schema(&j.left);
+            cols.extend(derive_qualified_schema(&j.right));
+            cols
+        }
+        LogicalPlan::Distinct(d) => derive_qualified_schema(&d.child),
+        LogicalPlan::Sort(s) => derive_qualified_schema(&s.child),
+        LogicalPlan::Limit(l) => derive_qualified_schema(&l.child),
+        LogicalPlan::Aggregate(a) => {
+            let mut cols = Vec::new();
+            for expr in &a.group_by {
+                let name = expr_to_name(expr);
+                cols.push((None, ColumnInfo { name, data_type: "UNKNOWN".to_string(), nullable: true }));
+            }
+            for agg in &a.aggregates {
+                let name = agg.alias.clone().unwrap_or_else(|| {
+                    format!("{:?}({})", agg.function, agg.args.len())
+                });
+                cols.push((None, ColumnInfo { name, data_type: "UNKNOWN".to_string(), nullable: true }));
+            }
+            if cols.is_empty() {
+                derive_qualified_schema(&a.child)
+            } else {
+                cols
+            }
+        }
+        LogicalPlan::SetOp(s) => derive_qualified_schema(&s.left),
+        LogicalPlan::Subquery(sq) => derive_qualified_schema(&sq.subquery),
+        LogicalPlan::Cte(c) => derive_qualified_schema(&c.outer),
+        LogicalPlan::RecursiveCte(rc) => derive_qualified_schema(&rc.outer),
+        LogicalPlan::CteScan(cs) => {
+            cs.schema.columns.iter().map(|c| (None, c.clone())).collect()
+        }
+        LogicalPlan::Insert(inp) => derive_qualified_schema(&inp.child),
     }
 }
 

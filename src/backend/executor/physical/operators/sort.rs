@@ -34,6 +34,60 @@ pub struct SortOperator {
     cached_schema: Vec<ColumnInfo>,
 }
 
+/// A physical operator that yields tuples from an in-memory buffer first,
+/// then continues draining from an underlying child operator.
+struct BufferedChildOperator {
+    buffer: Vec<Tuple>,
+    pos: usize,
+    child: Box<dyn PhysicalOperator>,
+    schema: Vec<ColumnInfo>,
+}
+
+impl PhysicalOperator for BufferedChildOperator {
+    fn next(&mut self) -> RookResult<Option<Tuple>> {
+        if self.pos < self.buffer.len() {
+            let tuple = self.buffer[self.pos].clone();
+            self.pos += 1;
+            Ok(Some(tuple))
+        } else {
+            self.child.next()
+        }
+    }
+
+    fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
+        let available = self.buffer.len().saturating_sub(self.pos);
+        if available > 0 {
+            let take = available.min(super::trait_::DEFAULT_BATCH_SIZE);
+            batch.reserve(take);
+            for i in 0..take {
+                batch.push(self.buffer[self.pos + i].clone());
+            }
+            self.pos += take;
+            Ok(take)
+        } else {
+            self.child.next_batch(batch)
+        }
+    }
+
+    fn schema(&self) -> &[ColumnInfo] {
+        &self.schema
+    }
+
+    fn reset(&mut self) -> RookResult<()> {
+        self.pos = 0;
+        self.child.reset()
+    }
+
+    fn estimate_cardinality(&self) -> usize {
+        self.buffer.len() + self.child.estimate_cardinality()
+    }
+
+    fn name(&self) -> &'static str {
+        "BufferedChild"
+    }
+}
+
 impl SortOperator {
     /// Create a new in-memory-only sort operator.
     pub fn new(child: Box<dyn PhysicalOperator>, sort_keys: Vec<(usize, bool)>) -> Self {
@@ -85,12 +139,23 @@ impl SortOperator {
         if self.external.is_none() {
             log::info!("[Sort] Switching to external merge sort");
             let config = ExternalSortConfig {
-                max_tuples_per_run: self.external_threshold.max(100),
+                max_tuples_per_run: if self.external_threshold > 0 { self.external_threshold } else { 100 },
                 ..Default::default()
             };
             let child = std::mem::replace(&mut self.child, Box::new(NullOperator::new(Vec::new())));
+            let source: Box<dyn PhysicalOperator> = if self.buffer.is_empty() {
+                child
+            } else {
+                let buffer = std::mem::take(&mut self.buffer);
+                Box::new(BufferedChildOperator {
+                    buffer,
+                    pos: 0,
+                    child,
+                    schema: self.cached_schema.clone(),
+                })
+            };
             self.external = Some(ExternalSortOperator::new(
-                child,
+                source,
                 self.sort_keys.clone(),
                 config,
             ));
@@ -104,21 +169,21 @@ impl SortOperator {
             return Ok(());
         }
 
-        // Consume all tuples from child in batches
+        // Consume tuples from child in batches
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.child.next_batch(&mut child_batch)? > 0 {
             self.buffer.append(&mut child_batch);
-        }
 
-        // Check if we should have used external sort
-        if self.external_threshold > 0 && self.buffer.len() > self.external_threshold {
-            log::info!(
-                "[Sort] In-memory sort exceeded threshold ({} > {}), switching to external",
-                self.buffer.len(),
-                self.external_threshold
-            );
-            self.use_external = true;
-            return Ok(());
+            // Check if we should switch to external sort
+            if self.external_threshold > 0 && self.buffer.len() > self.external_threshold {
+                log::info!(
+                    "[Sort] In-memory sort exceeded threshold ({} > {}), switching to external",
+                    self.buffer.len(),
+                    self.external_threshold
+                );
+                self.use_external = true;
+                return Ok(());
+            }
         }
 
         // Check if child already satisfies ordering
@@ -203,6 +268,7 @@ impl PhysicalOperator for SortOperator {
             }
         }
 
+        batch.clear();
         let available = self.buffer.len().saturating_sub(self.pos);
         if available == 0 {
             return Ok(0);

@@ -275,7 +275,17 @@ impl IndexScanOperator {
             IndexScanMode::FullScan => {
                 let tids = self.btree.scan_all()
                     .map_err(|e| RookError::Internal(format!("Index scan full scan error: {}", e)))?;
-                self.results = tids;
+                let mut tid_set: std::collections::HashSet<(u32, u32)> = tids.iter().cloned().collect();
+                let mut all_results = tids;
+                for item in self.heap_manager.scan() {
+                    if let Ok((page_id, slot_id, _)) = item {
+                        if !tid_set.contains(&(page_id, slot_id)) {
+                            all_results.push((page_id, slot_id));
+                            tid_set.insert((page_id, slot_id));
+                        }
+                    }
+                }
+                self.results = all_results;
             }
         }
         self.loaded = true;

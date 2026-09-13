@@ -287,7 +287,7 @@ impl ProjectionOperator {
     pub fn star(child: Box<dyn PhysicalOperator>) -> Self {
         let child_schema = child.schema().to_vec();
         let projections: Vec<(Expr, String, DataType)> = child_schema.iter()
-            .map(|ci| (Expr::Column { table: None, column: ci.name.clone() }, ci.name.clone(), ci.data_type.clone()))
+            .map(|ci| (Expr::Column { table: ci.table.clone(), column: ci.name.clone() }, ci.name.clone(), ci.data_type.clone()))
             .collect();
         let output_schema = child_schema.clone();
         Self {

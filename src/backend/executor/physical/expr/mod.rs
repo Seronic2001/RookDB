@@ -84,6 +84,9 @@ impl Expr {
                                 && ci.table.as_ref()
                                     .map(|ct| ct.eq_ignore_ascii_case(t))
                                     .unwrap_or(false)
+                        }).or_else(|| {
+                            // Fallback if table name not present in child schema (e.g. intermediate operator)
+                            schema.iter().position(|ci| ci.name.eq_ignore_ascii_case(column))
                         })
                     }
                     None => {
@@ -106,28 +109,49 @@ impl Expr {
             Expr::Add(l, r) => {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
-                arithmetic_op(lv, rv, |a, b| Ok(a + b), |a, b| Ok(a + b), |a, b| Ok(a + b), |a, b| Ok(a + b), |a, b| Ok(a + b))
+                arithmetic_op(
+                    lv, rv,
+                    |a, b| a.checked_add(b).ok_or_else(|| "Integer addition overflow".to_string()),
+                    |a, b| a.checked_add(b).ok_or_else(|| "BigInt addition overflow".to_string()),
+                    |a, b| a.checked_add(b).ok_or_else(|| "SmallInt addition overflow".to_string()),
+                    |a, b| Ok(a + b),
+                    |a, b| Ok(a + b),
+                )
             }
             Expr::Sub(l, r) => {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
-                arithmetic_op(lv, rv, |a, b| Ok(a - b), |a, b| Ok(a - b), |a, b| Ok(a - b), |a, b| Ok(a - b), |a, b| Ok(a - b))
+                arithmetic_op(
+                    lv, rv,
+                    |a, b| a.checked_sub(b).ok_or_else(|| "Integer subtraction overflow".to_string()),
+                    |a, b| a.checked_sub(b).ok_or_else(|| "BigInt subtraction overflow".to_string()),
+                    |a, b| a.checked_sub(b).ok_or_else(|| "SmallInt subtraction overflow".to_string()),
+                    |a, b| Ok(a - b),
+                    |a, b| Ok(a - b),
+                )
             }
             Expr::Mul(l, r) => {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
-                arithmetic_op(lv, rv, |a, b| Ok(a * b), |a, b| Ok(a * b), |a, b| Ok(a * b), |a, b| Ok(a * b), |a, b| Ok(a * b))
+                arithmetic_op(
+                    lv, rv,
+                    |a, b| a.checked_mul(b).ok_or_else(|| "Integer multiplication overflow".to_string()),
+                    |a, b| a.checked_mul(b).ok_or_else(|| "BigInt multiplication overflow".to_string()),
+                    |a, b| a.checked_mul(b).ok_or_else(|| "SmallInt multiplication overflow".to_string()),
+                    |a, b| Ok(a * b),
+                    |a, b| Ok(a * b),
+                )
             }
             Expr::Div(l, r) => {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(
                     lv, rv,
-                    |a, b| if b == 0 { Err("Division by zero".into())} else { Ok(a / b) },
-                    |a, b| if b == 0 { Err("Division by zero".into())} else { Ok(a / b) },
-                    |a, b| if b == 0 { Err("Division by zero".into())} else { Ok(a / b) },
-                    |a, b| if b == 0.0 { Err("Division by zero".into())} else { Ok(a / b) },
-                    |a, b| if b == 0.0 { Err("Division by zero".into())} else { Ok(a / b) },
+                    |a, b| if b == 0 { Err("Division by zero".into()) } else { a.checked_div(b).ok_or_else(|| "Integer division overflow".into()) },
+                    |a, b| if b == 0 { Err("Division by zero".into()) } else { a.checked_div(b).ok_or_else(|| "BigInt division overflow".into()) },
+                    |a, b| if b == 0 { Err("Division by zero".into()) } else { a.checked_div(b).ok_or_else(|| "SmallInt division overflow".into()) },
+                    |a, b| if b == 0.0 { Err("Division by zero".into()) } else { Ok(a / b) },
+                    |a, b| if b == 0.0 { Err("Division by zero".into()) } else { Ok(a / b) },
                 )
             }
             Expr::Cast(inner, target_type) => {
@@ -348,9 +372,9 @@ fn evaluate_scalar_function(
                     arithmetic_op(
                         Some(lv),
                         Some(rv),
-                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
-                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
-                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
+                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { a.checked_rem(b).ok_or_else(|| "Integer modulo overflow".to_string()) },
+                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { a.checked_rem(b).ok_or_else(|| "BigInt modulo overflow".to_string()) },
+                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { a.checked_rem(b).ok_or_else(|| "SmallInt modulo overflow".to_string()) },
                         |a, b| if b == 0.0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
                         |a, b| if b == 0.0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
                     )
