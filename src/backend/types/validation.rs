@@ -185,10 +185,26 @@ pub fn validate_bool(input: &str) -> Result<(), TypeValidationError> {
     }
 }
 
+/// Strip only enclosing single or double quotes from a literal string.
+///
+/// Unlike `trim_matches('\'')`, which strips ALL leading and trailing quote characters
+/// and corrupts strings that legitimately end with an apostrophe (e.g. `'ends'''` or `'ends''`),
+/// this only removes the single pair of enclosing quotes if present.
+pub fn strip_enclosing_quotes(s: &str) -> &str {
+    let trimmed = s.trim();
+    if (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+        || (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    }
+}
+
 /// Validate that a `VARCHAR(max_len)` literal does not exceed `max_len` bytes.
 /// Surrounding quotes are stripped before the length check.
 pub fn validate_varchar(input: &str, max_len: u16) -> Result<(), TypeValidationError> {
-    let value = input.trim().trim_matches('"').trim_matches('\'');
+    let value = strip_enclosing_quotes(input);
     if value.len() > max_len as usize {
         return Err(TypeValidationError::OutOfRange {
             ty: format!("VARCHAR({})", max_len),
@@ -203,7 +219,7 @@ pub fn validate_varchar(input: &str, max_len: u16) -> Result<(), TypeValidationE
 /// Values shorter than `fixed_len` are space-padded on insert; they are not
 /// rejected here.
 pub fn validate_char(input: &str, fixed_len: u16) -> Result<(), TypeValidationError> {
-    let value = input.trim().trim_matches('"').trim_matches('\'');
+    let value = strip_enclosing_quotes(input);
     if value.len() > fixed_len as usize {
         return Err(TypeValidationError::OutOfRange {
             ty: format!("CHAR({})", fixed_len),
@@ -216,7 +232,7 @@ pub fn validate_char(input: &str, fixed_len: u16) -> Result<(), TypeValidationEr
 
 /// Validate a `DATE` literal in `YYYY-MM-DD` format.
 pub fn validate_date(input: &str) -> Result<(), TypeValidationError> {
-    let raw = input.trim().trim_matches('\'');
+    let raw = strip_enclosing_quotes(input);
     NaiveDate::parse_from_str(raw, "%Y-%m-%d")
         .map(|_| ())
         .map_err(|e| TypeValidationError::InvalidFormat {
@@ -229,7 +245,7 @@ pub fn validate_date(input: &str) -> Result<(), TypeValidationError> {
 /// Validate a `TIME` literal in `HH:MM:SS` or `HH:MM:SS.ffffff` format.
 /// Fractional seconds are limited to 6 digits (microsecond precision).
 pub fn validate_time(input: &str) -> Result<(), TypeValidationError> {
-    let raw = input.trim().trim_matches('\'');
+    let raw = strip_enclosing_quotes(input);
 
     if let Some(fraction) = raw.split('.').nth(1)
         && fraction.len() > 6 {
@@ -251,7 +267,7 @@ pub fn validate_time(input: &str) -> Result<(), TypeValidationError> {
 
 /// Validate a `TIMESTAMP` literal in `YYYY-MM-DD HH:MM:SS[.ffffff]` format.
 pub fn validate_timestamp(input: &str) -> Result<(), TypeValidationError> {
-    let raw = input.trim().trim_matches('\'');
+    let raw = strip_enclosing_quotes(input);
     NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
         .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
         .map(|_| ())

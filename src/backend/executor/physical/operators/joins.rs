@@ -199,6 +199,7 @@ impl PhysicalOperator for NestedLoopJoinOperator {
     }
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
         if !self.consumed {
             self.materialise()?;
         }
@@ -737,18 +738,18 @@ impl PhysicalOperator for HashJoinOperator {
     }
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
         // Build phase
         if !self.build_done {
             self.build_hash_table()?;
             self.load_probe()?;
         }
 
-        let initial_len = batch.len();
-        let target_len = initial_len + super::trait_::DEFAULT_BATCH_SIZE;
+        let target_len = super::trait_::DEFAULT_BATCH_SIZE;
 
         loop {
             if self.exhausted {
-                return Ok(batch.len() - initial_len);
+                return Ok(batch.len());
             }
 
             // Try to yield from current batch of matches
@@ -759,7 +760,7 @@ impl PhysicalOperator for HashJoinOperator {
                 build_tuple.concatenate_into(&self.probe_tuples[self.probe_pos - 1], &mut joined);
                 batch.push(joined);
                 if batch.len() >= target_len {
-                    return Ok(batch.len() - initial_len);
+                    return Ok(batch.len());
                 }
             }
 
@@ -818,7 +819,7 @@ impl PhysicalOperator for HashJoinOperator {
             }
 
             self.exhausted = true;
-            return Ok(batch.len() - initial_len);
+            return Ok(batch.len());
         }
     }
 

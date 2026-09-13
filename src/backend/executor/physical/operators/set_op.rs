@@ -194,6 +194,7 @@ impl PhysicalOperator for SetOpOperator {
     }
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
+        batch.clear();
         if !self.consumed {
             self.materialise()?;
         }

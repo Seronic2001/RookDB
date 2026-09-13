@@ -206,8 +206,8 @@ impl fmt::Display for DataValue {
     }
 }
 
-fn parse_numeric_literal(input: &str, precision: u8, scale: u8) -> Result<NumericValue, String> {
-    let raw = input.trim().trim_matches('"').trim_matches('\'');
+pub fn parse_numeric_literal(input: &str, precision: u8, scale: u8) -> Result<NumericValue, String> {
+    let raw = crate::types::validation::strip_enclosing_quotes(input);
     if raw.is_empty() {
         return Err("NUMERIC value cannot be empty".to_string());
     }
@@ -573,7 +573,7 @@ impl DataValue {
                 _ => Err(format!("Invalid BOOLEAN value '{}': expected true/false", input)),
             },
             DataType::Char(n) => {
-                let value = input.trim_matches('"').trim_matches('\'');
+                let value = crate::types::validation::strip_enclosing_quotes(input);
                 let mut bytes = value.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
                     return Err(format!(
@@ -585,7 +585,7 @@ impl DataValue {
                 Ok(bytes)
             }
             DataType::Character(n) => {
-                let value = input.trim_matches('"').trim_matches('\'');
+                let value = crate::types::validation::strip_enclosing_quotes(input);
                 let mut bytes = value.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
                     return Err(format!(
@@ -597,16 +597,16 @@ impl DataValue {
                 Ok(bytes)
             }
             DataType::Varchar(_) => {
-                let value = input.trim_matches('"').trim_matches('\'');
+                let value = crate::types::validation::strip_enclosing_quotes(input);
                 Ok(DataValue::Varchar(value.to_string()).to_bytes())
             }
             DataType::Date => {
-                let date = NaiveDate::parse_from_str(input.trim_matches('\''), "%Y-%m-%d")
+                let date = NaiveDate::parse_from_str(crate::types::validation::strip_enclosing_quotes(input), "%Y-%m-%d")
                     .map_err(|e| e.to_string())?;
                 Ok(DataValue::Date(date).to_bytes())
             }
             DataType::Time => {
-                let raw = input.trim_matches('\'');
+                let raw = crate::types::validation::strip_enclosing_quotes(input);
                 // Accept HH:MM:SS, HH:MM:SS.ffffff
                 NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
                     .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
@@ -614,7 +614,7 @@ impl DataValue {
                     .map_err(|e| e.to_string())
             }
             DataType::Timestamp => {
-                let raw = input.trim_matches('\'');
+                let raw = crate::types::validation::strip_enclosing_quotes(input);
                 NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
                     .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
                     .map(|v| DataValue::Timestamp(v).to_bytes())

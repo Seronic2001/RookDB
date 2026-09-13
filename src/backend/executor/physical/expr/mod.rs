@@ -116,6 +116,7 @@ impl Expr {
                     |a, b| a.checked_add(b).ok_or_else(|| "SmallInt addition overflow".to_string()),
                     |a, b| Ok(a + b),
                     |a, b| Ok(a + b),
+                    numeric_add,
                 )
             }
             Expr::Sub(l, r) => {
@@ -128,6 +129,7 @@ impl Expr {
                     |a, b| a.checked_sub(b).ok_or_else(|| "SmallInt subtraction overflow".to_string()),
                     |a, b| Ok(a - b),
                     |a, b| Ok(a - b),
+                    numeric_sub,
                 )
             }
             Expr::Mul(l, r) => {
@@ -140,6 +142,7 @@ impl Expr {
                     |a, b| a.checked_mul(b).ok_or_else(|| "SmallInt multiplication overflow".to_string()),
                     |a, b| Ok(a * b),
                     |a, b| Ok(a * b),
+                    numeric_mul,
                 )
             }
             Expr::Div(l, r) => {
@@ -152,6 +155,7 @@ impl Expr {
                     |a, b| if b == 0 { Err("Division by zero".into()) } else { a.checked_div(b).ok_or_else(|| "SmallInt division overflow".into()) },
                     |a, b| if b == 0.0 { Err("Division by zero".into()) } else { Ok(a / b) },
                     |a, b| if b == 0.0 { Err("Division by zero".into()) } else { Ok(a / b) },
+                    numeric_div,
                 )
             }
             Expr::Cast(inner, target_type) => {
@@ -377,6 +381,7 @@ fn evaluate_scalar_function(
                         |a, b| if b == 0 { Err("Division by zero".to_string()) } else { a.checked_rem(b).ok_or_else(|| "SmallInt modulo overflow".to_string()) },
                         |a, b| if b == 0.0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
                         |a, b| if b == 0.0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
+                        numeric_rem,
                     )
                 }
             }
@@ -443,13 +448,33 @@ fn evaluate_scalar_function(
             let val = iter.next().flatten()
                 .ok_or_else(|| "SUBSTRING requires a non-NULL string argument".to_string())?;
             let start = match iter.next().flatten() {
-                Some(DataValue::Int(s)) => s as usize,
-                Some(DataValue::BigInt(s)) => s as usize,
+                Some(DataValue::Int(s)) => {
+                    if s <= 0 {
+                        return Err("SUBSTRING start position must be >= 1".to_string());
+                    }
+                    s as usize
+                }
+                Some(DataValue::BigInt(s)) => {
+                    if s <= 0 {
+                        return Err("SUBSTRING start position must be >= 1".to_string());
+                    }
+                    s as usize
+                }
                 _ => return Err("SUBSTRING requires integer start position".to_string()),
             };
             let len = match iter.next().flatten() {
-                Some(DataValue::Int(l)) => l as usize,
-                Some(DataValue::BigInt(l)) => l as usize,
+                Some(DataValue::Int(l)) => {
+                    if l < 0 {
+                        return Ok(None);
+                    }
+                    l as usize
+                }
+                Some(DataValue::BigInt(l)) => {
+                    if l < 0 {
+                        return Ok(None);
+                    }
+                    l as usize
+                }
                 // Default: rest of string (use string length via evaluating the value first)
                 None => {
                     // Re-evaluate to get the actual string length for default
@@ -535,7 +560,73 @@ fn evaluate_scalar_function(
 
 /// Helper: apply a binary arithmetic operation to two nullable values.
 /// Supports INT, BIGINT, SMALLINT, DOUBLE PRECISION, and cross-type promotion.
-fn arithmetic_op<FI, FB, FD, FF, FDbl>(
+fn scale_numeric_unscaled(unscaled: i128, current_scale: u8, target_scale: u8) -> Result<i128, String> {
+    if current_scale == target_scale {
+        Ok(unscaled)
+    } else if target_scale > current_scale {
+        let diff = (target_scale - current_scale) as u32;
+        let factor = 10_i128.checked_pow(diff).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        unscaled.checked_mul(factor).ok_or_else(|| "Numeric scaling overflow".to_string())
+    } else {
+        let diff = (current_scale - target_scale) as u32;
+        let factor = 10_i128.checked_pow(diff).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        Ok(unscaled / factor)
+    }
+}
+
+fn numeric_add(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+    let target_scale = a.scale.max(b.scale);
+    let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
+    let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
+    let unscaled = a_unscaled.checked_add(b_unscaled).ok_or_else(|| "Numeric addition overflow".to_string())?;
+    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+}
+
+fn numeric_sub(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+    let target_scale = a.scale.max(b.scale);
+    let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
+    let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
+    let unscaled = a_unscaled.checked_sub(b_unscaled).ok_or_else(|| "Numeric subtraction overflow".to_string())?;
+    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+}
+
+fn numeric_mul(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+    let target_scale = a.scale.checked_add(b.scale).ok_or_else(|| "Numeric scale overflow".to_string())?;
+    let unscaled = a.unscaled.checked_mul(b.unscaled).ok_or_else(|| "Numeric multiplication overflow".to_string())?;
+    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+}
+
+fn numeric_div(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+    if b.unscaled == 0 {
+        return Err("Division by zero".to_string());
+    }
+    let target_scale = a.scale.max(b.scale);
+    let shift = target_scale as i32 + b.scale as i32 - a.scale as i32;
+    let a_shifted = if shift >= 0 {
+        let factor = 10_i128.checked_pow(shift as u32).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        a.unscaled.checked_mul(factor).ok_or_else(|| "Numeric division overflow".to_string())?
+    } else {
+        let factor = 10_i128.checked_pow((-shift) as u32).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        a.unscaled / factor
+    };
+    let unscaled = a_shifted.checked_div(b.unscaled).ok_or_else(|| "Numeric division overflow".to_string())?;
+    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+}
+
+fn numeric_rem(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+    if b.unscaled == 0 {
+        return Err("Division by zero".to_string());
+    }
+    let target_scale = a.scale.max(b.scale);
+    let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
+    let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
+    let unscaled = a_unscaled.checked_rem(b_unscaled).ok_or_else(|| "Numeric modulo overflow".to_string())?;
+    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+}
+
+/// Helper: apply a binary arithmetic operation to two nullable values.
+/// Supports INT, BIGINT, SMALLINT, DOUBLE PRECISION, NUMERIC, and cross-type promotion.
+fn arithmetic_op<FI, FB, FD, FF, FDbl, FN>(
     left: Option<DataValue>,
     right: Option<DataValue>,
     int_op: FI,
@@ -543,6 +634,7 @@ fn arithmetic_op<FI, FB, FD, FF, FDbl>(
     smallint_op: FD,
     float_op: FF,
     double_op: FDbl,
+    numeric_op: FN,
 ) -> Result<Option<DataValue>, String>
 where
     FI: FnOnce(i32, i32) -> Result<i32, String>,
@@ -550,6 +642,7 @@ where
     FD: FnOnce(i16, i16) -> Result<i16, String>,
     FF: FnOnce(f64, f64) -> Result<f64, String>,
     FDbl: FnOnce(f64, f64) -> Result<f64, String>,
+    FN: FnOnce(crate::types::value::NumericValue, crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String>,
 {
     match (left, right) {
         (None, _) | (_, None) => Ok(None),
@@ -662,37 +755,36 @@ where
                 crate::types::value::OrderedF64(v)
             )))
         }
-        // Cross-type NUMERIC ↔ INTEGER/FLOAT: convert both to f64, use double_op
+        // Exact NUMERIC ↔ NUMERIC arithmetic
+        (Some(DataValue::Numeric(a)), Some(DataValue::Numeric(b))) => {
+            numeric_op(a, b).map(|v| Some(DataValue::Numeric(v)))
+        }
+        // Cross-type NUMERIC ↔ INTEGER: exact promotion to NumericValue (scale 0)
         (Some(DataValue::Numeric(a)), Some(DataValue::SmallInt(b))) => {
-            double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            numeric_op(a, crate::types::value::NumericValue { unscaled: b as i128, scale: 0 })
+                .map(|v| Some(DataValue::Numeric(v)))
         }
         (Some(DataValue::SmallInt(a)), Some(DataValue::Numeric(b))) => {
-            double_op(a as f64, b.unscaled as f64 / 10_f64.powi(b.scale as i32)).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            numeric_op(crate::types::value::NumericValue { unscaled: a as i128, scale: 0 }, b)
+                .map(|v| Some(DataValue::Numeric(v)))
         }
         (Some(DataValue::Numeric(a)), Some(DataValue::Int(b))) => {
-            double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            numeric_op(a, crate::types::value::NumericValue { unscaled: b as i128, scale: 0 })
+                .map(|v| Some(DataValue::Numeric(v)))
         }
         (Some(DataValue::Int(a)), Some(DataValue::Numeric(b))) => {
-            double_op(a as f64, b.unscaled as f64 / 10_f64.powi(b.scale as i32)).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            numeric_op(crate::types::value::NumericValue { unscaled: a as i128, scale: 0 }, b)
+                .map(|v| Some(DataValue::Numeric(v)))
         }
         (Some(DataValue::Numeric(a)), Some(DataValue::BigInt(b))) => {
-            double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            numeric_op(a, crate::types::value::NumericValue { unscaled: b as i128, scale: 0 })
+                .map(|v| Some(DataValue::Numeric(v)))
         }
         (Some(DataValue::BigInt(a)), Some(DataValue::Numeric(b))) => {
-            double_op(a as f64, b.unscaled as f64 / 10_f64.powi(b.scale as i32)).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            numeric_op(crate::types::value::NumericValue { unscaled: a as i128, scale: 0 }, b)
+                .map(|v| Some(DataValue::Numeric(v)))
         }
+        // Cross-type NUMERIC ↔ FLOAT: convert both to f64, use double_op
         (Some(DataValue::Numeric(a)), Some(DataValue::Real(b))) => {
             double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b.0 as f64).map(|v| Some(DataValue::DoublePrecision(
                 crate::types::value::OrderedF64(v)

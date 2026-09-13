@@ -133,7 +133,7 @@ fn apply_assignments_typed(
                     DataType::BigInt => Some(DataValue::BigInt(*n as i64)),
                     DataType::Real => Some(DataValue::Real(OrderedF32(*n as f32))),
                     DataType::DoublePrecision => Some(DataValue::DoublePrecision(OrderedF64(*n as f64))),
-                    DataType::Numeric { scale, .. } => {
+                    DataType::Numeric { scale, .. } | DataType::Decimal { scale, .. } => {
                         let factor = 10_i128.pow(*scale as u32);
                         Some(DataValue::Numeric(crate::types::value::NumericValue {
                             unscaled: *n as i128 * factor,
@@ -158,6 +158,11 @@ fn apply_assignments_typed(
                         Some(DataValue::Char(padded))
                     }
                     DataType::Varchar(_) => Some(DataValue::Varchar(s.clone())),
+                    DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
+                        crate::types::value::parse_numeric_literal(s, *precision, *scale)
+                            .ok()
+                            .map(DataValue::Numeric)
+                    }
                     _ => super::create_index::parse_string_to_value(target_type, s).ok(),
                 },
                 ColumnValue::List(_) => None,

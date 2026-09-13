@@ -284,14 +284,6 @@ impl PhysicalPlanner {
                 Some(expr_from_ast(&agg_expr.args[0], &column_names)?)
             };
 
-            // Warn if COUNT(DISTINCT expr) — not yet fully implemented
-            if agg_expr.distinct {
-                log::warn!(
-                    "DISTINCT aggregate functions are not yet fully implemented; '{:?}' will behave as non-DISTINCT",
-                    agg_expr.function
-                );
-            }
-
             // Determine output name
             let output_name = agg_expr.alias.clone().unwrap_or_else(|| {
                 format!("{:?}({})", agg_expr.function, agg_expr.args.len())

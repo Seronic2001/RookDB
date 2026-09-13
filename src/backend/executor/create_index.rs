@@ -947,7 +947,7 @@ pub fn update_index_on_update(
 /// This mirrors the DataValue construction logic in `DataValue::parse_and_encode`
 /// but returns a `DataValue` instead of encoded bytes.
 pub fn parse_string_to_value(ty: &DataType, input: &str) -> Result<DataValue, String> {
-    let input = input.trim().trim_matches('"').trim_matches('\'');
+    let input = crate::types::validation::strip_enclosing_quotes(input);
 
     match ty {
         DataType::SmallInt => input
@@ -1005,8 +1005,9 @@ pub fn parse_string_to_value(ty: &DataType, input: &str) -> Result<DataValue, St
             let bits = crate::types::bit_utils::normalize_bit_literal(input);
             Ok(DataValue::Bit(bits))
         }
-        DataType::Numeric { .. } | DataType::Decimal { .. } => {
-            Err("Index maintenance for NUMERIC/DECIMAL types not yet supported".to_string())
+        DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
+            crate::types::value::parse_numeric_literal(input, *precision, *scale)
+                .map(DataValue::Numeric)
         }
     }
 }

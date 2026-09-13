@@ -141,7 +141,7 @@ pub fn substring(value: &DataValue, start: usize, len: usize) -> Result<DataValu
 
     // Convert 1-based SQL index to 0-based Rust index
     let from = start - 1;
-    let to = (from + len).min(chars.len());
+    let to = from.checked_add(len).map(|t| t.min(chars.len())).unwrap_or(chars.len());
     let out: String = chars[from..to].iter().collect();
     Ok(DataValue::Varchar(out))
 }
@@ -295,17 +295,32 @@ fn pow10(exp: u32) -> i128 {
 /// Supported for all numeric types: SMALLINT, INT, BIGINT, REAL, DOUBLE, NUMERIC.
 pub fn abs(value: &DataValue) -> Result<DataValue, FunctionError> {
     match value {
-        DataValue::SmallInt(v) => Ok(DataValue::SmallInt(v.abs())),
-        DataValue::Int(v) => Ok(DataValue::Int(v.abs())),
-        DataValue::BigInt(v) => Ok(DataValue::BigInt(v.abs())),
+        DataValue::SmallInt(v) => match v.checked_abs() {
+            Some(x) => Ok(DataValue::SmallInt(x)),
+            None => Ok(DataValue::Int(-(*v as i32))),
+        },
+        DataValue::Int(v) => match v.checked_abs() {
+            Some(x) => Ok(DataValue::Int(x)),
+            None => Ok(DataValue::BigInt(-(*v as i64))),
+        },
+        DataValue::BigInt(v) => match v.checked_abs() {
+            Some(x) => Ok(DataValue::BigInt(x)),
+            None => Ok(DataValue::Numeric(crate::types::value::NumericValue {
+                unscaled: -(*v as i128),
+                scale: 0,
+            })),
+        },
         DataValue::Real(v) => Ok(DataValue::Real(crate::types::value::OrderedF32(v.0.abs()))),
         DataValue::DoublePrecision(v) => Ok(DataValue::DoublePrecision(
             crate::types::value::OrderedF64(v.0.abs()),
         )),
-        DataValue::Numeric(v) => Ok(DataValue::Numeric(crate::types::value::NumericValue {
-            unscaled: v.unscaled.abs(),
-            scale: v.scale,
-        })),
+        DataValue::Numeric(v) => match v.unscaled.checked_abs() {
+            Some(x) => Ok(DataValue::Numeric(crate::types::value::NumericValue {
+                unscaled: x,
+                scale: v.scale,
+            })),
+            None => Err(FunctionError::InvalidArgument("NUMERIC value overflow in ABS".to_string())),
+        },
         _ => Err(FunctionError::TypeMismatch {
             expected: "numeric type".to_string(),
             found: value_type_name(value).to_string(),
