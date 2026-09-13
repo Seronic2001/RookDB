@@ -70,6 +70,9 @@ pub(crate) fn cascade_delete_child_rows(
         return Ok(());
     }
 
+    crate::backend::cache::quiesce_for_direct_io(&heap_path)
+        .map_err(|e| format!("Failed to quiesce child heap for CASCADE DELETE: {}", e))?;
+
     let mut file = OpenOptions::new().read(true).write(true).open(&heap_path)
         .map_err(|e| format!("Failed to open child heap for CASCADE DELETE: {}", e))?;
 
@@ -186,6 +189,9 @@ pub(crate) fn cascade_delete_child_rows(
             log::warn!("[CASCADE] Failed to increment dead tuple count: {}", e);
         }
 
+    drop(file);
+    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
+
     log::info!(
         "[CASCADE] Deleted {} row(s) from '{}' due to ON DELETE CASCADE on parent '{}'",
         deleted_count, child_table, parent_value_str
@@ -273,6 +279,9 @@ pub(crate) fn set_null_child_rows(
     if !heap_path.exists() {
         return Ok(());
     }
+
+    crate::backend::cache::quiesce_for_direct_io(&heap_path)
+        .map_err(|e| format!("Failed to quiesce child heap for SET NULL: {}", e))?;
 
     let mut file = OpenOptions::new().read(true).write(true).open(&heap_path)
         .map_err(|e| format!("Failed to open child heap for SET NULL: {}", e))?;
@@ -410,6 +419,9 @@ pub(crate) fn set_null_child_rows(
         }
     }
 
+    drop(file);
+    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
+
     log::info!(
         "[SET NULL] Set FK to NULL in {} row(s) from '{}' due to ON DELETE/UPDATE SET NULL on parent '{}'",
         updated_count, child_table, parent_value_str
@@ -483,6 +495,9 @@ pub(crate) fn update_child_rows_fk(
     if !heap_path.exists() {
         return Ok(());
     }
+
+    crate::backend::cache::quiesce_for_direct_io(&heap_path)
+        .map_err(|e| format!("Failed to quiesce child heap for UPDATE CASCADE: {}", e))?;
 
     let mut file = OpenOptions::new().read(true).write(true).open(&heap_path)
         .map_err(|e| format!("Failed to open child heap for UPDATE CASCADE: {}", e))?;
@@ -613,6 +628,9 @@ pub(crate) fn update_child_rows_fk(
             let _ = crate::backend::visibility_map::vm_clear_page(db_name, child_table, page_num);
         }
     }
+
+    drop(file);
+    let _ = crate::backend::cache::quiesce_for_direct_io(&heap_path);
 
     log::info!(
         "[UPDATE CASCADE] Updated FK to '{}' in {} row(s) from '{}' due to ON UPDATE CASCADE",

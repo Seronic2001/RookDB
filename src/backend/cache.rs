@@ -147,7 +147,9 @@ pub fn evict_heap(path: &Path) -> io::Result<()> {
 /// begin. Without this, direct I/O would observe pre-insert page images and
 /// later pool flushes would clobber the direct writes.
 pub fn quiesce_for_direct_io(path: &Path) -> io::Result<()> {
-    evict_heap(path)
+    evict_heap(path)?;
+    crate::backend::buffer_manager::shared_pool::invalidate(path);
+    Ok(())
 }
 
 /// Flush and drop every cached heap manager.

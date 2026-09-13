@@ -206,7 +206,7 @@ pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> Result
         QueryPlan::SetOperation(set_op) => {
             let left = plan_select(&set_op.left, catalog, db_name)?;
             let right = plan_select(&set_op.right, catalog, db_name)?;
-            let plan = LogicalPlan::SetOp(LogicalSetOp {
+            let mut plan = LogicalPlan::SetOp(LogicalSetOp {
                 left: Box::new(left),
                 right: Box::new(right),
                 op: match set_op.op.to_ascii_uppercase().as_str() {
@@ -216,6 +216,21 @@ pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> Result
                 },
                 all: set_op.all,
             });
+            if !set_op.order_by.is_empty() {
+                let limit_hint = set_op.limit.as_ref().map(|l| l.limit);
+                plan = LogicalPlan::Sort(LogicalSort {
+                    order_by: set_op.order_by.clone(),
+                    child: Box::new(plan),
+                    limit: limit_hint,
+                });
+            }
+            if let Some(ref limit_clause) = set_op.limit {
+                plan = LogicalPlan::Limit(LogicalLimit {
+                    limit: limit_clause.limit,
+                    offset: limit_clause.offset.unwrap_or(0),
+                    child: Box::new(plan),
+                });
+            }
             let table_stats = load_table_statistics(db_name, catalog);
             let optimizer = if table_stats.is_empty() {
                 optimizer::Optimizer::new()
