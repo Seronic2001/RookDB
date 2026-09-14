@@ -337,6 +337,7 @@ pub struct CachedInsert {
     pub table: String,
     pub columns: Vec<String>,
     pub arity: usize,
+    pub row_arities: Vec<usize>,
 }
 
 impl CachedInsert {
@@ -351,46 +352,111 @@ impl CachedInsert {
             .get(&self.table)
             .ok_or_else(|| format!("Table '{}' not found", self.table))?;
 
-        let final_values: Vec<String>;
-        let final_refs: Vec<&str>;
-
-        if self.columns.is_empty() {
-            if values.len() != table.columns.len() {
-                return Err(format!(
-                    "Expected {} values for table '{}', got {}",
-                    table.columns.len(),
-                    self.table,
-                    values.len()
-                ));
-            }
-            final_refs = values.to_vec();
+        let row_arities = if self.row_arities.is_empty() {
+            vec![self.arity]
         } else {
-            final_values = vec![String::from("NULL"); table.columns.len()];
-            let mut buf = final_values;
-            for (i, col_name) in self.columns.iter().enumerate() {
-                if let Some(pos) = table
+            self.row_arities.clone()
+        };
+
+        // Validate explicit column names if provided
+        let mut col_positions = Vec::with_capacity(self.columns.len());
+        if !self.columns.is_empty() {
+            for col_name in &self.columns {
+                let pos = table
                     .columns
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(col_name))
-                {
-                    if i < values.len() {
-                        buf[pos] = values[i].to_string();
-                    }
-                }
+                    .ok_or_else(|| {
+                        format!("Column '{}' does not exist in table '{}'", col_name, self.table)
+                    })?;
+                col_positions.push(pos);
             }
-            final_refs = buf.iter().map(|s| s.as_str()).collect();
-            return match insert_single_tuple(catalog, db_name, &self.table, &final_refs) {
-                Ok(true) => Ok(1),
-                Ok(false) => Err("Constraint violation or invalid data".to_string()),
-                Err(e) => Err(format!("Insert failed: {}", e)),
-            };
         }
 
-        match insert_single_tuple(catalog, db_name, &self.table, &final_refs) {
-            Ok(true) => Ok(1),
-            Ok(false) => Err("Constraint violation or invalid data".to_string()),
-            Err(e) => Err(format!("Insert failed: {}", e)),
+        // Validate row arities upfront before performing any insertions
+        let expected_row_len = if self.columns.is_empty() {
+            table.columns.len()
+        } else {
+            self.columns.len()
+        };
+
+        let total_values_expected: usize = row_arities.iter().sum();
+        if values.len() != total_values_expected {
+            return Err(format!(
+                "Expected {} values for table '{}', got {}",
+                total_values_expected,
+                self.table,
+                values.len()
+            ));
         }
+
+        for &row_len in &row_arities {
+            if self.columns.is_empty() {
+                if row_len != expected_row_len {
+                    return Err(format!(
+                        "INSERT row has {} value(s) but table '{}' has {} column(s)",
+                        row_len,
+                        self.table,
+                        expected_row_len
+                    ));
+                }
+            } else {
+                if row_len != expected_row_len {
+                    return Err(format!(
+                        "INSERT row has {} value(s) but {} column(s) listed",
+                        row_len,
+                        expected_row_len
+                    ));
+                }
+            }
+        }
+
+        // Execute row by row
+        let mut offset = 0;
+        let mut inserted_count = 0;
+
+        for &row_len in &row_arities {
+            let row_values = &values[offset..offset + row_len];
+            offset += row_len;
+
+            let row_strings: Vec<String>;
+            let final_refs: Vec<&str>;
+
+            if self.columns.is_empty() {
+                final_refs = row_values.to_vec();
+            } else {
+                let mut buf: Vec<String> = table
+                    .columns
+                    .iter()
+                    .map(|c| {
+                        c.constraints
+                            .default
+                            .as_ref()
+                            .map(|dv| match dv {
+                                crate::types::DataValue::Char(s)
+                                | crate::types::DataValue::Varchar(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .unwrap_or_else(|| "NULL".to_string())
+                    })
+                    .collect();
+
+                for (i, &pos) in col_positions.iter().enumerate() {
+                    buf[pos] = row_values[i].to_string();
+                }
+
+                row_strings = buf;
+                final_refs = row_strings.iter().map(|s| s.as_str()).collect();
+            }
+
+            match insert_single_tuple(catalog, db_name, &self.table, &final_refs) {
+                Ok(true) => inserted_count += 1,
+                Ok(false) => return Err("Constraint violation or invalid data".to_string()),
+                Err(e) => return Err(format!("Insert failed: {}", e)),
+            }
+        }
+
+        Ok(inserted_count)
     }
 }
 
@@ -486,29 +552,132 @@ fn parse_sql(sql: &str) -> Result<QueryPlan, String> {
 
 /// Parse a normalized INSERT statement template without external parser dependencies.
 pub fn parse_insert_template(normalized_sql: &str, arity: usize) -> Option<CachedInsert> {
-    let trimmed = normalized_sql.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("insert into ") {
+    let raw_tokens = tokenize_for_normalization(normalized_sql).ok()?;
+    let tokens: Vec<&Token> = raw_tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_) | Token::EOF))
+        .collect();
+
+    if tokens.len() < 5 {
         return None;
     }
-    let rest = trimmed["insert into ".len()..].trim_start();
-    let values_idx = rest.to_ascii_lowercase().find("values")?;
-    let header = rest[..values_idx].trim();
-    let (table, cols) = if let Some(paren_idx) = header.find('(') {
-        let table = header[..paren_idx].trim().to_string();
-        let close_idx = header.rfind(')')?;
-        let col_str = &header[paren_idx + 1..close_idx];
-        let cols: Vec<String> = col_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        (table, cols)
-    } else {
-        (header.to_string(), Vec::new())
+
+    match (tokens[0], tokens[1]) {
+        (Token::Word(w1), Token::Word(w2))
+            if w1.value.eq_ignore_ascii_case("insert")
+                && w2.value.eq_ignore_ascii_case("into") => {}
+        _ => return None,
+    }
+
+    let mut idx = 2;
+
+    let table = match tokens.get(idx)? {
+        Token::Word(w) => {
+            idx += 1;
+            w.value.clone()
+        }
+        _ => return None,
     };
 
-    if table.is_empty() {
+    let mut cols = Vec::new();
+    if let Some(Token::LParen) = tokens.get(idx) {
+        idx += 1;
+        loop {
+            match tokens.get(idx)? {
+                Token::Word(w) => {
+                    cols.push(w.value.clone());
+                    idx += 1;
+                }
+                _ => return None,
+            }
+            match tokens.get(idx)? {
+                Token::Comma => {
+                    idx += 1;
+                }
+                Token::RParen => {
+                    idx += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    match tokens.get(idx)? {
+        Token::Word(w) if w.value.eq_ignore_ascii_case("values") => {
+            idx += 1;
+        }
+        _ => return None,
+    }
+
+    let mut row_arities = Vec::new();
+    loop {
+        match tokens.get(idx)? {
+            Token::LParen => {
+                idx += 1;
+            }
+            _ => return None,
+        }
+        let mut count = 0;
+        if let Some(Token::RParen) = tokens.get(idx) {
+            idx += 1;
+        } else {
+            loop {
+                match tokens.get(idx)? {
+                    Token::Placeholder(_)
+                    | Token::Number(_, _)
+                    | Token::SingleQuotedString(_)
+                    | Token::NationalStringLiteral(_)
+                    | Token::HexStringLiteral(_)
+                    | Token::EscapedStringLiteral(_) => {
+                        count += 1;
+                        idx += 1;
+                    }
+                    Token::Minus | Token::Plus
+                        if idx + 1 < tokens.len()
+                            && matches!(tokens[idx + 1], Token::Number(_, _)) =>
+                    {
+                        count += 1;
+                        idx += 2;
+                    }
+                    _ => return None,
+                }
+                match tokens.get(idx)? {
+                    Token::Comma => {
+                        idx += 1;
+                    }
+                    Token::RParen => {
+                        idx += 1;
+                        break;
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        row_arities.push(count);
+
+        if let Some(Token::Comma) = tokens.get(idx) {
+            idx += 1;
+            continue;
+        } else if let Some(Token::SemiColon) = tokens.get(idx) {
+            idx += 1;
+            if idx == tokens.len() {
+                break;
+            } else {
+                return None;
+            }
+        } else if idx == tokens.len() {
+            break;
+        } else {
+            return None;
+        }
+    }
+
+    if row_arities.is_empty() {
+        return None;
+    }
+
+    if row_arities.iter().sum::<usize>() != arity {
         return None;
     }
 
@@ -516,6 +685,7 @@ pub fn parse_insert_template(normalized_sql: &str, arity: usize) -> Option<Cache
         table,
         columns: cols,
         arity,
+        row_arities,
     })
 }
 
@@ -558,6 +728,7 @@ pub fn execute_cached_insert(
                     table: ip.table.clone(),
                     columns: ip.columns.clone(),
                     arity: params.len(),
+                    row_arities: ip.values.iter().map(|r| r.len()).collect(),
                 };
                 let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
                 let res = cached_insert.execute(catalog, db_name, &param_refs)?;
@@ -610,6 +781,7 @@ impl PreparedStatement {
                     table: ip.table.clone(),
                     columns: ip.columns.clone(),
                     arity: default_params.len(),
+                    row_arities: ip.values.iter().map(|r| r.len()).collect(),
                 })
             }
             _ => {
