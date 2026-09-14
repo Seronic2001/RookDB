@@ -429,12 +429,44 @@ impl DataValue {
                 ]))))
             }
             DataType::Numeric { precision, scale } => {
-                let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
-                Ok(DataValue::Numeric(decoded))
+                let expected = ((*precision as usize) + 1).div_ceil(2);
+                if bytes.len() == 17 && bytes.len() != expected {
+                    let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
+                    let scale_byte = bytes[16];
+                    Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                } else if bytes.len() == 17 && expected == 17 {
+                    match decode_numeric_bcd(bytes, *precision, *scale) {
+                        Ok(decoded) => Ok(DataValue::Numeric(decoded)),
+                        Err(_) => {
+                            let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
+                            let scale_byte = bytes[16];
+                            Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                        }
+                    }
+                } else {
+                    let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
+                    Ok(DataValue::Numeric(decoded))
+                }
             }
             DataType::Decimal { precision, scale } => {
-                let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
-                Ok(DataValue::Numeric(decoded))
+                let expected = ((*precision as usize) + 1).div_ceil(2);
+                if bytes.len() == 17 && bytes.len() != expected {
+                    let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
+                    let scale_byte = bytes[16];
+                    Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                } else if bytes.len() == 17 && expected == 17 {
+                    match decode_numeric_bcd(bytes, *precision, *scale) {
+                        Ok(decoded) => Ok(DataValue::Numeric(decoded)),
+                        Err(_) => {
+                            let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
+                            let scale_byte = bytes[16];
+                            Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                        }
+                    }
+                } else {
+                    let decoded = decode_numeric_bcd(bytes, *precision, *scale)?;
+                    Ok(DataValue::Numeric(decoded))
+                }
             }
             DataType::Bool => {
                 if bytes.is_empty() {

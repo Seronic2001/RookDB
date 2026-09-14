@@ -237,6 +237,78 @@ pub fn propagate_update_to_children(
     Ok(())
 }
 
+/// Validate referencing FOREIGN KEY constraints with RESTRICT action before updating a row.
+///
+/// Returns Err if any child table references the old value of a changed column.
+pub fn validate_update_restrict(
+    db_name: &str,
+    table_name: &str,
+    old_decoded: &[(String, crate::backend::executor::delete::ColumnValue)],
+    new_decoded: &[(String, crate::backend::executor::delete::ColumnValue)],
+) -> Result<(), RookError> {
+    let foreign_keys = crate::backend::cache::referencing_fks(db_name, table_name);
+
+    if foreign_keys.is_empty() {
+        return Ok(());
+    }
+
+    for fk in foreign_keys.iter() {
+        let child_table = &fk.0;
+        let child_col = &fk.1;
+        let parent_col = &fk.2;
+        let action_type = &fk.4;
+
+        let action_upper = action_type.to_uppercase();
+        if action_upper.contains("ON UPDATE CASCADE") || action_upper.contains("ON UPDATE SET NULL") {
+            continue;
+        }
+
+        // Find the OLD value of the parent column
+        let old_val = old_decoded.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
+            .map(|(_, v)| match v {
+                crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
+                crate::backend::executor::delete::ColumnValue::Text(s) => s.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+
+        if old_val.is_empty() || old_val.eq_ignore_ascii_case("null") {
+            continue;
+        }
+
+        // Find the NEW value of the parent column
+        let new_val = new_decoded.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
+            .map(|(_, v)| match v {
+                crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
+                crate::backend::executor::delete::ColumnValue::Text(s) => s.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+
+        // Skip if the value didn't change
+        if old_val == new_val {
+            continue;
+        }
+
+        // RESTRICT (default): block the UPDATE if child rows reference the old value
+        if value_lookup::child_has_referencing_row(db_name, child_table, child_col, &old_val)? {
+            return Err(RookError::constraint(
+                ConstraintKind::ForeignKey,
+                table_name,
+                Some(parent_col),
+                format!(
+                    "FOREIGN KEY constraint violated: cannot update '{}' column '{}' because value '{}' is referenced by '{}' (column '{}')",
+                    table_name, parent_col, old_val, child_table, child_col
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate all constraints before updating a row.
 ///
 /// Similar to `validate_row_insert`, but the UNIQUE check excludes the

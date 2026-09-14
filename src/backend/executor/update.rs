@@ -505,6 +505,15 @@ pub fn update_by_pointers(
             continue;
         }
 
+        if let Err(e) = crate::backend::constraint::validate_update_restrict(
+            db_name, table_name, &old_decoded, &updated_decoded,
+        ) {
+            log::warn!(
+                "[UpdateByPointers] Skipping row due to FOREIGN KEY RESTRICT constraint: {}", e
+            );
+            continue;
+        }
+
         pending_updates.push(PendingUpdate {
             pointer: TuplePointer { page_id: page_num, slot_index },
             old_tuple_data: tuple_data,

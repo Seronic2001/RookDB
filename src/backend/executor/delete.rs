@@ -66,7 +66,7 @@ fn decode_tuple(
 
             Some(DataValue::Varchar(s)) | Some(DataValue::Char(s)) => ColumnValue::Text(s.clone()),
 
-            Some(other) => ColumnValue::Text(format!("{:?}", other)),
+            Some(other) => ColumnValue::Text(format!("{}", other)),
 
             None => ColumnValue::Text("NULL".to_string()),
         };

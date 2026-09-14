@@ -150,7 +150,7 @@ pub(crate) fn cascade_delete_child_rows(
                             DataValue::Varchar(s) | DataValue::Char(s) => s.clone(),
                             DataValue::Date(_) | DataValue::Time(_)
                                 | DataValue::Timestamp(_) | DataValue::Numeric(_) | DataValue::Bit(_) => {
-                                format!("{:?}", dv)
+                                format!("{}", dv)
                             }
                         };
                         recursive_values.push((

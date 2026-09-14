@@ -328,19 +328,20 @@ pub fn abs(value: &DataValue) -> Result<DataValue, FunctionError> {
     }
 }
 
-fn round_int(val: i64, places: i32) -> i64 {
+fn round_int(val: i64, places: i32) -> i128 {
     if places >= 0 {
-        return val;
+        return val as i128;
     }
     let exp = (-places) as u32;
     if exp >= 19 {
         return 0;
     }
-    let div = 10_i64.pow(exp);
-    let q = val / div;
-    let r = (val % div).abs();
+    let div = 10_i128.pow(exp);
+    let v = val as i128;
+    let q = v / div;
+    let r = (v % div).abs();
     let rounded = if r * 2 >= div {
-        q + val.signum()
+        q + v.signum()
     } else {
         q
     };
@@ -355,9 +356,30 @@ fn round_int(val: i64, places: i32) -> i64 {
 /// and the result scale is reduced to `max(places, 0)`.
 pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError> {
     match value {
-        DataValue::SmallInt(v) => Ok(DataValue::SmallInt(round_int(*v as i64, places) as i16)),
-        DataValue::Int(v) => Ok(DataValue::Int(round_int(*v as i64, places) as i32)),
-        DataValue::BigInt(v) => Ok(DataValue::BigInt(round_int(*v, places))),
+        DataValue::SmallInt(v) => {
+            let r = round_int(*v as i64, places);
+            if r < i16::MIN as i128 || r > i16::MAX as i128 {
+                Err(FunctionError::InvalidArgument("SMALLINT value overflow in ROUND".to_string()))
+            } else {
+                Ok(DataValue::SmallInt(r as i16))
+            }
+        }
+        DataValue::Int(v) => {
+            let r = round_int(*v as i64, places);
+            if r < i32::MIN as i128 || r > i32::MAX as i128 {
+                Err(FunctionError::InvalidArgument("INT value overflow in ROUND".to_string()))
+            } else {
+                Ok(DataValue::Int(r as i32))
+            }
+        }
+        DataValue::BigInt(v) => {
+            let r = round_int(*v, places);
+            if r < i64::MIN as i128 || r > i64::MAX as i128 {
+                Err(FunctionError::InvalidArgument("BIGINT value overflow in ROUND".to_string()))
+            } else {
+                Ok(DataValue::BigInt(r as i64))
+            }
+        }
         DataValue::Real(v) => {
             let factor = 10_f32.powi(places);
             Ok(DataValue::Real(crate::types::value::OrderedF32(

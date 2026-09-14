@@ -100,11 +100,11 @@ fn value_to_string(dv: &crate::types::DataValue) -> String {
         crate::types::DataValue::DoublePrecision(v) => v.0.to_string(),
         crate::types::DataValue::Bool(v) => v.to_string(),
         crate::types::DataValue::Char(v) | crate::types::DataValue::Varchar(v) => v.clone(),
-        crate::types::DataValue::Date(_) => format!("{:?}", dv),
-        crate::types::DataValue::Time(_) => format!("{:?}", dv),
-        crate::types::DataValue::Timestamp(_) => format!("{:?}", dv),
-        crate::types::DataValue::Numeric(_) => format!("{:?}", dv),
-        crate::types::DataValue::Bit(_) => format!("{:?}", dv),
+        crate::types::DataValue::Date(_) => format!("{}", dv),
+        crate::types::DataValue::Time(_) => format!("{}", dv),
+        crate::types::DataValue::Timestamp(_) => format!("{}", dv),
+        crate::types::DataValue::Numeric(_) => format!("{}", dv),
+        crate::types::DataValue::Bit(_) => format!("{}", dv),
     }
 }
 /// Format a `DataType` to its canonical string representation.
