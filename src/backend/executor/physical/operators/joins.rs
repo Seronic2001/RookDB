@@ -8,7 +8,7 @@ use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
 use super::trait_::PhysicalOperator;
 
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, NumericValue, OrderedF64};
 use crate::types::DataType;
 
 // ── Join Type ─────────────────────────────────────────────────────────────────
@@ -385,18 +385,22 @@ fn write_tuple_values(
     use std::io::Write;
     let mut buf = Vec::with_capacity(64);
     buf.extend_from_slice(&(tuple.values.len() as u32).to_le_bytes());
-    for v in tuple.values.iter() {
+    for (i, v) in tuple.values.iter().enumerate() {
         match v {
             None => buf.push(0),
             Some(dv) => {
                 buf.push(1);
-                let bytes = dv.to_bytes();
+                let bytes = if let Some(ty) = types.get(i) {
+                    dv.to_bytes_for_type(ty)
+                        .unwrap_or_else(|_| dv.to_bytes())
+                } else {
+                    dv.to_bytes()
+                };
                 buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 buf.extend_from_slice(&bytes);
             }
         }
     }
-    let _ = types;
     w.write_all(&buf)
 }
 
@@ -501,12 +505,34 @@ impl HashJoinOperator {
 
     fn canonicalize_hash_key(dv: DataValue) -> DataValue {
         match dv {
-            DataValue::SmallInt(v) => DataValue::BigInt(v as i64),
-            DataValue::Int(v) => DataValue::BigInt(v as i64),
+            DataValue::SmallInt(v) => DataValue::Numeric(NumericValue { unscaled: v as i128, scale: 0 }),
+            DataValue::Int(v) => DataValue::Numeric(NumericValue { unscaled: v as i128, scale: 0 }),
+            DataValue::BigInt(v) => DataValue::Numeric(NumericValue { unscaled: v as i128, scale: 0 }),
+            DataValue::Numeric(num) => DataValue::Numeric(normalize_numeric(num)),
+            DataValue::Real(v) => DataValue::DoublePrecision(OrderedF64(v.0 as f64)),
+            DataValue::DoublePrecision(v) => DataValue::DoublePrecision(v),
+            DataValue::Date(d) => match d.and_hms_opt(0, 0, 0) {
+                Some(dt) => DataValue::Timestamp(dt),
+                None => DataValue::Date(d),
+            },
             DataValue::Char(s) => DataValue::Varchar(s.trim_end().to_string()),
             other => other,
         }
     }
+}
+
+fn normalize_numeric(mut num: NumericValue) -> NumericValue {
+    if num.unscaled == 0 {
+        return NumericValue { unscaled: 0, scale: 0 };
+    }
+    while num.scale > 0 && num.unscaled % 10 == 0 {
+        num.unscaled /= 10;
+        num.scale -= 1;
+    }
+    num
+}
+
+impl HashJoinOperator {
 
     /// Build the hash table from the build side.
     /// Tuples with NULL join keys are skipped (they can never match in SQL).

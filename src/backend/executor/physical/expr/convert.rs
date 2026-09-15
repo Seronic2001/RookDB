@@ -226,7 +226,13 @@ pub fn predicate_from_ast(
 fn constant_from_ast(cv: &rook_ast::ConstantValue) -> RookResult<Option<DataValue>> {
     match cv {
         rook_ast::ConstantValue::Null => Ok(None),
-        rook_ast::ConstantValue::Int(i) => Ok(Some(DataValue::Int(*i as i32))),
+        rook_ast::ConstantValue::Int(i) => {
+            if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
+                Ok(Some(DataValue::Int(*i as i32)))
+            } else {
+                Ok(Some(DataValue::BigInt(*i)))
+            }
+        },
         rook_ast::ConstantValue::Float(f) => Ok(Some(DataValue::DoublePrecision(
             crate::types::value::OrderedF64(*f),
         ))),

@@ -235,8 +235,14 @@ impl PerGroupState {
                 } else if let Some(num) = &self.sum_numeric {
                     Some(DataValue::Numeric(num.clone()))
                 } else {
-                    let v = i64::try_from(self.sum_int).ok()?;
-                    Some(DataValue::BigInt(v))
+                    if let Ok(v) = i64::try_from(self.sum_int) {
+                        Some(DataValue::BigInt(v))
+                    } else {
+                        Some(DataValue::Numeric(NumericValue {
+                            unscaled: self.sum_int,
+                            scale: 0,
+                        }))
+                    }
                 }
             }
             AggregateFunction::Avg => {
