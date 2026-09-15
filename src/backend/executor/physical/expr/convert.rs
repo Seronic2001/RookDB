@@ -118,6 +118,38 @@ pub fn expr_from_ast(
                 else_result: else_expr,
             })
         }
+        rook_ast::ExprNode::Compare { left, op, right } => {
+            let l = expr_from_ast(left, column_names)?;
+            let r = expr_from_ast(right, column_names)?;
+            match op {
+                rook_ast::ComparisonOp::Eq => Ok(Expr::Eq(Box::new(l), Box::new(r))),
+                rook_ast::ComparisonOp::Ne => Ok(Expr::Ne(Box::new(l), Box::new(r))),
+                rook_ast::ComparisonOp::Lt => Ok(Expr::Lt(Box::new(l), Box::new(r))),
+                rook_ast::ComparisonOp::Le => Ok(Expr::Le(Box::new(l), Box::new(r))),
+                rook_ast::ComparisonOp::Gt => Ok(Expr::Gt(Box::new(l), Box::new(r))),
+                rook_ast::ComparisonOp::Ge => Ok(Expr::Ge(Box::new(l), Box::new(r))),
+            }
+        }
+        rook_ast::ExprNode::Logical { left, op, right } => {
+            let l = expr_from_ast(left, column_names)?;
+            let r = expr_from_ast(right, column_names)?;
+            match op {
+                rook_ast::BinaryOp::And => Ok(Expr::And(Box::new(l), Box::new(r))),
+                rook_ast::BinaryOp::Or => Ok(Expr::Or(Box::new(l), Box::new(r))),
+            }
+        }
+        rook_ast::ExprNode::Not(inner) => {
+            let inner_expr = expr_from_ast(inner, column_names)?;
+            Ok(Expr::Not(Box::new(inner_expr)))
+        }
+        rook_ast::ExprNode::IsNull(inner) => {
+            let inner_expr = expr_from_ast(inner, column_names)?;
+            Ok(Expr::IsNull(Box::new(inner_expr)))
+        }
+        rook_ast::ExprNode::IsNotNull(inner) => {
+            let inner_expr = expr_from_ast(inner, column_names)?;
+            Ok(Expr::IsNotNull(Box::new(inner_expr)))
+        }
     }
 }
 

@@ -324,6 +324,16 @@ impl PhysicalPlanner {
             rook_ast::ExprNode::Cast { expr: inner, .. } => {
                 self.expr_is_outer_ref(inner, inner_tables)
             }
+            rook_ast::ExprNode::Compare { left, right, .. }
+            | rook_ast::ExprNode::Logical { left, right, .. } => {
+                self.expr_is_outer_ref(left, inner_tables)
+                    || self.expr_is_outer_ref(right, inner_tables)
+            }
+            rook_ast::ExprNode::Not(inner)
+            | rook_ast::ExprNode::IsNull(inner)
+            | rook_ast::ExprNode::IsNotNull(inner) => {
+                self.expr_is_outer_ref(inner, inner_tables)
+            }
             rook_ast::ExprNode::Case { when_then_pairs, else_result } => {
                 for (when, then) in when_then_pairs {
                     if self.expr_is_outer_ref(when, inner_tables)

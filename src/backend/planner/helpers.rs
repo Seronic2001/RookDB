@@ -311,6 +311,11 @@ pub fn expr_to_name(expr: &ExprNode) -> String {
         ExprNode::ScalarSubquery(_) => "(scalar subquery)".to_string(),
         ExprNode::Function { name, .. } => name.clone(),
         ExprNode::Case { .. } => "CASE".to_string(),
+        ExprNode::Compare { .. } => "expr".to_string(),
+        ExprNode::Logical { .. } => "expr".to_string(),
+        ExprNode::Not(..) => "expr".to_string(),
+        ExprNode::IsNull(..) => "expr".to_string(),
+        ExprNode::IsNotNull(..) => "expr".to_string(),
     }
 }
 

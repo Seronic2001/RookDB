@@ -132,6 +132,16 @@ fn resolve_expr_columns(
                 resolve_expr_columns(else_node, schema, errors);
             }
         }
+        ExprNode::Compare { left, right, .. }
+        | ExprNode::Logical { left, right, .. } => {
+            resolve_expr_columns(left, schema, errors);
+            resolve_expr_columns(right, schema, errors);
+        }
+        ExprNode::Not(inner)
+        | ExprNode::IsNull(inner)
+        | ExprNode::IsNotNull(inner) => {
+            resolve_expr_columns(inner, schema, errors);
+        }
     }
 }
 

@@ -369,7 +369,7 @@ fn plan_select_with_ctes(
     // 5. Apply projection
     let projections = expand_projections(&select.projections, &current_plan)?;
     current_plan = LogicalPlan::Project(LogicalProject {
-        expressions: projections,
+        expressions: projections.clone(),
         child: Box::new(current_plan),
     });
 
@@ -383,8 +383,23 @@ fn plan_select_with_ctes(
     // 7. Apply ORDER BY
     if !select.order_by.is_empty() {
         let limit_hint = select.limit.as_ref().map(|l| l.limit);
+        let mut order_by = select.order_by.clone();
+        for ob in &mut order_by {
+            if let rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Int(pos)) = &ob.expr {
+                if *pos >= 1 && (*pos as usize) <= projections.len() {
+                    ob.expr = projections[(*pos as usize) - 1].expr.clone();
+                } else {
+                    return Err(PlanError {
+                        message: format!(
+                            "ORDER BY position {} is out of range (1..{})",
+                            pos, projections.len()
+                        ),
+                    });
+                }
+            }
+        }
         current_plan = LogicalPlan::Sort(LogicalSort {
-            order_by: select.order_by.clone(),
+            order_by,
             child: Box::new(current_plan),
             limit: limit_hint,
         });

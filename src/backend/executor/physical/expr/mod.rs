@@ -57,6 +57,17 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    Eq(Box<Expr>, Box<Expr>),
+    Ne(Box<Expr>, Box<Expr>),
+    Lt(Box<Expr>, Box<Expr>),
+    Le(Box<Expr>, Box<Expr>),
+    Gt(Box<Expr>, Box<Expr>),
+    Ge(Box<Expr>, Box<Expr>),
+    And(Box<Expr>, Box<Expr>),
+    Or(Box<Expr>, Box<Expr>),
+    Not(Box<Expr>),
+    IsNull(Box<Expr>),
+    IsNotNull(Box<Expr>),
 }
 
 impl Expr {
@@ -191,6 +202,119 @@ impl Expr {
             }
             Expr::Function { name, args } => {
                 evaluate_scalar_function(name, args, tuple, schema)
+            }
+            Expr::Eq(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(l), Some(r)) => {
+                        let ord = crate::types::Comparable::compare(&l, &r)
+                            .map_err(|e| format!("Comparison error: {}", e))?;
+                        Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Equal)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::Ne(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(l), Some(r)) => {
+                        let ord = crate::types::Comparable::compare(&l, &r)
+                            .map_err(|e| format!("Comparison error: {}", e))?;
+                        Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Equal)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::Lt(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(l), Some(r)) => {
+                        let ord = crate::types::Comparable::compare(&l, &r)
+                            .map_err(|e| format!("Comparison error: {}", e))?;
+                        Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Less)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::Le(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(l), Some(r)) => {
+                        let ord = crate::types::Comparable::compare(&l, &r)
+                            .map_err(|e| format!("Comparison error: {}", e))?;
+                        Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Greater)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::Gt(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(l), Some(r)) => {
+                        let ord = crate::types::Comparable::compare(&l, &r)
+                            .map_err(|e| format!("Comparison error: {}", e))?;
+                        Ok(Some(DataValue::Bool(ord == std::cmp::Ordering::Greater)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::Ge(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(l), Some(r)) => {
+                        let ord = crate::types::Comparable::compare(&l, &r)
+                            .map_err(|e| format!("Comparison error: {}", e))?;
+                        Ok(Some(DataValue::Bool(ord != std::cmp::Ordering::Less)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::And(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(DataValue::Bool(false)), _) | (_, Some(DataValue::Bool(false))) => {
+                        Ok(Some(DataValue::Bool(false)))
+                    }
+                    (Some(DataValue::Bool(true)), Some(DataValue::Bool(true))) => {
+                        Ok(Some(DataValue::Bool(true)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::Or(l, r) => {
+                let lv = l.evaluate(tuple, schema)?;
+                let rv = r.evaluate(tuple, schema)?;
+                match (lv, rv) {
+                    (Some(DataValue::Bool(true)), _) | (_, Some(DataValue::Bool(true))) => {
+                        Ok(Some(DataValue::Bool(true)))
+                    }
+                    (Some(DataValue::Bool(false)), Some(DataValue::Bool(false))) => {
+                        Ok(Some(DataValue::Bool(false)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Expr::Not(inner) => {
+                let v = inner.evaluate(tuple, schema)?;
+                match v {
+                    Some(DataValue::Bool(b)) => Ok(Some(DataValue::Bool(!b))),
+                    _ => Ok(None),
+                }
+            }
+            Expr::IsNull(inner) => {
+                let v = inner.evaluate(tuple, schema)?;
+                Ok(Some(DataValue::Bool(v.is_none())))
+            }
+            Expr::IsNotNull(inner) => {
+                let v = inner.evaluate(tuple, schema)?;
+                Ok(Some(DataValue::Bool(v.is_some())))
             }
         }
     }

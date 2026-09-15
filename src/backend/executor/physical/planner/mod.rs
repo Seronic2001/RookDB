@@ -157,6 +157,18 @@ impl PhysicalPlanner {
                                 .ok_or_else(|| RookError::NotFound { entity: "Column", name })?;
                             sort_keys.push((idx, !ob.ascending));
                         }
+                        rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Int(pos)) => {
+                            let pos_usize = *pos as usize;
+                            if pos_usize >= 1 && pos_usize <= column_names.len() {
+                                sort_keys.push((pos_usize - 1, !ob.ascending));
+                            } else {
+                                return Err(RookError::Internal(format!(
+                                    "ORDER BY position {} is out of range (1..={})",
+                                    pos,
+                                    column_names.len()
+                                )));
+                            }
+                        }
                         complex_expr => {
                             // Complex sort expression: project as a hidden column
                             let (phys_expr, data_type) = self.plan_projection_expr(

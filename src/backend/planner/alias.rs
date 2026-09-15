@@ -151,6 +151,13 @@ pub fn rewrite_expr(expr: &mut ExprNode, map: &HashMap<String, String>) {
                 rewrite_expr(else_e, map);
             }
         }
+        ExprNode::Compare { left, right, .. } | ExprNode::Logical { left, right, .. } => {
+            rewrite_expr(left, map);
+            rewrite_expr(right, map);
+        }
+        ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
+            rewrite_expr(inner, map);
+        }
         // Columns, constants, scalar subqueries: nothing to rewrite.
         _ => {}
     }

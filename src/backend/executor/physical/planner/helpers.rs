@@ -80,6 +80,11 @@ pub fn ast_expr_to_output_name(expr: &rook_ast::ExprNode) -> String {
         rook_ast::ExprNode::ScalarSubquery(_) => "(scalar subquery)".to_string(),
         rook_ast::ExprNode::Function { name, .. } => name.clone(),
         rook_ast::ExprNode::Case { .. } => "CASE".to_string(),
+        rook_ast::ExprNode::Compare { .. } => "compare".to_string(),
+        rook_ast::ExprNode::Logical { .. } => "logical".to_string(),
+        rook_ast::ExprNode::Not(_) => "not".to_string(),
+        rook_ast::ExprNode::IsNull(_) => "is_null".to_string(),
+        rook_ast::ExprNode::IsNotNull(_) => "is_not_null".to_string(),
     }
 }
 
@@ -193,9 +198,22 @@ pub fn infer_expr_type_from_ast(
                 _ => Ok(crate::types::datatype::DataType::Int),
             }
         }
-        rook_ast::ExprNode::Case { .. } => {
-            // For CASE expressions, infer from first THEN branch (simplistic)
-            Err(RookError::Internal("Cannot infer type for CASE expression".to_string()))
+        rook_ast::ExprNode::Case { when_then_pairs, else_result } => {
+            // For CASE expressions, infer from first THEN branch (or ELSE branch)
+            if let Some((_, then_expr)) = when_then_pairs.first() {
+                infer_expr_type_from_ast(then_expr, child_types, column_names)
+            } else if let Some(else_expr) = else_result {
+                infer_expr_type_from_ast(else_expr, child_types, column_names)
+            } else {
+                Ok(crate::types::datatype::DataType::Int)
+            }
+        }
+        rook_ast::ExprNode::Compare { .. }
+        | rook_ast::ExprNode::Logical { .. }
+        | rook_ast::ExprNode::Not(_)
+        | rook_ast::ExprNode::IsNull(_)
+        | rook_ast::ExprNode::IsNotNull(_) => {
+            Ok(crate::types::datatype::DataType::Bool)
         }
     }
 }

@@ -76,6 +76,19 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
                 },
             }
         }
+        ExprNode::Compare { left, op, right } => ExprNode::Compare {
+            left: Box::new(fold_expr(left)),
+            op: *op,
+            right: Box::new(fold_expr(right)),
+        },
+        ExprNode::Logical { left, op, right } => ExprNode::Logical {
+            left: Box::new(fold_expr(left)),
+            op: *op,
+            right: Box::new(fold_expr(right)),
+        },
+        ExprNode::Not(inner) => ExprNode::Not(Box::new(fold_expr(inner))),
+        ExprNode::IsNull(inner) => ExprNode::IsNull(Box::new(fold_expr(inner))),
+        ExprNode::IsNotNull(inner) => ExprNode::IsNotNull(Box::new(fold_expr(inner))),
     }
 }
 
@@ -349,6 +362,13 @@ fn extract_expr_columns_into(expr: &ExprNode, cols: &mut HashSet<String>) {
                 extract_expr_columns_into(else_node, cols);
             }
         }
+        ExprNode::Compare { left, right, .. } | ExprNode::Logical { left, right, .. } => {
+            extract_expr_columns_into(left, cols);
+            extract_expr_columns_into(right, cols);
+        }
+        ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
+            extract_expr_columns_into(inner, cols);
+        }
     }
 }
 
@@ -468,6 +488,13 @@ fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<String>) {
             if let Some(else_node) = else_result {
                 extract_column_names_from_expr(else_node, names);
             }
+        }
+        ExprNode::Compare { left, right, .. } | ExprNode::Logical { left, right, .. } => {
+            extract_column_names_from_expr(left, names);
+            extract_column_names_from_expr(right, names);
+        }
+        ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
+            extract_column_names_from_expr(inner, names);
         }
     }
 }

@@ -268,6 +268,11 @@ impl PhysicalPlanner {
                         "CASE expressions are not allowed in GROUP BY".to_string(),
                     ));
                 }
+                rook_ast::ExprNode::Compare { .. }
+                | rook_ast::ExprNode::Logical { .. }
+                | rook_ast::ExprNode::Not(_)
+                | rook_ast::ExprNode::IsNull(_)
+                | rook_ast::ExprNode::IsNotNull(_) => DataType::Bool,
             };
             group_by_exprs.push(expr);
             group_by_names.push(name);
