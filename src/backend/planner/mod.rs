@@ -358,8 +358,44 @@ fn plan_select_with_ctes(
             }
         }
 
+        let mut group_by = select.group_by.clone();
+        for gb_expr in &mut group_by {
+            if let ExprNode::Constant(ConstantValue::Int(pos)) = gb_expr {
+                let pos_usize = *pos as usize;
+                if *pos >= 1 && pos_usize <= select.projections.len() {
+                    match &select.projections[pos_usize - 1] {
+                        SelectExpr::UnnamedExpr(e) | SelectExpr::ExprWithAlias { expr: e, .. } => {
+                            *gb_expr = e.clone();
+                        }
+                        _ => {
+                            let expanded = expand_projections(&select.projections, &current_plan)?;
+                            if pos_usize <= expanded.len() {
+                                *gb_expr = expanded[pos_usize - 1].expr.clone();
+                            } else {
+                                return Err(PlanError {
+                                    message: format!(
+                                        "GROUP BY position {} is out of range (1..{})",
+                                        pos,
+                                        expanded.len()
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    return Err(PlanError {
+                        message: format!(
+                            "GROUP BY position {} is out of range (1..{})",
+                            pos,
+                            select.projections.len()
+                        ),
+                    });
+                }
+            }
+        }
+
         current_plan = LogicalPlan::Aggregate(LogicalAggregate {
-            group_by: select.group_by.clone(),
+            group_by,
             aggregates,
             having: select.having.clone(),
             child: Box::new(current_plan),

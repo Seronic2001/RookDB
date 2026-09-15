@@ -338,7 +338,7 @@ impl PhysicalPlanner {
                     data_type: agg.output_type.clone(), table: None });
             }
             let having_names: Vec<String> = having_schema.iter().map(|c| c.name.clone()).collect();
-            Some(predicate_from_ast(&having_node, &having_names)?)
+            Some(self.build_predicate_with_subqueries(&having_node, &having_names, &having_schema)?)
         } else {
             None
         };

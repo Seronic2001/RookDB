@@ -274,6 +274,14 @@ impl PhysicalPlanner {
                 let left = self.plan_internal(&s.left, cte_registry)?;
                 let right = self.plan_internal(&s.right, cte_registry)?;
 
+                if left.schema().len() != right.schema().len() {
+                    return Err(RookError::Internal(format!(
+                        "Set operation queries must have the same number of columns: {} vs {}",
+                        left.schema().len(),
+                        right.schema().len()
+                    )));
+                }
+
                 let op_type = match s.op {
                     rook_ast::logical::SetOpType::Union => PhysicalSetOpType::Union,
                     rook_ast::logical::SetOpType::Intersect => PhysicalSetOpType::Intersect,
