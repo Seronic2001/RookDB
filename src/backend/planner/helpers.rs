@@ -60,6 +60,11 @@ pub fn build_table_or_cte_scan(
             name: cte_name.to_string(),
             schema: schema.clone(),
         }))
+    } else if let Some((_inner, schema)) = cte_registry.get(&tref.name.to_ascii_lowercase()) {
+        Ok(LogicalPlan::CteScan(LogicalCteScan {
+            name: tref.name.clone(),
+            schema: schema.clone(),
+        }))
     } else if let Some(sys_name) = tref.name.strip_prefix("information_schema.") {
         let sys_lower = sys_name.to_ascii_lowercase();
         let sys_table_name = match sys_lower.as_str() {

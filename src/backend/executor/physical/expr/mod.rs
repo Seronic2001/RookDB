@@ -18,11 +18,12 @@ use std::rc::Rc;
 use crate::types::value::DataValue;
 
 use super::tuple::{Tuple, ColumnInfo};
+use super::operators::PhysicalOperator;
 
 // ── Expressions ───────────────────────────────────────────────────────────────
 
 /// An expression that can be evaluated against a deserialised tuple.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Expr {
     /// A reference to a column by name, with optional table qualifier.
     ///
@@ -45,6 +46,12 @@ pub enum Expr {
     /// The `Rc<RefCell<Option<DataValue>>>` is shared between the predicate evaluator
     /// and the physical planner, allowing the value to be set per outer row.
     CorrelatedParam(Rc<RefCell<Option<DataValue>>>),
+    /// A correlated scalar subquery evaluated once per outer tuple.
+    CorrelatedScalarSubquery {
+        inner_plan: Rc<RefCell<Box<dyn PhysicalOperator>>>,
+        params: Vec<Rc<RefCell<Option<DataValue>>>>,
+        outer_col_indices: Vec<usize>,
+    },
     /// `CASE WHEN cond1 THEN expr1 [WHEN cond2 THEN expr2] [ELSE exprN] END`.
     Case {
         when_then_pairs: Vec<(Expr, Expr)>,
@@ -70,11 +77,87 @@ pub enum Expr {
     IsNotNull(Box<Expr>),
 }
 
+impl std::fmt::Debug for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Column { table, column } => f
+                .debug_struct("Column")
+                .field("table", table)
+                .field("column", column)
+                .finish(),
+            Expr::Constant(dv) => f.debug_tuple("Constant").field(dv).finish(),
+            Expr::Null => write!(f, "Null"),
+            Expr::Add(l, r) => f.debug_tuple("Add").field(l).field(r).finish(),
+            Expr::Sub(l, r) => f.debug_tuple("Sub").field(l).field(r).finish(),
+            Expr::Mul(l, r) => f.debug_tuple("Mul").field(l).field(r).finish(),
+            Expr::Div(l, r) => f.debug_tuple("Div").field(l).field(r).finish(),
+            Expr::Cast(e, dt) => f.debug_tuple("Cast").field(e).field(dt).finish(),
+            Expr::CorrelatedParam(p) => f.debug_tuple("CorrelatedParam").field(p).finish(),
+            Expr::CorrelatedScalarSubquery {
+                inner_plan: _,
+                params,
+                outer_col_indices,
+            } => f
+                .debug_struct("CorrelatedScalarSubquery")
+                .field("inner_plan", &"<op>")
+                .field("param_count", &params.len())
+                .field("outer_col_indices", outer_col_indices)
+                .finish(),
+            Expr::Case {
+                when_then_pairs,
+                else_result,
+            } => f
+                .debug_struct("Case")
+                .field("when_then_pairs", when_then_pairs)
+                .field("else_result", else_result)
+                .finish(),
+            Expr::Function { name, args } => f
+                .debug_struct("Function")
+                .field("name", name)
+                .field("args", args)
+                .finish(),
+            Expr::Eq(l, r) => f.debug_tuple("Eq").field(l).field(r).finish(),
+            Expr::Ne(l, r) => f.debug_tuple("Ne").field(l).field(r).finish(),
+            Expr::Lt(l, r) => f.debug_tuple("Lt").field(l).field(r).finish(),
+            Expr::Le(l, r) => f.debug_tuple("Le").field(l).field(r).finish(),
+            Expr::Gt(l, r) => f.debug_tuple("Gt").field(l).field(r).finish(),
+            Expr::Ge(l, r) => f.debug_tuple("Ge").field(l).field(r).finish(),
+            Expr::And(l, r) => f.debug_tuple("And").field(l).field(r).finish(),
+            Expr::Or(l, r) => f.debug_tuple("Or").field(l).field(r).finish(),
+            Expr::Not(e) => f.debug_tuple("Not").field(e).finish(),
+            Expr::IsNull(e) => f.debug_tuple("IsNull").field(e).finish(),
+            Expr::IsNotNull(e) => f.debug_tuple("IsNotNull").field(e).finish(),
+        }
+    }
+}
+
 impl Expr {
     /// Evaluate this expression against a tuple and schema, returning the resulting value
     /// (or `None` for NULL).
     pub fn evaluate(&self, tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<DataValue>, String> {
         match self {
+            Expr::CorrelatedScalarSubquery {
+                inner_plan,
+                params,
+                outer_col_indices,
+            } => {
+                for (param, idx) in params.iter().zip(outer_col_indices.iter()) {
+                    let outer_val = tuple.values.get(*idx).and_then(|v| v.clone());
+                    *param.borrow_mut() = outer_val;
+                }
+                let mut plan_ref = inner_plan.borrow_mut();
+                plan_ref.reset().map_err(|e| format!("Correlated scalar subquery reset error: {}", e))?;
+                match plan_ref.next().map_err(|e| format!("Correlated scalar subquery error: {}", e))? {
+                    None => Ok(None),
+                    Some(mut t) => {
+                        let val = t.values.drain(..).next().flatten();
+                        if plan_ref.next().map_err(|e| format!("Correlated scalar subquery error: {}", e))?.is_some() {
+                            return Err("Scalar subquery returned more than one row".to_string());
+                        }
+                        Ok(val)
+                    }
+                }
+            }
             Expr::Column { table, column } => {
                 // Look up the column by name in the schema (case-insensitive).
                 // ColumnInfo.table is populated with actual table names by scan/join

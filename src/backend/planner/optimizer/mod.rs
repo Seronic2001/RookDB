@@ -393,16 +393,25 @@ impl Optimizer {
                 let on_left = pred_cols.iter().all(|c| left_cols.contains(c));
                 let on_right = pred_cols.iter().all(|c| right_cols.contains(c));
 
-                if on_left && !on_right {
-                    // Predicate only references left-side columns — push to left child
+                let can_push_left = matches!(
+                    j.join_type,
+                    JoinType::Inner | JoinType::Cross | JoinType::Natural | JoinType::Left
+                );
+                let can_push_right = matches!(
+                    j.join_type,
+                    JoinType::Inner | JoinType::Cross | JoinType::Natural | JoinType::Right
+                );
+
+                if on_left && !on_right && can_push_left {
+                    // Predicate only references left-side columns and left child is preserved
                     LogicalPlan::Join(LogicalJoin {
                         left: Box::new(self.push_filter_down(pred, *j.left)),
                         right: j.right,
                         join_type: j.join_type,
                         condition: j.condition,
                     })
-                } else if on_right && !on_left {
-                    // Predicate only references right-side columns — push to right child
+                } else if on_right && !on_left && can_push_right {
+                    // Predicate only references right-side columns and right child is preserved
                     LogicalPlan::Join(LogicalJoin {
                         left: j.left,
                         right: Box::new(self.push_filter_down(pred, *j.right)),

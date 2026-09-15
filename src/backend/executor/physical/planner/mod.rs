@@ -735,22 +735,42 @@ impl PhysicalPlanner {
         child_types: &[DataType],
     ) -> RookResult<(Expr, DataType)> {
         match expr {
-            // Top-level scalar subquery: materialize and create Expr::Constant directly
+            // Top-level scalar subquery: materialize or build correlated
             rook_ast::ExprNode::ScalarSubquery(info) => {
-                let (value, data_type) = self.materialize_scalar_subquery(&info.select)?;
-                let phys_expr = match value {
-                    Some(dv) => Expr::Constant(dv),
-                    None => Expr::Null,
-                };
-                Ok((phys_expr, data_type))
+                if self.is_subquery_correlated(&info.select) {
+                    let outer_schema: Vec<ColumnInfo> = column_names
+                        .iter()
+                        .zip(child_types.iter())
+                        .map(|(c, t)| ColumnInfo {
+                            name: c.clone(),
+                            data_type: t.clone(),
+                            table: None,
+                        })
+                        .collect();
+                    let (phys_expr, dt) = self.build_correlated_scalar_subquery(info, &outer_schema)?;
+                    Ok((phys_expr, dt))
+                } else {
+                    let (value, data_type) = self.materialize_scalar_subquery(&info.select)?;
+                    let phys_expr = match value {
+                        Some(dv) => Expr::Constant(dv),
+                        None => Expr::Null,
+                    };
+                    Ok((phys_expr, data_type))
+                }
             }
-            // Nested subqueries inside Binary or Cast need AST replacement first
+            // Nested subqueries inside Binary or Cast
             rook_ast::ExprNode::Binary { left, op, right } => {
-                let left = self.materialize_nested_subqueries(left);
-                let right = self.materialize_nested_subqueries(right);
-                // Now convert the materialized AST (no more subqueries inside)
-                let left_expr = expr_from_ast(&left?, column_names)?;
-                let right_expr = expr_from_ast(&right?, column_names)?;
+                let outer_schema: Vec<ColumnInfo> = column_names
+                    .iter()
+                    .zip(child_types.iter())
+                    .map(|(c, t)| ColumnInfo {
+                        name: c.clone(),
+                        data_type: t.clone(),
+                        table: None,
+                    })
+                    .collect();
+                let left_expr = self.build_expr_with_correlated_subquery(left, column_names, &outer_schema)?;
+                let right_expr = self.build_expr_with_correlated_subquery(right, column_names, &outer_schema)?;
                 let phys_op = match op {
                     rook_ast::ArithOp::Add => Expr::Add(Box::new(left_expr), Box::new(right_expr)),
                     rook_ast::ArithOp::Sub => Expr::Sub(Box::new(left_expr), Box::new(right_expr)),
@@ -761,8 +781,16 @@ impl PhysicalPlanner {
                 Ok((phys_op, data_type))
             }
             rook_ast::ExprNode::Cast { expr: inner, data_type } => {
-                let inner = self.materialize_nested_subqueries(inner)?;
-                let inner_expr = expr_from_ast(&inner, column_names)?;
+                let outer_schema: Vec<ColumnInfo> = column_names
+                    .iter()
+                    .zip(child_types.iter())
+                    .map(|(c, t)| ColumnInfo {
+                        name: c.clone(),
+                        data_type: t.clone(),
+                        table: None,
+                    })
+                    .collect();
+                let inner_expr = self.build_expr_with_correlated_subquery(inner, column_names, &outer_schema)?;
                 let target_dt: DataType = data_type.parse()
                     .map_err(|e: String| RookError::TypeMismatch(format!(
                         "Invalid CAST target type '{}': {}", data_type, e

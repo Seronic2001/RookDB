@@ -16,6 +16,8 @@ use crate::types::DataValue;
 use super::super::operators::{
     PhysicalOperator,
     FilterOperator,
+    ProjectionOperator,
+    LimitOperator,
 };
 use super::PhysicalPlanner;
 
@@ -52,14 +54,7 @@ impl PhysicalPlanner {
                 Ok(Predicate::not(inner))
             }
             rook_ast::PredicateNode::Exists(subquery_info) => {
-                // Check if this EXISTS is correlated (references outer columns)
-                let inner_table_names: Vec<String> = subquery_info.select.from
-                    .iter().map(|t| t.name.clone())
-                    .collect();
-                if self.is_predicate_correlated(
-                    subquery_info.select.selection.as_ref(),
-                    &inner_table_names,
-                ) {
+                if self.is_subquery_correlated(&subquery_info.select) {
                     log::info!("[Planner] Building correlated EXISTS subquery");
                     self.build_correlated_exists(subquery_info, schema)
                 } else {
@@ -73,13 +68,7 @@ impl PhysicalPlanner {
                 subquery,
                 negated,
             } => {
-                let inner_table_names: Vec<String> = subquery.select.from
-                    .iter().map(|t| t.name.clone())
-                    .collect();
-                if self.is_predicate_correlated(
-                    subquery.select.selection.as_ref(),
-                    &inner_table_names,
-                ) {
+                if self.is_subquery_correlated(&subquery.select) {
                     log::info!("[Planner] Building correlated IN subquery");
                     let lhs_expr = expr_from_ast(expr, column_names)?;
                     self.build_correlated_in_subquery(
@@ -91,6 +80,20 @@ impl PhysicalPlanner {
                     let values = self.materialize_in_subquery(subquery.select.as_ref())?;
                     Ok(Predicate::InSubqueryResult(lhs_expr, values, *negated))
                 }
+            }
+            // Compare nodes — handle correlated scalar subqueries if present
+            rook_ast::PredicateNode::Compare { left, op, right } => {
+                let l = self.build_expr_with_correlated_subquery(left, column_names, schema)?;
+                let r = self.build_expr_with_correlated_subquery(right, column_names, schema)?;
+                let phys_op = match op {
+                    rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
+                    rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
+                    rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
+                    rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
+                    rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
+                    rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
+                };
+                Ok(Predicate::Compare(l, phys_op, r))
             }
             // IS DISTINCT FROM and IS Boolean — handle directly
             rook_ast::PredicateNode::IsDistinctFrom { left, right } => {
@@ -120,6 +123,46 @@ impl PhysicalPlanner {
                 // Use the standard converter
                 predicate_from_ast(node, column_names)
             }
+        }
+    }
+
+    pub(crate) fn build_expr_with_correlated_subquery(
+        &self,
+        expr: &rook_ast::ExprNode,
+        column_names: &[String],
+        schema: &[ColumnInfo],
+    ) -> RookResult<Expr> {
+        match expr {
+            rook_ast::ExprNode::ScalarSubquery(info) => {
+                if self.is_subquery_correlated(&info.select) {
+                    let (phys_expr, _) = self.build_correlated_scalar_subquery(info, schema)?;
+                    Ok(phys_expr)
+                } else {
+                    let (value, _) = self.materialize_scalar_subquery(&info.select)?;
+                    let constant = match value {
+                        Some(dv) => Expr::Constant(dv),
+                        None => Expr::Null,
+                    };
+                    Ok(constant)
+                }
+            }
+            rook_ast::ExprNode::Binary { left, op, right } => {
+                let l = self.build_expr_with_correlated_subquery(left, column_names, schema)?;
+                let r = self.build_expr_with_correlated_subquery(right, column_names, schema)?;
+                let phys_op = match op {
+                    rook_ast::ArithOp::Add => Expr::Add(Box::new(l), Box::new(r)),
+                    rook_ast::ArithOp::Sub => Expr::Sub(Box::new(l), Box::new(r)),
+                    rook_ast::ArithOp::Mul => Expr::Mul(Box::new(l), Box::new(r)),
+                    rook_ast::ArithOp::Div => Expr::Div(Box::new(l), Box::new(r)),
+                };
+                Ok(phys_op)
+            }
+            rook_ast::ExprNode::Cast { expr: inner, data_type } => {
+                let inner_expr = self.build_expr_with_correlated_subquery(inner, column_names, schema)?;
+                let dt: DataType = data_type.parse().map_err(|e: String| RookError::TypeMismatch(e))?;
+                Ok(Expr::Cast(Box::new(inner_expr), dt))
+            }
+            _ => expr_from_ast(expr, column_names),
         }
     }
 
@@ -209,12 +252,16 @@ impl PhysicalPlanner {
     ) -> RookResult<rook_ast::ExprNode> {
         match expr {
             rook_ast::ExprNode::ScalarSubquery(info) => {
-                let (value, _) = self.materialize_scalar_subquery(&info.select)?;
-                let constant = match value {
-                    Some(dv) => super::helpers::data_value_to_constant_value(&dv),
-                    None => rook_ast::ConstantValue::Null,
-                };
-                Ok(rook_ast::ExprNode::Constant(constant))
+                if self.is_subquery_correlated(&info.select) {
+                    Ok(expr.clone())
+                } else {
+                    let (value, _) = self.materialize_scalar_subquery(&info.select)?;
+                    let constant = match value {
+                        Some(dv) => super::helpers::data_value_to_constant_value(&dv),
+                        None => rook_ast::ConstantValue::Null,
+                    };
+                    Ok(rook_ast::ExprNode::Constant(constant))
+                }
             }
             rook_ast::ExprNode::Binary { left, op, right } => {
                 let left = self.materialize_nested_subqueries(left)?;
@@ -539,11 +586,69 @@ impl PhysicalPlanner {
         false
     }
 
+    pub(crate) fn is_subquery_correlated(&self, select: &rook_ast::SelectPlan) -> bool {
+        let mut inner_tables: Vec<String> = Vec::new();
+        for t in &select.from {
+            if let Some(ref alias) = t.alias {
+                inner_tables.push(alias.clone());
+            } else {
+                let raw_name = t.name.strip_prefix("__cte__:").unwrap_or(&t.name).to_string();
+                inner_tables.push(raw_name);
+                inner_tables.push(t.name.clone());
+            }
+        }
+        self.is_predicate_correlated(select.selection.as_ref(), &inner_tables)
+    }
+
+    fn resolve_inner_scan_and_columns(
+        &self,
+        select: &rook_ast::SelectPlan,
+    ) -> RookResult<(Box<dyn PhysicalOperator>, String, Vec<String>)> {
+        let inner_tref = select
+            .from
+            .first()
+            .ok_or_else(|| RookError::Internal("Subquery has no FROM table".to_string()))?;
+
+        let raw_name = inner_tref.name.strip_prefix("__cte__:").unwrap_or(&inner_tref.name);
+        let inner_table_alias = inner_tref.alias.clone().unwrap_or_else(|| raw_name.to_string());
+
+        if let Some(cte_def) = select.ctes.iter().find(|c| c.name.eq_ignore_ascii_case(raw_name)) {
+            let mut query = (*cte_def.query).clone();
+            if query.ctes.is_empty() {
+                query.ctes = select.ctes.clone();
+            }
+            let query_plan = rook_ast::QueryPlan::Select(query);
+            let logical_plan = crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
+                .map_err(|e| RookError::Internal(e.message)
+                    .with_context("Failed to plan CTE inner query in correlated subquery"))?;
+            let inner_planner = PhysicalPlanner::new(self.catalog.clone(), self.db_name.clone());
+            let inner_base = inner_planner.plan(&logical_plan)?;
+            let inner_col_names: Vec<String> = inner_base.schema().iter().map(|c| c.name.clone()).collect();
+            Ok((inner_base, inner_table_alias, inner_col_names))
+        } else {
+            let inner_table_name = inner_tref.name.clone();
+            let inner_table_schema = self.resolve_table_schema(&inner_table_name)?;
+            let inner_col_names: Vec<String> = inner_table_schema.iter().map(|c| c.name.clone()).collect();
+            let inner_table_scan = rook_ast::logical::LogicalTableScan {
+                table: inner_table_name,
+                alias: inner_tref.alias.clone(),
+                schema: rook_ast::logical::ColumnSchema {
+                    columns: inner_col_names.iter().map(|name| {
+                        rook_ast::logical::ColumnInfo {
+                            name: name.clone(),
+                            data_type: "UNKNOWN".to_string(),
+                            nullable: true,
+                        }
+                    }).collect(),
+                },
+                system_table_name: None,
+            };
+            let inner_base = self.plan_table_scan(&inner_table_scan)?;
+            Ok((inner_base, inner_table_alias, inner_col_names))
+        }
+    }
+
     /// Build a correlated EXISTS subquery with per-row execution.
-    ///
-    /// Supports multi-column correlations: extracts ALL correlation predicates
-    /// from the inner WHERE clause (connected by AND) and creates a filter with
-    /// multiple CorrelatedParam bindings.
     fn build_correlated_exists(
         &self,
         subquery_info: &rook_ast::SubqueryInfo,
@@ -551,22 +656,9 @@ impl PhysicalPlanner {
     ) -> RookResult<Predicate> {
         let select = &subquery_info.select;
 
-        // ── 1. Determine inner table (or its alias) and column info ──
-        let inner_tref = select
-            .from
-            .first()
-            .ok_or_else(|| RookError::Internal("EXISTS subquery has no FROM table".to_string()))?;
-        // Use alias if present, since predicates reference the alias not the raw table name
-        let inner_table_alias = inner_tref.alias.as_deref().unwrap_or(&inner_tref.name).to_string();
-        let inner_table_name = inner_tref.name.clone();
+        let (inner_base, inner_table_alias, inner_col_names) =
+            self.resolve_inner_scan_and_columns(select)?;
 
-        let inner_table_schema = self.resolve_table_schema(&inner_table_name)?;
-        let inner_col_names: Vec<String> =
-            inner_table_schema.iter().map(|c| c.name.clone()).collect();
-
-        // ── 2. Extract ALL correlation pairs from the inner predicate ──
-        // Use the table alias (or raw name if no alias) for column matching
-        // since predicates reference the alias in compound identifiers.
         let correlation_pairs = if let Some(ref selection) = select.selection {
             self.extract_all_correlations(
                 selection,
@@ -585,38 +677,11 @@ impl PhysicalPlanner {
             ));
         }
 
-        // ── 3. Build the inner plan directly as a SeqScan ──────────────
-        let inner_table_scan = rook_ast::logical::LogicalTableScan {
-            table: inner_table_name.clone(),
-            alias: None,
-            schema: rook_ast::logical::ColumnSchema {
-                columns: inner_col_names.iter().map(|name| {
-                    rook_ast::logical::ColumnInfo {
-                        name: name.clone(),
-                        data_type: "UNKNOWN".to_string(),
-                        nullable: true }
-                }).collect(),
-            },
-            system_table_name: None,
-        };
-        let inner_base = self.plan_table_scan(&inner_table_scan)?;
-
-        // ── 4. Build filter predicates with CorrelatedParams for EACH pair ──
         let mut params = Vec::new();
         let mut outer_indices = Vec::new();
         let mut filter_predicate: Option<Predicate> = None;
 
         for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            // Resolve inner column index
-            let _inner_col_idx = inner_col_names
-                .iter()
-                .position(|n| n.eq_ignore_ascii_case(inner_col_name))
-                .ok_or_else(|| RookError::NotFound {
-                    entity: "Column",
-                    name: inner_col_name.clone(),
-                })?;
-
-            // Resolve outer column index
             let outer_col_idx = outer_schema
                 .iter()
                 .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
@@ -650,8 +715,8 @@ impl PhysicalPlanner {
             outer_indices.push(outer_col_idx);
 
             log::info!(
-                "[Planner] Correlated EXISTS: inner col '{}' (idx={}) = outer.col '{}' (idx={})",
-                inner_col_name, _inner_col_idx, outer_col_name, outer_col_idx
+                "[Planner] Correlated EXISTS: inner col '{}' = outer.col '{}' (idx={})",
+                inner_col_name, outer_col_name, outer_col_idx
             );
         }
 
@@ -669,10 +734,6 @@ impl PhysicalPlanner {
     }
 
     /// Build a correlated IN (subquery) with per-row execution.
-    ///
-    /// Supports multi-column correlations: extracts ALL correlation predicates
-    /// from the inner WHERE clause and creates a filter with multiple
-    /// CorrelatedParam bindings.
     fn build_correlated_in_subquery(
         &self,
         subquery: &rook_ast::SubqueryInfo,
@@ -682,22 +743,9 @@ impl PhysicalPlanner {
     ) -> RookResult<Predicate> {
         let select = &subquery.select;
 
-        // ── 1. Determine inner table (or its alias) and column info ──
-        let inner_tref = select
-            .from
-            .first()
-            .ok_or_else(|| RookError::Internal("IN subquery has no FROM table".to_string()))?;
-        // Use alias if present, since predicates reference the alias not the raw table name
-        let inner_table_alias = inner_tref.alias.as_deref().unwrap_or(&inner_tref.name).to_string();
-        let inner_table_name = inner_tref.name.clone();
+        let (inner_base, inner_table_alias, inner_col_names) =
+            self.resolve_inner_scan_and_columns(select)?;
 
-        let inner_table_schema = self.resolve_table_schema(&inner_table_name)?;
-        let inner_col_names: Vec<String> =
-            inner_table_schema.iter().map(|c| c.name.clone()).collect();
-
-        // ── 2. Extract ALL correlation pairs ───────────────────────────
-        // Use the table alias (or raw name if no alias) since predicates
-        // reference the alias in compound identifiers.
         let correlation_pairs = if let Some(ref selection) = select.selection {
             self.extract_all_correlations(
                 selection,
@@ -716,33 +764,11 @@ impl PhysicalPlanner {
             ));
         }
 
-        // ── 3. Build the inner plan (no WHERE clause, just SeqScan) ────
-        let mut inner_select = (**select).clone();
-        inner_select.selection = None;
-
-        let query_plan = rook_ast::QueryPlan::Select(inner_select);
-        let logical_plan =
-            crate::planner::plan_query(&query_plan, &self.catalog, &self.db_name)
-                .map_err(|e| RookError::Internal(e.message)
-                    .with_context("Failed to plan correlated IN subquery"))?;
-
-        let inner_planner = PhysicalPlanner::new(self.catalog.clone(), self.db_name.clone());
-        let inner_base = inner_planner.plan(&logical_plan)?;
-
-        // ── 4. Build filter predicates with CorrelatedParams for EACH pair ──
         let mut params = Vec::new();
         let mut outer_indices = Vec::new();
         let mut filter_predicate: Option<Predicate> = None;
 
         for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
-            let _inner_col_idx = inner_col_names
-                .iter()
-                .position(|n| n.eq_ignore_ascii_case(inner_col_name))
-                .ok_or_else(|| RookError::NotFound {
-                    entity: "Column",
-                    name: inner_col_name.clone(),
-                })?;
-
             let outer_col_idx = outer_schema
                 .iter()
                 .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
@@ -776,8 +802,8 @@ impl PhysicalPlanner {
             outer_indices.push(outer_col_idx);
 
             log::info!(
-                "[Planner] Correlated IN subquery: inner col '{}' (idx={}) = outer.col '{}' (idx={})",
-                inner_col_name, _inner_col_idx, outer_col_name, outer_col_idx
+                "[Planner] Correlated IN subquery: inner col '{}' = outer.col '{}' (idx={})",
+                inner_col_name, outer_col_name, outer_col_idx
             );
         }
 
@@ -794,6 +820,130 @@ impl PhysicalPlanner {
             lhs_expr,
             negated,
         })
+    }
+
+    /// Build a correlated scalar subquery with per-row execution.
+    pub(crate) fn build_correlated_scalar_subquery(
+        &self,
+        subquery_info: &rook_ast::SubqueryInfo,
+        outer_schema: &[ColumnInfo],
+    ) -> RookResult<(Expr, DataType)> {
+        let select = &subquery_info.select;
+
+        let (inner_base, inner_table_alias, inner_col_names) =
+            self.resolve_inner_scan_and_columns(select)?;
+
+        let correlation_pairs = if let Some(ref selection) = select.selection {
+            self.extract_all_correlations(
+                selection,
+                &inner_table_alias,
+                &inner_col_names,
+            )?
+        } else {
+            return Err(RookError::Internal(
+                "Correlated scalar subquery has no WHERE clause".to_string(),
+            ));
+        };
+
+        let mut params = Vec::new();
+        let mut outer_indices = Vec::new();
+        let mut filter_predicate: Option<Predicate> = None;
+
+        for (inner_col_name, outer_col_name, comp_op) in &correlation_pairs {
+            let outer_col_idx = outer_schema
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(outer_col_name))
+                .ok_or_else(|| RookError::NotFound {
+                    entity: "Column",
+                    name: outer_col_name.clone(),
+                })?;
+
+            let param = Rc::new(RefCell::new(None));
+            let phys_comparison = match comp_op {
+                rook_ast::ComparisonOp::Eq => ComparisonOp::Equals,
+                rook_ast::ComparisonOp::Ne => ComparisonOp::NotEquals,
+                rook_ast::ComparisonOp::Lt => ComparisonOp::LessThan,
+                rook_ast::ComparisonOp::Le => ComparisonOp::LessOrEqual,
+                rook_ast::ComparisonOp::Gt => ComparisonOp::GreaterThan,
+                rook_ast::ComparisonOp::Ge => ComparisonOp::GreaterOrEqual,
+            };
+
+            let col_pred = Predicate::Compare(
+                Expr::Column { table: None, column: inner_col_name.clone() },
+                phys_comparison,
+                Expr::CorrelatedParam(param.clone()),
+            );
+
+            filter_predicate = Some(match filter_predicate {
+                None => col_pred,
+                Some(acc) => Predicate::and(acc, col_pred),
+            });
+
+            params.push(param);
+            outer_indices.push(outer_col_idx);
+        }
+
+        let filtered_op: Box<dyn PhysicalOperator> = Box::new(FilterOperator::new(
+            inner_base,
+            filter_predicate.unwrap(),
+        ));
+
+        let has_aggregates = !select.group_by.is_empty()
+            || select.having.is_some()
+            || select.projections.iter().any(crate::planner::helpers::contains_aggregate);
+
+        let (mut op, data_type) = if has_aggregates {
+            let aggregates = crate::planner::helpers::extract_aggregates(&select.projections);
+            let log_agg = rook_ast::logical::LogicalAggregate {
+                child: Box::new(rook_ast::logical::LogicalPlan::TableScan(rook_ast::logical::LogicalTableScan {
+                    table: "".to_string(),
+                    alias: None,
+                    schema: rook_ast::logical::ColumnSchema::empty(),
+                    system_table_name: None,
+                })),
+                group_by: select.group_by.clone(),
+                aggregates,
+                having: select.having.clone(),
+            };
+            let agg_op = self.plan_aggregate_on_child(filtered_op, &log_agg)?;
+            let dt = agg_op.schema().first().map(|c| c.data_type.clone()).unwrap_or(DataType::Int);
+            (agg_op, dt)
+        } else {
+            let child_schema = filtered_op.schema();
+            let col_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
+            let col_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
+            let mut projections = Vec::new();
+            for p in &select.projections {
+                match p {
+                    rook_ast::SelectExpr::UnnamedExpr(e) => {
+                        let (expr, dt) = self.plan_projection_expr(e, &col_names, &col_types)?;
+                        projections.push((expr, "".to_string(), dt));
+                    }
+                    rook_ast::SelectExpr::ExprWithAlias { expr: e, alias } => {
+                        let (expr, dt) = self.plan_projection_expr(e, &col_names, &col_types)?;
+                        projections.push((expr, alias.clone(), dt));
+                    }
+                    _ => {}
+                }
+            }
+            let dt = projections.first().map(|(_, _, dt)| dt.clone()).unwrap_or(DataType::Int);
+            let proj_op: Box<dyn PhysicalOperator> = Box::new(ProjectionOperator::new(filtered_op, projections));
+            (proj_op, dt)
+        };
+
+        if let Some(ref l) = select.limit {
+            op = Box::new(LimitOperator::new(op, l.limit as usize, l.offset.unwrap_or(0) as usize));
+        }
+
+        let inner_plan_rc = Rc::new(RefCell::new(op));
+        Ok((
+            Expr::CorrelatedScalarSubquery {
+                inner_plan: inner_plan_rc,
+                params,
+                outer_col_indices: outer_indices,
+            },
+            data_type,
+        ))
     }
 
     /// Extract all (inner_column_name, outer_column_name, comparison_op) pairs
@@ -931,9 +1081,10 @@ impl PhysicalPlanner {
         inner_table_name: &str,
         inner_col_names: &[String],
     ) -> Option<String> {
+        let stripped = inner_table_name.strip_prefix("__cte__:").unwrap_or(inner_table_name);
         match expr {
             rook_ast::ExprNode::Compound(parts) if parts.len() >= 2 => {
-                if parts[0].eq_ignore_ascii_case(inner_table_name) {
+                if parts[0].eq_ignore_ascii_case(inner_table_name) || parts[0].eq_ignore_ascii_case(stripped) {
                     return Some(parts[1].clone());
                 }
                 None
@@ -961,10 +1112,11 @@ impl PhysicalPlanner {
         inner_table_name: &str,
         inner_col_names: &[String],
     ) -> Option<String> {
+        let stripped = inner_table_name.strip_prefix("__cte__:").unwrap_or(inner_table_name);
         match expr {
             rook_ast::ExprNode::Compound(parts) if parts.len() >= 2 => {
                 // Outer reference: table prefix does NOT match inner table
-                if !parts[0].eq_ignore_ascii_case(inner_table_name) {
+                if !parts[0].eq_ignore_ascii_case(inner_table_name) && !parts[0].eq_ignore_ascii_case(stripped) {
                     Some(parts[parts.len() - 1].clone())
                 } else {
                     None

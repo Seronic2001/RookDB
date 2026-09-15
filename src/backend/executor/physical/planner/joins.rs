@@ -209,6 +209,14 @@ impl PhysicalPlanner {
         cte_registry: &mut std::collections::HashMap<String, Vec<super::super::tuple::Tuple>>,
     ) -> RookResult<Box<dyn PhysicalOperator>> {
         let child = self.plan_internal(&a.child, cte_registry)?;
+        self.plan_aggregate_on_child(child, a)
+    }
+
+    pub(crate) fn plan_aggregate_on_child(
+        &self,
+        child: Box<dyn PhysicalOperator>,
+        a: &LogicalAggregate,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
         let child_schema = child.schema();
         let column_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
         let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();

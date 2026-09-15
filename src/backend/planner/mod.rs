@@ -289,7 +289,7 @@ fn plan_select_with_ctes(
     }
 
     for cte_def in &select.ctes {
-        let inner_plan = plan_select(&cte_def.query, catalog, db_name)?;
+        let inner_plan = plan_select_with_ctes(&cte_def.query, catalog, db_name, Some(&cte_registry))?;
         let schema = derive_schema(&inner_plan);
         cte_registry.insert(cte_def.name.to_ascii_lowercase(), (inner_plan, schema));
     }
