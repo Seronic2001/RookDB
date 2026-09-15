@@ -122,30 +122,62 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
             }
 
             Token::Word(w) => {
-                space_if_needed!(token, prev_was_word);
-                match w.quote_style {
-                    // Quoted identifiers: restore the original quoting so
-                    // downstream template parsing sees the same shape. They
-                    // are identifiers, not literals — never parameterized.
-                    Some('"') => {
-                        normalized.push('"');
-                        normalized.push_str(&w.value);
-                        normalized.push('"');
+                let is_predicate_or_constraint_null = {
+                    let mut k = i;
+                    let mut prev_word = None;
+                    while k > 0 {
+                        k -= 1;
+                        match &tokens[k] {
+                            Token::Whitespace(_) => continue,
+                            Token::Word(pw) => {
+                                prev_word = Some(pw.value.to_ascii_lowercase());
+                                break;
+                            }
+                            _ => break,
+                        }
                     }
-                    Some('`') => {
-                        normalized.push('`');
-                        normalized.push_str(&w.value);
-                        normalized.push('`');
+                    match prev_word.as_deref() {
+                        Some("is") | Some("not") => true,
+                        _ => false,
                     }
-                    Some('[') => {
-                        normalized.push('[');
-                        normalized.push_str(&w.value);
-                        normalized.push(']');
+                };
+
+                if w.quote_style.is_none()
+                    && w.value.eq_ignore_ascii_case("null")
+                    && !is_predicate_or_constraint_null
+                {
+                    space_if_needed!(token, prev_was_word);
+                    params.push("NULL".to_string());
+                    normalized.push('$');
+                    normalized.push_str(&params.len().to_string());
+                    prev_was_word = false;
+                    i += 1;
+                } else {
+                    space_if_needed!(token, prev_was_word);
+                    match w.quote_style {
+                        // Quoted identifiers: restore the original quoting so
+                        // downstream template parsing sees the same shape. They
+                        // are identifiers, not literals — never parameterized.
+                        Some('"') => {
+                            normalized.push('"');
+                            normalized.push_str(&w.value);
+                            normalized.push('"');
+                        }
+                        Some('`') => {
+                            normalized.push('`');
+                            normalized.push_str(&w.value);
+                            normalized.push('`');
+                        }
+                        Some('[') => {
+                            normalized.push('[');
+                            normalized.push_str(&w.value);
+                            normalized.push(']');
+                        }
+                        _ => normalized.push_str(&w.value),
                     }
-                    _ => normalized.push_str(&w.value),
+                    prev_was_word = true;
+                    i += 1;
                 }
-                prev_was_word = true;
-                i += 1;
             }
 
             // Numeric literal — the token value includes the sign when the
@@ -630,6 +662,10 @@ pub fn parse_insert_template(normalized_sql: &str, arity: usize) -> Option<Cache
                     | Token::NationalStringLiteral(_)
                     | Token::HexStringLiteral(_)
                     | Token::EscapedStringLiteral(_) => {
+                        count += 1;
+                        idx += 1;
+                    }
+                    Token::Word(w) if w.value.eq_ignore_ascii_case("null") => {
                         count += 1;
                         idx += 1;
                     }

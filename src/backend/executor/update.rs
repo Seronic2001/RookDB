@@ -117,40 +117,38 @@ fn apply_assignments_typed(
     columns: &[crate::catalog::types::Column],
     mut values: Vec<Option<DataValue>>,
     assignments: &[SetAssignment],
-) -> Vec<Option<DataValue>> {
+) -> Result<Vec<Option<DataValue>>, String> {
     for asgn in assignments {
-        let Some(target_idx) = columns.iter().position(|c| c.name.eq_ignore_ascii_case(&asgn.column)) else {
-            continue;
-        };
+        let target_idx = columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(&asgn.column))
+            .ok_or_else(|| format!("Column '{}' not found", asgn.column))?;
         let target_type = &columns[target_idx].data_type;
 
         let new_val: Option<DataValue> = match &asgn.expr {
             SetExpr::Null => None,
             SetExpr::Literal(cv) => match cv {
                 ColumnValue::Int(n) => match target_type {
-                    DataType::SmallInt => Some(DataValue::SmallInt(*n as i16)),
+                    DataType::SmallInt => {
+                        let val = i16::try_from(*n).map_err(|_| format!("Value {} out of range for SMALLINT", n))?;
+                        Some(DataValue::SmallInt(val))
+                    }
                     DataType::Int => Some(DataValue::Int(*n)),
                     DataType::BigInt => Some(DataValue::BigInt(*n as i64)),
                     DataType::Real => Some(DataValue::Real(OrderedF32(*n as f32))),
                     DataType::DoublePrecision => Some(DataValue::DoublePrecision(OrderedF64(*n as f64))),
                     DataType::Numeric { scale, .. } | DataType::Decimal { scale, .. } => {
-                        let factor = 10_i128.pow(*scale as u32);
+                        let factor = 10_i128.checked_pow(*scale as u32).ok_or_else(|| "Numeric scale overflow".to_string())?;
+                        let unscaled = (*n as i128).checked_mul(factor).ok_or_else(|| "Numeric overflow".to_string())?;
                         Some(DataValue::Numeric(crate::types::value::NumericValue {
-                            unscaled: *n as i128 * factor,
+                            unscaled,
                             scale: *scale,
                         }))
                     }
                     _ => Some(DataValue::Int(*n)),
                 },
                 ColumnValue::Text(s) => match target_type {
-                    DataType::Char(n) => {
-                        let mut padded = s.clone();
-                        if padded.len() < *n as usize {
-                            padded.push_str(&" ".repeat(*n as usize - padded.len()));
-                        }
-                        Some(DataValue::Char(padded))
-                    }
-                    DataType::Character(n) => {
+                    DataType::Char(n) | DataType::Character(n) => {
                         let mut padded = s.clone();
                         if padded.len() < *n as usize {
                             padded.push_str(&" ".repeat(*n as usize - padded.len()));
@@ -159,75 +157,181 @@ fn apply_assignments_typed(
                     }
                     DataType::Varchar(_) => Some(DataValue::Varchar(s.clone())),
                     DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
-                        crate::types::value::parse_numeric_literal(s, *precision, *scale)
-                            .ok()
-                            .map(DataValue::Numeric)
+                        let num = crate::types::value::parse_numeric_literal(s, *precision, *scale)
+                            .map_err(|e| format!("Invalid numeric literal '{}': {}", s, e))?;
+                        Some(DataValue::Numeric(num))
                     }
-                    _ => super::create_index::parse_string_to_value(target_type, s).ok(),
+                    _ => {
+                        let dv = super::create_index::parse_string_to_value(target_type, s)
+                            .map_err(|e| format!("Invalid value '{}' for type {:?}: {}", s, target_type, e))?;
+                        Some(dv)
+                    }
                 },
-                ColumnValue::List(_) => None,
+                ColumnValue::List(_) => return Err("Cannot assign list literal to column".to_string()),
             },
             SetExpr::Column(src_col) => {
-                if let Some(src_idx) = columns.iter().position(|c| c.name.eq_ignore_ascii_case(src_col)) {
-                    values[src_idx].clone()
-                } else {
-                    continue;
-                }
-            }
-            SetExpr::Expr { src_col, op, rhs_i, rhs_f } => {
-                let src_val = columns
+                let src_idx = columns
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(src_col))
-                    .and_then(|idx| values.get(idx).cloned().flatten());
+                    .ok_or_else(|| format!("Source column '{}' not found", src_col))?;
+                values[src_idx].clone()
+            }
+            SetExpr::Expr { src_col, op, rhs_i, rhs_f } => {
+                let src_idx = columns
+                    .iter()
+                    .position(|c| c.name.eq_ignore_ascii_case(src_col))
+                    .ok_or_else(|| format!("Source column '{}' not found", src_col))?;
+                let src_val = values.get(src_idx).cloned().flatten();
 
                 match src_val {
                     None => None, // SQL semantics: arithmetic on NULL produces NULL!
                     Some(DataValue::Int(n)) => {
                         let result = match op {
-                            ArithOp::Add => (n as i64 + rhs_i) as i32,
-                            ArithOp::Sub => (n as i64 - rhs_i) as i32,
-                            ArithOp::Mul => (n as f64 * rhs_f) as i32,
-                            ArithOp::Div => if *rhs_f == 0.0 { n } else { (n as f64 / rhs_f) as i32 },
+                            ArithOp::Add => {
+                                let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer addition overflow".to_string())?;
+                                n.checked_add(rhs).ok_or_else(|| "Integer addition overflow".to_string())?
+                            }
+                            ArithOp::Sub => {
+                                let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer subtraction overflow".to_string())?;
+                                n.checked_sub(rhs).ok_or_else(|| "Integer subtraction overflow".to_string())?
+                            }
+                            ArithOp::Mul => {
+                                if *rhs_f == (*rhs_i as f64) {
+                                    let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer multiplication overflow".to_string())?;
+                                    n.checked_mul(rhs).ok_or_else(|| "Integer multiplication overflow".to_string())?
+                                } else {
+                                    let f = (n as f64) * rhs_f;
+                                    if f.is_nan() || f < i32::MIN as f64 || f > i32::MAX as f64 {
+                                        return Err("Integer multiplication overflow".to_string());
+                                    }
+                                    f as i32
+                                }
+                            }
+                            ArithOp::Div => {
+                                if *rhs_f == 0.0 || *rhs_i == 0 {
+                                    return Err("Division by zero".to_string());
+                                }
+                                if *rhs_f == (*rhs_i as f64) {
+                                    let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer division overflow".to_string())?;
+                                    n.checked_div(rhs).ok_or_else(|| "Integer division overflow".to_string())?
+                                } else {
+                                    let f = (n as f64) / rhs_f;
+                                    if f.is_nan() || f < i32::MIN as f64 || f > i32::MAX as f64 {
+                                        return Err("Integer division overflow".to_string());
+                                    }
+                                    f as i32
+                                }
+                            }
                         };
                         Some(DataValue::Int(result))
                     }
                     Some(DataValue::SmallInt(n)) => {
                         let result = match op {
-                            ArithOp::Add => (n as i64 + rhs_i) as i16,
-                            ArithOp::Sub => (n as i64 - rhs_i) as i16,
-                            ArithOp::Mul => (n as f64 * rhs_f) as i16,
-                            ArithOp::Div => if *rhs_f == 0.0 { n } else { (n as f64 / rhs_f) as i16 },
+                            ArithOp::Add => {
+                                let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt addition overflow".to_string())?;
+                                n.checked_add(rhs).ok_or_else(|| "SmallInt addition overflow".to_string())?
+                            }
+                            ArithOp::Sub => {
+                                let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt subtraction overflow".to_string())?;
+                                n.checked_sub(rhs).ok_or_else(|| "SmallInt subtraction overflow".to_string())?
+                            }
+                            ArithOp::Mul => {
+                                if *rhs_f == (*rhs_i as f64) {
+                                    let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt multiplication overflow".to_string())?;
+                                    n.checked_mul(rhs).ok_or_else(|| "SmallInt multiplication overflow".to_string())?
+                                } else {
+                                    let f = (n as f64) * rhs_f;
+                                    if f.is_nan() || f < i16::MIN as f64 || f > i16::MAX as f64 {
+                                        return Err("SmallInt multiplication overflow".to_string());
+                                    }
+                                    f as i16
+                                }
+                            }
+                            ArithOp::Div => {
+                                if *rhs_f == 0.0 || *rhs_i == 0 {
+                                    return Err("Division by zero".to_string());
+                                }
+                                if *rhs_f == (*rhs_i as f64) {
+                                    let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt division overflow".to_string())?;
+                                    n.checked_div(rhs).ok_or_else(|| "SmallInt division overflow".to_string())?
+                                } else {
+                                    let f = (n as f64) / rhs_f;
+                                    if f.is_nan() || f < i16::MIN as f64 || f > i16::MAX as f64 {
+                                        return Err("SmallInt division overflow".to_string());
+                                    }
+                                    f as i16
+                                }
+                            }
                         };
                         Some(DataValue::SmallInt(result))
                     }
                     Some(DataValue::BigInt(n)) => {
                         let result = match op {
-                            ArithOp::Add => n + rhs_i,
-                            ArithOp::Sub => n - rhs_i,
-                            ArithOp::Mul => (n as f64 * rhs_f) as i64,
-                            ArithOp::Div => if *rhs_f == 0.0 { n } else { (n as f64 / rhs_f) as i64 },
+                            ArithOp::Add => n.checked_add(*rhs_i).ok_or_else(|| "BigInt addition overflow".to_string())?,
+                            ArithOp::Sub => n.checked_sub(*rhs_i).ok_or_else(|| "BigInt subtraction overflow".to_string())?,
+                            ArithOp::Mul => {
+                                if *rhs_f == (*rhs_i as f64) {
+                                    n.checked_mul(*rhs_i).ok_or_else(|| "BigInt multiplication overflow".to_string())?
+                                } else {
+                                    let f = (n as f64) * rhs_f;
+                                    if f.is_nan() || f < i64::MIN as f64 || f > i64::MAX as f64 {
+                                        return Err("BigInt multiplication overflow".to_string());
+                                    }
+                                    f as i64
+                                }
+                            }
+                            ArithOp::Div => {
+                                if *rhs_f == 0.0 || *rhs_i == 0 {
+                                    return Err("Division by zero".to_string());
+                                }
+                                if *rhs_f == (*rhs_i as f64) {
+                                    n.checked_div(*rhs_i).ok_or_else(|| "BigInt division overflow".to_string())?
+                                } else {
+                                    let f = (n as f64) / rhs_f;
+                                    if f.is_nan() || f < i64::MIN as f64 || f > i64::MAX as f64 {
+                                        return Err("BigInt division overflow".to_string());
+                                    }
+                                    f as i64
+                                }
+                            }
                         };
                         Some(DataValue::BigInt(result))
                     }
                     Some(DataValue::Real(r)) => {
                         let cur = r.0 as f64;
                         let result = match op {
-                            ArithOp::Add => cur + *rhs_i as f64,
-                            ArithOp::Sub => cur - *rhs_i as f64,
-                            ArithOp::Mul => cur * rhs_f,
-                            ArithOp::Div => if *rhs_f == 0.0 { cur } else { cur / rhs_f },
+                            ArithOp::Add => cur + *rhs_f,
+                            ArithOp::Sub => cur - *rhs_f,
+                            ArithOp::Mul => cur * *rhs_f,
+                            ArithOp::Div => {
+                                if *rhs_f == 0.0 {
+                                    return Err("Division by zero".to_string());
+                                }
+                                cur / *rhs_f
+                            }
                         };
                         Some(DataValue::Real(OrderedF32(result as f32)))
                     }
                     Some(DataValue::DoublePrecision(d)) => {
                         let cur = d.0;
                         let result = match op {
-                            ArithOp::Add => cur + *rhs_i as f64,
-                            ArithOp::Sub => cur - *rhs_i as f64,
-                            ArithOp::Mul => cur * rhs_f,
-                            ArithOp::Div => if *rhs_f == 0.0 { cur } else { cur / rhs_f },
+                            ArithOp::Add => cur + *rhs_f,
+                            ArithOp::Sub => cur - *rhs_f,
+                            ArithOp::Mul => cur * *rhs_f,
+                            ArithOp::Div => {
+                                if *rhs_f == 0.0 {
+                                    return Err("Division by zero".to_string());
+                                }
+                                cur / *rhs_f
+                            }
                         };
                         Some(DataValue::DoublePrecision(OrderedF64(result)))
+                    }
+                    Some(DataValue::Numeric(num)) => {
+                        if matches!(op, ArithOp::Div) && (*rhs_f == 0.0 || *rhs_i == 0) {
+                            return Err("Division by zero".to_string());
+                        }
+                        Some(DataValue::Numeric(num))
                     }
                     Some(DataValue::Varchar(s)) => {
                         let result = match op {
@@ -270,7 +374,7 @@ fn apply_assignments_typed(
 
         values[target_idx] = new_val;
     }
-    values
+    Ok(values)
 }
 
 struct PendingUpdate {
@@ -441,6 +545,37 @@ pub fn update_by_pointers(
     })?;
     let columns = &table.columns;
 
+    for asgn in assignments {
+        if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(&asgn.column)) {
+            log::warn!("[UpdateByPointers] Assignment column '{}' not found in table '{}'", asgn.column, table_name);
+            return Ok(UpdateResult {
+                updated_count: 0,
+                returning_rows: Vec::new(),
+            });
+        }
+        match &asgn.expr {
+            SetExpr::Column(src_col) => {
+                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) {
+                    log::warn!("[UpdateByPointers] Source column '{}' not found in table '{}'", src_col, table_name);
+                    return Ok(UpdateResult {
+                        updated_count: 0,
+                        returning_rows: Vec::new(),
+                    });
+                }
+            }
+            SetExpr::Expr { src_col, .. } => {
+                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) {
+                    log::warn!("[UpdateByPointers] Source column '{}' not found in table '{}'", src_col, table_name);
+                    return Ok(UpdateResult {
+                        updated_count: 0,
+                        returning_rows: Vec::new(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     let path = format!("database/base/{}/{}.dat", db_name, table_name);
     // UPDATE rewrites pages via direct I/O — flush/evict cached pool state
     // first so the raw reads observe every prior insert.
@@ -478,7 +613,13 @@ pub fn update_by_pointers(
             Ok(v) => v,
             Err(_) => continue,
         };
-        let updated_values = apply_assignments_typed(columns, decoded.clone(), assignments);
+        let updated_values = match apply_assignments_typed(columns, decoded.clone(), assignments) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("[UpdateByPointers] Skipping row due to assignment error: {}", e);
+                continue;
+            }
+        };
         let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
             Ok(b) => b,
             Err(_) => continue,
