@@ -520,6 +520,101 @@ impl PhysicalPlanner {
                 DataValue::Int(i) => Some(DataValue::Real(crate::types::value::OrderedF32(i as f32))),
                 _ => None,
             },
+            DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
+                match dv {
+                    DataValue::Numeric(num) => {
+                        if num.scale == *scale {
+                            Some(DataValue::Numeric(num))
+                        } else if num.scale < *scale {
+                            let diff = (*scale - num.scale) as u32;
+                            let factor = 10_i128.checked_pow(diff)?;
+                            let unscaled = num.unscaled.checked_mul(factor)?;
+                            Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                        } else {
+                            let diff = (num.scale - *scale) as u32;
+                            let factor = 10_i128.checked_pow(diff)?;
+                            Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled: num.unscaled / factor, scale: *scale }))
+                        }
+                    }
+                    DataValue::SmallInt(i) => {
+                        let factor = 10_i128.checked_pow(*scale as u32)?;
+                        let unscaled = (i as i128).checked_mul(factor)?;
+                        Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                    }
+                    DataValue::Int(i) => {
+                        let factor = 10_i128.checked_pow(*scale as u32)?;
+                        let unscaled = (i as i128).checked_mul(factor)?;
+                        Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                    }
+                    DataValue::BigInt(i) => {
+                        let factor = 10_i128.checked_pow(*scale as u32)?;
+                        let unscaled = (i as i128).checked_mul(factor)?;
+                        Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                    }
+                    DataValue::DoublePrecision(d) => {
+                        let s = format!("{}", d.0);
+                        crate::types::value::parse_numeric_literal(&s, *precision, *scale)
+                            .or_else(|_| {
+                                let s2 = format!("{:.prec$}", d.0, prec = *scale as usize);
+                                crate::types::value::parse_numeric_literal(&s2, *precision, *scale)
+                            })
+                            .ok()
+                            .map(DataValue::Numeric)
+                    }
+                    DataValue::Real(r) => {
+                        let s = format!("{}", r.0);
+                        crate::types::value::parse_numeric_literal(&s, *precision, *scale)
+                            .or_else(|_| {
+                                let s2 = format!("{:.prec$}", r.0, prec = *scale as usize);
+                                crate::types::value::parse_numeric_literal(&s2, *precision, *scale)
+                            })
+                            .ok()
+                            .map(DataValue::Numeric)
+                    }
+                    DataValue::Char(s) | DataValue::Varchar(s) => {
+                        crate::types::value::parse_numeric_literal(&s, *precision, *scale)
+                            .ok()
+                            .map(DataValue::Numeric)
+                    }
+                    _ => None,
+                }
+            }
+            DataType::Date => match dv {
+                DataValue::Date(d) => Some(DataValue::Date(d)),
+                DataValue::Varchar(s) | DataValue::Char(s) => {
+                    let trimmed = s.trim();
+                    chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+                        .ok()
+                        .map(DataValue::Date)
+                }
+                _ => None,
+            },
+            DataType::Timestamp => match dv {
+                DataValue::Timestamp(t) => Some(DataValue::Timestamp(t)),
+                DataValue::Varchar(s) | DataValue::Char(s) => {
+                    let trimmed = s.trim();
+                    chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f")
+                        .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S"))
+                        .or_else(|_| {
+                            chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+                                .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+                        })
+                        .ok()
+                        .map(DataValue::Timestamp)
+                }
+                _ => None,
+            },
+            DataType::Time => match dv {
+                DataValue::Time(t) => Some(DataValue::Time(t)),
+                DataValue::Varchar(s) | DataValue::Char(s) => {
+                    let trimmed = s.trim();
+                    chrono::NaiveTime::parse_from_str(trimmed, "%H:%M:%S%.f")
+                        .or_else(|_| chrono::NaiveTime::parse_from_str(trimmed, "%H:%M:%S"))
+                        .ok()
+                        .map(DataValue::Time)
+                }
+                _ => None,
+            },
             _ => Some(dv),
         }
     }

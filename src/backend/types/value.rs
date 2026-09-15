@@ -767,6 +767,10 @@ impl DataValue {
             DataValue::BigInt(v) => v.checked_add(1).map(DataValue::BigInt),
             DataValue::Real(v) => Some(DataValue::Real(OrderedF32(v.0.next_up()))),
             DataValue::DoublePrecision(v) => Some(DataValue::DoublePrecision(OrderedF64(v.0.next_up()))),
+            DataValue::Numeric(v) => v.unscaled.checked_add(1).map(|unscaled| {
+                DataValue::Numeric(NumericValue { unscaled, scale: v.scale })
+            }),
+            DataValue::Date(v) => v.succ_opt().map(DataValue::Date),
             _ => None,
         }
     }
@@ -781,6 +785,10 @@ impl DataValue {
             DataValue::BigInt(v) => v.checked_sub(1).map(DataValue::BigInt),
             DataValue::Real(v) => Some(DataValue::Real(OrderedF32(v.0.next_down()))),
             DataValue::DoublePrecision(v) => Some(DataValue::DoublePrecision(OrderedF64(v.0.next_down()))),
+            DataValue::Numeric(v) => v.unscaled.checked_sub(1).map(|unscaled| {
+                DataValue::Numeric(NumericValue { unscaled, scale: v.scale })
+            }),
+            DataValue::Date(v) => v.pred_opt().map(DataValue::Date),
             _ => None,
         }
     }

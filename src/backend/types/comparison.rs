@@ -233,17 +233,42 @@ impl Comparable for DataValue {
 
             // Exact decimal — normalise scales before comparing unscaled values
             (DataValue::Numeric(a), DataValue::Numeric(b)) => {
+                let scale_up = |unscaled: i128, diff: u32| -> Result<i128, Ordering> {
+                    if unscaled == 0 {
+                        return Ok(0);
+                    }
+                    let factor = 10_i128.checked_pow(diff);
+                    match factor.and_then(|f| unscaled.checked_mul(f)) {
+                        Some(val) => Ok(val),
+                        None => {
+                            if unscaled > 0 {
+                                Err(Ordering::Greater)
+                            } else {
+                                Err(Ordering::Less)
+                            }
+                        }
+                    }
+                };
+
                 let ordering = if a.scale == b.scale {
                     // Same scale: compare unscaled integers directly
                     a.unscaled.cmp(&b.unscaled)
                 } else if a.scale > b.scale {
                     // a has more fractional digits; scale up b to match
-                    let factor = 10_i128.pow((a.scale - b.scale) as u32);
-                    a.unscaled.cmp(&(b.unscaled * factor))
+                    match scale_up(b.unscaled, (a.scale - b.scale) as u32) {
+                        Ok(b_scaled) => a.unscaled.cmp(&b_scaled),
+                        Err(Ordering::Greater) => Ordering::Less,
+                        Err(Ordering::Less) => Ordering::Greater,
+                        Err(Ordering::Equal) => Ordering::Equal,
+                    }
                 } else {
                     // b has more fractional digits; scale up a to match
-                    let factor = 10_i128.pow((b.scale - a.scale) as u32);
-                    (a.unscaled * factor).cmp(&b.unscaled)
+                    match scale_up(a.unscaled, (b.scale - a.scale) as u32) {
+                        Ok(a_scaled) => a_scaled.cmp(&b.unscaled),
+                        Err(Ordering::Greater) => Ordering::Greater,
+                        Err(Ordering::Less) => Ordering::Less,
+                        Err(Ordering::Equal) => Ordering::Equal,
+                    }
                 };
                 Ok(ordering)
             }
@@ -287,6 +312,76 @@ impl Comparable for DataValue {
             // Cross-type temporal: TIME ↔ TIMESTAMP (extract time component from Timestamp)
             (DataValue::Time(a), DataValue::Timestamp(b)) => Ok(a.cmp(&b.time())),
             (DataValue::Timestamp(a), DataValue::Time(b)) => Ok(a.time().cmp(b)),
+
+            // Cross-type temporal: DATE ↔ VARCHAR/CHAR
+            (DataValue::Date(a), DataValue::Varchar(s)) | (DataValue::Date(a), DataValue::Char(s)) => {
+                let parsed = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+                    .map_err(|_| ComparisonError::TypeMismatch {
+                        left: "DATE".to_string(),
+                        right: "VARCHAR".to_string(),
+                    })?;
+                Ok(a.cmp(&parsed))
+            }
+            (DataValue::Varchar(s), DataValue::Date(b)) | (DataValue::Char(s), DataValue::Date(b)) => {
+                let parsed = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+                    .map_err(|_| ComparisonError::TypeMismatch {
+                        left: "VARCHAR".to_string(),
+                        right: "DATE".to_string(),
+                    })?;
+                Ok(parsed.cmp(b))
+            }
+
+            // Cross-type temporal: TIMESTAMP ↔ VARCHAR/CHAR
+            (DataValue::Timestamp(a), DataValue::Varchar(s)) | (DataValue::Timestamp(a), DataValue::Char(s)) => {
+                let raw = s.trim();
+                let parsed = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
+                    .or_else(|_| {
+                        chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+                            .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+                    })
+                    .map_err(|_| ComparisonError::TypeMismatch {
+                        left: "TIMESTAMP".to_string(),
+                        right: "VARCHAR".to_string(),
+                    })?;
+                Ok(a.cmp(&parsed))
+            }
+            (DataValue::Varchar(s), DataValue::Timestamp(b)) | (DataValue::Char(s), DataValue::Timestamp(b)) => {
+                let raw = s.trim();
+                let parsed = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
+                    .or_else(|_| {
+                        chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+                            .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+                    })
+                    .map_err(|_| ComparisonError::TypeMismatch {
+                        left: "VARCHAR".to_string(),
+                        right: "TIMESTAMP".to_string(),
+                    })?;
+                Ok(parsed.cmp(b))
+            }
+
+            // Cross-type temporal: TIME ↔ VARCHAR/CHAR
+            (DataValue::Time(a), DataValue::Varchar(s)) | (DataValue::Time(a), DataValue::Char(s)) => {
+                let raw = s.trim();
+                let parsed = chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
+                    .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S"))
+                    .map_err(|_| ComparisonError::TypeMismatch {
+                        left: "TIME".to_string(),
+                        right: "VARCHAR".to_string(),
+                    })?;
+                Ok(a.cmp(&parsed))
+            }
+            (DataValue::Varchar(s), DataValue::Time(b)) | (DataValue::Char(s), DataValue::Time(b)) => {
+                let raw = s.trim();
+                let parsed = chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
+                    .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S"))
+                    .map_err(|_| ComparisonError::TypeMismatch {
+                        left: "VARCHAR".to_string(),
+                        right: "TIME".to_string(),
+                    })?;
+                Ok(parsed.cmp(b))
+            }
 
             // BIT: lexicographic over the '0'/'1' string representation
             (DataValue::Bit(a), DataValue::Bit(b)) => Ok(a.cmp(b)),

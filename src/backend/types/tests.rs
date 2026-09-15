@@ -622,7 +622,7 @@ fn compare_date_chronological() {
 #[test]
 fn compare_type_mismatch_errors() {
     let a = DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap());
-    let b = DataValue::Varchar("2026-03-13".to_string());
+    let b = DataValue::Int(42);
     assert!(a.compare(&b).is_err());
 }
 
