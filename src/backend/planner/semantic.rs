@@ -148,7 +148,8 @@ fn resolve_expr_columns(
 /// Check if an expression contains only aggregate-free column references
 /// and constants (i.e., it can be pushed down to a filter).
 pub fn is_predicate_safe_for_pushdown(_predicate: &PredicateNode) -> bool {
-    // Always true for now — aggregate detection will be added in Step 3.
-    // The only unsafe predicates are those referencing aggregate results.
+    // Always true — predicates referencing aggregate results are rejected
+    // earlier (aggregates are only valid inside HAVING), so any predicate
+    // that reaches here is pushdown-safe.
     true
 }

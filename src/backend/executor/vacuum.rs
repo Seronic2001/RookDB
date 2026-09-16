@@ -1,5 +1,4 @@
-//! VACUUM — space reclamation for tables with soft-deleted rows
-//! (ANALYSIS.md Tier 2 #7).
+//! VACUUM — space reclamation for tables with soft-deleted rows.
 //!
 //! DELETE only flags slots as soft-deleted; the space stays reserved until
 //! a VACUUM pass physically rewrites the affected pages. This module wires

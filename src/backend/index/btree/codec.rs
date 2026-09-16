@@ -85,7 +85,7 @@ pub(crate) fn decode_key(data: &[u8], ty: &DataType) -> io::Result<(DataValue, u
 ///
 /// The outer envelope lets leaf serialisation/deserialisation treat the
 /// whole multi-segment key as a single opaque `[len][bytes]` entry, exactly
-/// like single-column keys (ANALYSIS.md Tier 2 #8).
+/// like single-column keys.
 pub(crate) fn encode_key_multi(values: &[DataValue]) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
     for v in values {

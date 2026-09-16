@@ -401,8 +401,6 @@ pub(crate) fn check_foreign_key_insert_meta(
 /// NULL results are UNKNOWN and therefore pass.
 /// Metadata-driven CHECK constraint check (hot path).
 ///
-/// Metadata-driven CHECK constraint check (hot path).
-///
 /// Fast path evaluates precompiled physical predicates stored in [`TableMeta`].
 /// If the table metadata was loaded before parser registration, it falls back
 /// to compiling via the registered hook.

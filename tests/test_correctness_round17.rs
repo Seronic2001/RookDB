@@ -177,9 +177,8 @@ fn ah_insert_with_composite_unique_index_does_not_crash() {
     let res = create_index_with_flags(&load_catalog(), db, "t", "uq_ab", &["a".into(), "b".into()], true, false);
     assert!(res.is_ok(), "composite unique index creation must succeed: {:?}", res);
 
-    // A tuple distinct in the composite key must be insertable — this
-    // currently PANICS inside check_unique_insert_meta (key arity 1 vs
-    // index arity 2).
+    // A tuple distinct in the composite key must be insertable — this used
+    // to panic inside check_unique_insert_meta (key arity 1 vs index arity 2).
     let result = insert_single_tuple(&load_catalog(), db, "t", &["1", "3", "'y'"]);
     assert!(
         matches!(result, Ok(true)),
@@ -242,8 +241,8 @@ fn ai_update_respects_varchar_length_limit() {
         scan,
         Ok(vec![vec!["'abc'".to_string()]]),
         "the row must remain readable with its original value after the \
-         rejected UPDATE — got {:?} (currently: deserialization failure \
-         'VARCHAR payload length 7 exceeds declared limit 5')",
+         rejected UPDATE — got {:?} (the historical failure mode was \
+         deserialization error 'VARCHAR payload length 7 exceeds declared limit 5')",
         scan
     );
 }

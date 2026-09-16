@@ -298,7 +298,7 @@ fn plan_select_with_ctes(
     // identifiers like `e.name` carry the real table name downstream.
     // Scan operators stamp tuple columns with real table names, and the
     // runtime resolver matches on them — an unresolved alias would make
-    // every aliased JOIN reference fail (ANALYSIS.md Tier 1 #4).
+    // every aliased JOIN reference fail.
     //
     // NOTE: this mutates only a clone; CTE bodies are planned recursively
     // with their own scope and are not affected.

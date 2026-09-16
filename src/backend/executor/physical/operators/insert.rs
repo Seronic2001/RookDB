@@ -1,10 +1,14 @@
 //! InsertOperator — Inserts tuples from a child operator into a table.
 //!
-//! Used for `INSERT INTO ... SELECT`. The child operator produces rows from the
-//! SELECT query, and this operator inserts each row into the target table using
-//! the existing `insert_single_tuple` function.
+//! Used for `INSERT INTO ... SELECT` and the `VALUES` form (via the
+//! `ValuesOperator` child). The child operator produces rows, and this
+//! operator inserts each row using `insert_single_tuple_with_location`,
+//! which returns the heap pointer needed for rollback.
 //!
 //! The operator returns each inserted tuple so the engine can report the count.
+//! Statement atomicity: the pointers of all rows inserted so far are tracked;
+//! if any later row fails, those rows are deleted again before the error
+//! propagates.
 
 use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::Expr;

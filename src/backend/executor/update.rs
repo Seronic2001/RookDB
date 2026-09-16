@@ -1,10 +1,12 @@
-//! Implements UPDATE with SET assignments, optional WHERE conditions, and RETURNING support.
+//! Implements UPDATE with SET assignments and optional WHERE conditions.
 //!
 //! Supports:
 //!   UPDATE table SET col = val;
 //!   UPDATE table SET col = val WHERE other = x;
 //!   UPDATE table SET col1 = val1, col2 = val2 WHERE id > 5;
 //!   UPDATE table SET col = val WHERE (a = 1 AND b = 2) OR c = 3;
+//!
+//! ("Print updated rows?" is an interactive frontend prompt, not SQL RETURNING.)
 //!
 //! UPDATE is implemented using delete + insert semantics for latest-version wins.
 //! Rows with the SLOT_FLAG_DELETED bit set are invisible and are never updated.

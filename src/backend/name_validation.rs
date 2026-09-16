@@ -2,8 +2,7 @@
 //!
 //! Database and table names are interpolated directly into filesystem paths
 //! (`database/base/{db}/{table}.dat`), so an unsanitised name containing
-//! `/`, `\`, `..`, or null bytes could escape the data directory
-//! (see ANALYSIS.md Tier 1 #5, "Path sanitisation").
+//! `/`, `\`, `..`, or null bytes could escape the data directory.
 //!
 //! Every CREATE/DROP entry point validates names through [`validate_identifier`]
 //! before any filesystem work happens.

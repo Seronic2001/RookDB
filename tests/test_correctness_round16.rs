@@ -354,7 +354,7 @@ fn af2_correlated_scalar_in_select_list_and_having() {
         ]),
         "BUG AF2 CONFIRMED (select list): correlated scalar subquery in the \
          SELECT list returned {:?} — expected per-dept maxima 100/200/300/400 \
-         (currently errors with `Column 'dept' not found`)",
+         (the historical failure mode was `Column 'dept' not found`)",
         select_list
     );
 

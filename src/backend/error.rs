@@ -1,5 +1,4 @@
-//! Typed error hierarchy for programmatic error handling
-//! (ANALYSIS.md Tier 1 #2).
+//! Typed error hierarchy for programmatic error handling.
 //!
 //! Historically every fallible API returned `Result<T, String>`, forcing
 //! callers to string-match to distinguish a constraint violation from an

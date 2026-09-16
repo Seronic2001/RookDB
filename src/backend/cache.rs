@@ -4,9 +4,8 @@
 //!
 //! * `HeapManager::open` twice per row (file open + header read + FSM open)
 //!   and the flush-on-last-drop of the shared buffer pool after every row.
-//! * 5+ full scans of the system tables per row (`resolve_table_id`,
-//!   `load_unique_indexes`, `load_foreign_keys`, `load_check_constraints`,
-//!   `discover_indexes_for_table`), deserialising every catalog row each time.
+//! * 5+ full scans of the system tables per row (`resolve_table_id`, FK and
+//!   CHECK loaders, index discovery), deserialising every catalog row each time.
 //! * `BTree::open` plus `sync_all()` (fsync) once per row per index.
 //!
 //! This module keeps small process-wide registries so those costs are paid
@@ -25,7 +24,7 @@
 //! * `checkpoint()` is cheap when nothing is dirty and is safe to call often;
 //!   callers include statement boundaries, the CLI exit path and benchmarks.
 //! * External rewrites of a heap file (VACUUM) and `HeapManager::create`
-//!   evict the affected entries via [`evict_heap`] / `evict_all_heaps`.
+//!   evict the affected entries via [`evict_heap`] / [`evict_btree`].
 //! * Any DDL that rewrites system tables invalidates [`metadata`] /
 //!   `indexes` caches via [`invalidate_metadata`].
 

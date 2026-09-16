@@ -196,7 +196,8 @@ pub fn load_catalog_from_system() -> Catalog {
     // Scan sys_constraints so per-column flags (NOT NULL / UNIQUE / CHECK)
     // can be restored onto the rebuilt `Column` structs below.
     //
-    // CRITICAL FIX (see ANALYSIS.md Tier 1 #1): without this mapping every
+    // CRITICAL FIX (historical: ANALYSIS.md's "constraint persistence" item):
+    // without this mapping every
     // Column was rebuilt with `Constraints::default()`, silently disabling
     // NOT NULL/UNIQUE validation after any process restart.
     let constraints = match scan_system_table("constraints", SYS_CONSTRAINTS_SCHEMA) {
@@ -351,11 +352,15 @@ pub fn load_catalog_from_system() -> Catalog {
                         }
                         if constr_type.contains("PRIMARY KEY") {
                             constraints.not_null = true;
-                            constraints.unique = true;
+                            if !columns_field.contains(',') {
+                                constraints.unique = true;
+                            }
                         } else if constr_type.contains("NOT NULL") {
                             constraints.not_null = true;
                         } else if constr_type == "UNIQUE" {
-                            constraints.unique = true;
+                            if !columns_field.contains(',') {
+                                constraints.unique = true;
+                            }
                         }
                     }
                 }

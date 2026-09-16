@@ -23,9 +23,13 @@ use super::helpers::{ast_expr_to_output_name, infer_expr_type_from_ast};
 impl PhysicalPlanner {
     /// Plan a join logical node into a physical operator.
     ///
-    /// Uses NestedLoopJoin for all join types. HashJoin will be added
-    /// in a future optimisation pass when we can reliably decompose
-    /// equality conditions from mixed predicates.
+    /// Three-tier algorithm selection (see `plan_join_with_ctes` body):
+    /// 1. IndexNestedLoopJoin — inner side is a plain table scan with an index
+    ///    on the join key, join is INNER/LEFT, outer side is small.
+    /// 2. HashJoin — INNER join with at least one cross-side equality conjunct;
+    ///    leftover conjuncts become a residual post-join filter.
+    /// 3. NestedLoopJoin — universal fallback for every other join type
+    ///    (RIGHT/FULL/CROSS/NATURAL) and every predicate shape.
     pub(crate) fn plan_join_with_ctes(
         &self,
         j: &LogicalJoin,
@@ -99,7 +103,7 @@ impl PhysicalPlanner {
         );
 
         // 1. Try IndexNestedLoopJoin when inner side is a single-table scan with an index on the join key
-        // and outer side is small (O3 in DEEP_DIVE.md).
+        // and outer side is small.
         if matches!(join_type, PhysicalJoinType::Inner | PhysicalJoinType::Left)
             && let Some(pred) = &predicate {
                 let left_schema = left.schema().to_vec();

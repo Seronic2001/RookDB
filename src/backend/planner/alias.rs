@@ -1,4 +1,4 @@
-//! Table-alias rewriting for SELECT planning (ANALYSIS.md Tier 1 #4).
+//! Table-alias rewriting for SELECT planning.
 //!
 //! SQL allows qualifying columns with FROM/JOIN aliases:
 //!

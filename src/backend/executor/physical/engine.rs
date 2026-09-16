@@ -127,7 +127,7 @@ fn print_plan_recursive(plan: &LogicalPlan, depth: usize) {
             print_plan_recursive(&j.right, depth + 1);
         }
         LogicalPlan::SetOp(s) => {
-            println!("{}├─ SetOp {:?} (not yet implemented)", indent, s.op);
+            println!("{}├─ SetOp {:?}", indent, s.op);
             print_plan_recursive(&s.left, depth + 1);
             print_plan_recursive(&s.right, depth + 1);
         }

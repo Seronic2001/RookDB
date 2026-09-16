@@ -179,7 +179,7 @@ pub enum IndexScanMode {
     /// Exact point lookup: only tuples matching this key.
     PointLookup(DataValue),
     /// Exact lookup on a composite key: one value per key segment, all
-    /// matched with equality (ANALYSIS.md Tier 2 #8).
+    /// matched with equality.
     CompositePointLookup(Vec<DataValue>),
     /// Range scan: all tuples with keys in `[low, high]` inclusive.
     RangeLookup(DataValue, DataValue),

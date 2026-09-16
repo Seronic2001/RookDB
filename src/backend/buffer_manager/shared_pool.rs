@@ -1,4 +1,4 @@
-//! Process-wide shared buffer pools (ANALYSIS.md Tier 2 #9).
+//! Process-wide shared buffer pools.
 //!
 //! Every `HeapManager::open()` used to allocate a private 128/64-frame
 //! [`BufferPool`]. Two managers opened on the same `.dat` file therefore held

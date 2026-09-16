@@ -5,13 +5,17 @@
 //!
 //! 1. **Constant folding** — Evaluate constant sub-expressions at plan time.
 //! 2. **Predicate pushdown** — Push `LogicalFilter` below `Project`, `Sort`,
-//!    `Distinct`, and merge consecutive filters.
+//!    `Distinct`, into join children (never into the null-supplying side of an
+//!    outer join), and merge consecutive filters.
 //! 3. **Projection pruning** — Remove columns from `LogicalTableScan` that are
 //!    not referenced by any ancestor node.
-//! 4. **Limit pushdown** — Push `LogicalLimit` through `LogicalSort` so the
+//! 4. **Sort hoisting** — Move `Sort` below `Project` when the sort keys
+//!    survive the projection.
+//! 5. **Limit pushdown** — Push `LogicalLimit` through `LogicalSort` so the
 //!    sort operator can use a bounded heap.
-//! 5. **Join order heuristics** — Reorder joins so the smallest estimated table
-//!    is on the left (build side of hash join).
+//! 6. **Join order heuristics** — Reorder joins so the smallest estimated table
+//!    is on the left (build side of hash join). Requires statistics; skipped
+//!    otherwise.
 
 pub mod helpers;
 #[cfg(test)]
@@ -56,8 +60,9 @@ impl Optimizer {
     /// 1. Constant folding (pre-pass to simplify expressions)
     /// 2. Predicate pushdown
     /// 3. Projection pruning
-    /// 4. Limit pushdown
-    /// 5. Join ordering (only when statistics are available)
+    /// 4. Sort hoisting
+    /// 5. Limit pushdown
+    /// 6. Join ordering (only when statistics are available)
     pub fn optimize(&self, plan: LogicalPlan) -> LogicalPlan {
         let plan = self.constant_folding(plan);
         let plan = self.predicate_pushdown(plan);
