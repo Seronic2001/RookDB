@@ -192,8 +192,9 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
         .map(|col| format!("{}: {}", col.name, col.data_type))
         .collect();
 
-    // Determine row number column width (e.g. 3 for <= 999 rows)
-    let row_num_width = std::cmp::max(3, format!("{}", tuples.len()).len());
+    // Determine row number column width
+    let row_header = "row number";
+    let row_num_width = std::cmp::max(row_header.len(), format!("{}", tuples.len()).len());
 
     // Compute width per column: max of header length and data value lengths (clamped between 4 and 40)
     let mut col_widths = Vec::with_capacity(col_count);
@@ -234,7 +235,7 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
     }
 
     println!("{}", top_border);
-    print!("│ {:width$} │", "", width = row_num_width);
+    print!("│ {:<width$} │", row_header, width = row_num_width);
     for idx in 0..col_count {
         let display = &headers[idx];
         let w = col_widths[idx];
