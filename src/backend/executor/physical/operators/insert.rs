@@ -62,6 +62,7 @@ impl InsertOperator {
         let inserter: InsertInserter = Box::new(move |vals| {
             match crate::backend::executor::load_csv::insert_single_tuple_with_location(&cat, &db, &tbl, vals) {
                 Ok(Some(ptr)) => {
+                    log::info!("[Insert] Inserted tuple into table '{}' at (page={}, slot={})", tbl, ptr.0, ptr.1);
                     ptrs_clone.borrow_mut().push(ptr);
                     Ok(())
                 }

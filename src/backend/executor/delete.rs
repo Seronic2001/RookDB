@@ -329,6 +329,11 @@ pub fn delete_by_pointers(
         write_page(&mut file, &mut page, page_num)?;
         let _ = vm_clear_page(db_name, table_name, page_num);
 
+        log::info!(
+            "[Delete] Soft-deleted slot (page={}, slot={}), updated index and cleared VM",
+            page_num, slot_idx
+        );
+
         returning_rows.push(
             decoded.iter().map(|(col, val)| {
                 let s = match val {

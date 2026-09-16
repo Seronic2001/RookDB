@@ -181,17 +181,47 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
     }
 
     let col_count = schema.len();
+    if col_count == 0 {
+        println!("({} rows)\n", tuples.len());
+        return tuples.len();
+    }
 
-    // Compute column widths
-    let col_width = 22usize;
+    // Format column headers
+    let headers: Vec<String> = schema
+        .iter()
+        .map(|col| format!("{}: {}", col.name, col.data_type))
+        .collect();
 
-    // Build borders
-    let mut top_border = String::from("┌");
-    let mut mid_border = String::from("├");
-    let mut bot_border = String::from("└");
+    // Determine row number column width (e.g. 3 for <= 999 rows)
+    let row_num_width = std::cmp::max(3, format!("{}", tuples.len()).len());
+
+    // Compute width per column: max of header length and data value lengths (clamped between 4 and 40)
+    let mut col_widths = Vec::with_capacity(col_count);
+    for idx in 0..col_count {
+        let header_len = headers[idx].chars().count();
+        let max_val_len = tuples
+            .iter()
+            .map(|t| {
+                t.values
+                    .get(idx)
+                    .and_then(|v| v.as_ref())
+                    .map(|v| format!("{}", v).chars().count())
+                    .unwrap_or(4) // "NULL"
+            })
+            .max()
+            .unwrap_or(0);
+        let w = std::cmp::max(header_len, max_val_len).clamp(4, 40);
+        col_widths.push(w);
+    }
+
+    // Build borders with row number column included
+    let row_pad = "─".repeat(row_num_width + 2);
+    let mut top_border = format!("┌{}┬", row_pad);
+    let mut mid_border = format!("├{}┼", row_pad);
+    let mut bot_border = format!("└{}┴", row_pad);
 
     for idx in 0..col_count {
-        let line = "─".repeat(col_width + 2);
+        let line = "─".repeat(col_widths[idx] + 2);
         if idx < col_count - 1 {
             top_border.push_str(&format!("{}┬", line));
             mid_border.push_str(&format!("{}┼", line));
@@ -204,30 +234,32 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
     }
 
     println!("{}", top_border);
-    print!("│");
-    for col in schema.iter() {
-        let display = format!("{}: {}", col.name, col.data_type);
-        let truncated = if display.len() > col_width {
-            format!("{}…", &display[..col_width - 1])
+    print!("│ {:width$} │", "", width = row_num_width);
+    for idx in 0..col_count {
+        let display = &headers[idx];
+        let w = col_widths[idx];
+        let truncated = if display.chars().count() > w {
+            format!("{}…", display.chars().take(w - 1).collect::<String>())
         } else {
-            display
+            display.clone()
         };
-        print!(" {:<width$} │", truncated, width = col_width);
+        print!(" {:<width$} │", truncated, width = w);
     }
     println!();
     println!("{}", mid_border);
 
     for (row_idx, tuple) in tuples.iter().enumerate() {
-        print!("│ {:>3} │", row_idx + 1);
-        for val_opt in &tuple.values {
-            let display = match val_opt {
+        print!("│ {:>width$} │", row_idx + 1, width = row_num_width);
+        for idx in 0..col_count {
+            let w = col_widths[idx];
+            let display = match tuple.values.get(idx).and_then(|v| v.as_ref()) {
                 Some(val) => format!("{}", val),
                 None => "NULL".to_string(),
             };
-            if display.len() > col_width {
-                print!(" {}… │", &display[..col_width - 1]);
+            if display.chars().count() > w {
+                print!(" {}… │", display.chars().take(w - 1).collect::<String>());
             } else {
-                print!(" {:<width$} │", display, width = col_width);
+                print!(" {:<width$} │", display, width = w);
             }
         }
         println!();

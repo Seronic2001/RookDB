@@ -696,6 +696,11 @@ pub fn update_by_pointers(
             });
         }
 
+        log::info!(
+            "[Update] Validated row at (page={}, slot={}): updated_decoded={:?}",
+            page_num, slot_idx, updated_decoded
+        );
+
         pending_updates.push(PendingUpdate {
             pointer: TuplePointer { page_id: page_num, slot_index },
             old_tuple_data: tuple_data,
@@ -809,6 +814,11 @@ pub fn update_by_pointers(
             let (new_page_id, new_slot_id) = crate::backend::executor::compaction_api::insert_raw_tuple(
                 db_name, table_name, &update.new_bytes,
             )?;
+
+            log::info!(
+                "[Update] Marked old slot (page={}, slot={}) as deleted, appended new version at (page={}, slot={})",
+                update.pointer.page_id, update.pointer.slot_index, new_page_id, new_slot_id
+            );
 
             if let Err(e) = crate::backend::executor::create_index::update_index_on_update(
                 db_name, table_name, columns,

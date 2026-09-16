@@ -317,16 +317,12 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
             Ok(mut file) => {
                 log::info!("Table data file created at '{}'.", table_file_path);
 
-                println!("Table data file created at '{}'.", table_file_path);
-
                 if let Err(e) = init_table(&mut file) {
                     log::error!("Failed to initialize table '{}': {}", table_name, e);
 
                     println!("Failed to initialize table '{}': {}", table_name, e);
                 } else {
                     log::info!("Table '{}' initialized successfully.", table_name);
-
-                    println!("Table '{}' initialized successfully.", table_name);
                 }
             }
 
@@ -348,17 +344,9 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
         }
     } else {
         log::info!("Table data file '{}' already exists.", table_file_path);
-
-        println!("Table data file '{}' already exists.", table_file_path);
     }
 
     log::info!(
-        "Table '{}' created successfully in database '{}' and saved to catalog.",
-        table_name,
-        db_name
-    );
-
-    println!(
         "Table '{}' created successfully in database '{}' and saved to catalog.",
         table_name,
         db_name

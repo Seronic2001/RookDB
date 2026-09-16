@@ -146,14 +146,22 @@ pub fn show_tuples(
             let schema_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
             match deserialize_nullable_row(&schema_types, tuple_data) {
                 Ok(values) => {
-                    for (col, val_opt) in columns.iter().zip(values.iter()) {
-                        match val_opt {
-                            Some(val) => print!("{}={} ", col.name, val),
-                            None => print!("{}=NULL ", col.name),
+                    for val_opt in values.iter() {
+                        let display = match val_opt {
+                            Some(val) => format!("{}", val),
+                            None => "NULL".to_string(),
+                        };
+                        if display.len() > col_width {
+                            print!(" {}… │", &display[..col_width - 1]);
+                        } else {
+                            print!(" {:<width$} │", display, width = col_width);
                         }
                     }
                 }
-                Err(e) => print!("<decode-error: {}> ", e),
+                Err(e) => {
+                    let err_str = format!("<err:{}>", e);
+                    print!(" {:<width$} │", err_str, width = col_width);
+                }
             }
 
             println!();
