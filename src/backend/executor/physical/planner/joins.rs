@@ -120,7 +120,7 @@ impl PhysicalPlanner {
                         ).unwrap_or_default();
 
                         let matched_idx = named_indexes.iter().find(|(_, cols, _)| {
-                            cols.first().map(|c| c.eq_ignore_ascii_case(inner_col)).unwrap_or(false)
+                            cols.len() == 1 && cols.first().map(|c| c.eq_ignore_ascii_case(inner_col)).unwrap_or(false)
                         });
 
                         let outer_card = left.estimate_cardinality();
