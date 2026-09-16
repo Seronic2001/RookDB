@@ -21,17 +21,25 @@ use crate::backend::error::{RookError, RookResult};
 /// without requiring a real catalog and database files.
 pub(crate) type InsertInserter = Box<dyn FnMut(&[&str]) -> Result<(), String>>;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 /// Insert operator that writes child tuples into a table.
 ///
 /// Streams rows one at a time: each call to `next()` pulls one tuple from the
 /// child (SELECT), inserts it via an injectable inserter, and returns it.
-/// The engine counts returned tuples, so the reported count matches the number
-/// of rows actually inserted.
+/// If any row fails during insertion, all previously inserted rows in the statement
+/// are rolled back (deleted) to preserve SQL statement atomicity.
 pub struct InsertOperator {
     child: Box<dyn PhysicalOperator>,
     /// Schema of the child (used for operator contract).
     child_schema: Vec<ColumnInfo>,
-    /// Injectable insert function. Defaults to wrapping `insert_single_tuple`.
+    table: Option<String>,
+    db_name: Option<String>,
+    catalog: Option<crate::catalog::types::Catalog>,
+    inserted_pointers: Rc<RefCell<Vec<(u32, u32)>>>,
+    completed: bool,
+    /// Injectable insert function. Defaults to wrapping `insert_single_tuple_with_location`.
     /// In tests, can be replaced with a mock for isolated unit testing.
     inserter: InsertInserter,
 }
@@ -45,15 +53,19 @@ impl InsertOperator {
     ) -> Self {
         let child_schema = child.schema().to_vec();
 
-        // Build the default inserter that wraps insert_single_tuple.
-        // We clone the data needed by the closure so it's self-contained.
+        // Build the default inserter that wraps insert_single_tuple_with_location.
         let cat = catalog.clone();
         let tbl = table.clone();
         let db = db_name.clone();
+        let inserted_pointers = Rc::new(RefCell::new(Vec::new()));
+        let ptrs_clone = inserted_pointers.clone();
         let inserter: InsertInserter = Box::new(move |vals| {
-            match crate::backend::executor::insert_single_tuple(&cat, &db, &tbl, vals) {
-                Ok(true) => Ok(()),
-                Ok(false) => Err("Constraint violation or invalid data".to_string()),
+            match crate::backend::executor::load_csv::insert_single_tuple_with_location(&cat, &db, &tbl, vals) {
+                Ok(Some(ptr)) => {
+                    ptrs_clone.borrow_mut().push(ptr);
+                    Ok(())
+                }
+                Ok(None) => Err("Constraint violation or invalid data".to_string()),
                 Err(e) => Err(format!("Insert error: {}", e)),
             }
         });
@@ -61,7 +73,44 @@ impl InsertOperator {
         Self {
             child,
             child_schema,
+            table: Some(table),
+            db_name: Some(db_name),
+            catalog: Some(catalog),
+            inserted_pointers,
+            completed: false,
             inserter,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn for_test(child: Box<dyn PhysicalOperator>, inserter: InsertInserter) -> Self {
+        let child_schema = child.schema().to_vec();
+        Self {
+            child,
+            child_schema,
+            table: None,
+            db_name: None,
+            catalog: None,
+            inserted_pointers: Rc::new(RefCell::new(Vec::new())),
+            completed: false,
+            inserter,
+        }
+    }
+
+    fn rollback(&mut self) {
+        let ptrs: Vec<(u32, u32)> = self.inserted_pointers.borrow_mut().drain(..).collect();
+        if !ptrs.is_empty() {
+            if let (Some(cat), Some(db), Some(tbl)) = (&self.catalog, &self.db_name, &self.table) {
+                let _ = crate::backend::executor::delete::delete_by_pointers(cat, db, tbl, &ptrs);
+            }
+        }
+    }
+}
+
+impl Drop for InsertOperator {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.rollback();
         }
     }
 }
@@ -69,8 +118,8 @@ impl InsertOperator {
 impl PhysicalOperator for InsertOperator {
     fn next(&mut self) -> RookResult<Option<Tuple>> {
         // Pull one tuple from child, insert it, return it
-        match self.child.next()? {
-            Some(tuple) => {
+        match self.child.next() {
+            Ok(Some(tuple)) => {
                 // Convert tuple values to string slices for the inserter
                 let value_strs: Vec<String> = tuple
                     .values
@@ -83,11 +132,22 @@ impl PhysicalOperator for InsertOperator {
 
                 let value_refs: Vec<&str> = value_strs.iter().map(|s| s.as_str()).collect();
 
-                // Call the injectable inserter (in production, wraps insert_single_tuple)
-                (self.inserter)(&value_refs)?;
+                // Call the injectable inserter (in production, wraps insert_single_tuple_with_location)
+                if let Err(e) = (self.inserter)(&value_refs) {
+                    self.rollback();
+                    return Err(RookError::Internal(e));
+                }
                 Ok(Some(tuple))
             }
-            None => Ok(None),
+            Ok(None) => {
+                self.completed = true;
+                self.inserted_pointers.borrow_mut().clear();
+                Ok(None)
+            }
+            Err(e) => {
+                self.rollback();
+                Err(e)
+            }
         }
     }
 
@@ -96,6 +156,8 @@ impl PhysicalOperator for InsertOperator {
     }
 
     fn reset(&mut self) -> RookResult<()> {
+        self.rollback();
+        self.completed = false;
         self.child.reset()?;
         Ok(())
     }
@@ -246,11 +308,10 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![]);
         let child = MockChild::new(tuples, schema);
 
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(|_| Ok(())),
-        };
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(|_| Ok(())),
+        );
 
         assert!(op.next().unwrap().is_none());
     }
@@ -263,14 +324,13 @@ mod tests {
 
         let inserted: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
         let ins = inserted.clone();
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(move |vals| {
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(move |vals| {
                 ins.borrow_mut().push(vals.iter().map(|s| s.to_string()).collect());
                 Ok(())
             }),
-        };
+        );
 
         let t = op.next().unwrap().unwrap();
         assert_eq!(t.values[0], Some(DataValue::Int(1)));
@@ -292,14 +352,13 @@ mod tests {
 
         let inserted: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
         let ins = inserted.clone();
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(move |vals| {
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(move |vals| {
                 ins.borrow_mut().push(vals.iter().map(|s| s.to_string()).collect());
                 Ok(())
             }),
-        };
+        );
 
         let t1 = op.next().unwrap().unwrap();
         assert_eq!(t1.values[0], Some(DataValue::Int(1)));
@@ -333,11 +392,10 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![(Some(1), Some(10))]);
         let child = MockChild::new(tuples, schema);
 
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(|_| Err("Constraint violation: duplicate key".to_string())),
-        };
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(|_| Err("Constraint violation: duplicate key".to_string())),
+        );
 
         let result = op.next();
         match result {
@@ -364,10 +422,9 @@ mod tests {
 
         let call_count: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
         let cc = call_count.clone();
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(move |_| {
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(move |_| {
                 let cnt = *cc.borrow();
                 *cc.borrow_mut() += 1;
                 if cnt == 1 {
@@ -377,7 +434,7 @@ mod tests {
                     Ok(())
                 }
             }),
-        };
+        );
 
         // First call succeeds
         let t1 = op.next().unwrap().unwrap();
@@ -398,15 +455,14 @@ mod tests {
 
         let inserted: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
         let ins = inserted.clone();
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(move |vals| {
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(move |vals| {
                 let strs: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
                 ins.borrow_mut().push(strs);
                 Ok(())
             }),
-        };
+        );
 
         // First tuple: (1, NULL)
         let t1 = op.next().unwrap().unwrap();
@@ -431,15 +487,14 @@ mod tests {
 
         let inserted: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
         let ins = inserted.clone();
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(move |vals| {
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(move |vals| {
                 let strs: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
                 ins.borrow_mut().push(strs);
                 Ok(())
             }),
-        };
+        );
 
         let t = op.next().unwrap().unwrap();
         assert_eq!(t.values[0], None);
@@ -460,14 +515,13 @@ mod tests {
 
         let count: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
         let cnt = count.clone();
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(move |_vals| {
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(move |_vals| {
                 *cnt.borrow_mut() += 1;
                 Ok(())
             }),
-        };
+        );
 
         // First pass: insert both tuples
         assert!(op.next().unwrap().is_some());
@@ -493,11 +547,10 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![(Some(1), Some(10))]);
         let child = MockChild::new(tuples, schema.clone());
 
-        let mut op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(|_| Ok(())),
-        };
+        let mut op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(|_| Ok(())),
+        );
 
         // Clone to avoid borrow conflict with next()
         let schema = op.schema().to_vec();
@@ -525,11 +578,10 @@ mod tests {
         ]);
         let child = MockChild::new(tuples, schema);
 
-        let op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(|_| Ok(())),
-        };
+        let op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(|_| Ok(())),
+        );
 
         assert_eq!(op.estimate_cardinality(), 4);
     }
@@ -540,11 +592,10 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![]);
         let child = MockChild::new(tuples, schema);
 
-        let op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(|_| Ok(())),
-        };
+        let op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(|_| Ok(())),
+        );
 
         assert_eq!(op.estimate_cardinality(), 0);
     }
@@ -556,11 +607,10 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![(Some(1), Some(10))]);
         let child = MockChild::new(tuples, schema);
 
-        let op = InsertOperator {
-            child: Box::new(child),
-            child_schema: int_schema(),
-            inserter: Box::new(|_| Ok(())),
-        };
+        let op = InsertOperator::for_test(
+            Box::new(child),
+            Box::new(|_| Ok(())),
+        );
 
         assert_eq!(op.name(), "Insert");
     }

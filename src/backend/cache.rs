@@ -276,8 +276,8 @@ pub fn get_check_parser() -> Option<CheckParserFn> {
 pub struct TableMeta {
     /// Resolved `sys_tables.id`.
     pub table_id: i32,
-    /// Unique indexes as `(index_name, column_name)`.
-    pub unique_indexes: Vec<(String, String)>,
+    /// Unique indexes as `(index_name, Vec<column_name>)`.
+    pub unique_indexes: Vec<(String, Vec<String>)>,
     /// Foreign keys as `(child_col, parent_table, parent_col)`.
     pub foreign_keys: Vec<(String, String, String)>,
     /// CHECK constraint expressions.
@@ -332,9 +332,7 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
             // Only genuinely UNIQUE indexes feed the UNIQUE checker —
             // regular indexes must NOT enforce uniqueness.
             if is_unique {
-                for c in &cols {
-                    unique_indexes.push((name.clone(), c.clone()));
-                }
+                unique_indexes.push((name.clone(), cols.clone()));
             }
             named_indexes.push((name, cols, is_unique));
         }

@@ -149,13 +149,21 @@ fn apply_assignments_typed(
                 },
                 ColumnValue::Text(s) => match target_type {
                     DataType::Char(n) | DataType::Character(n) => {
+                        if s.len() > *n as usize {
+                            return Err(format!("CHAR payload length {} exceeds declared limit {}", s.len(), n));
+                        }
                         let mut padded = s.clone();
                         if padded.len() < *n as usize {
                             padded.push_str(&" ".repeat(*n as usize - padded.len()));
                         }
                         Some(DataValue::Char(padded))
                     }
-                    DataType::Varchar(_) => Some(DataValue::Varchar(s.clone())),
+                    DataType::Varchar(max_len) => {
+                        if s.len() > *max_len as usize {
+                            return Err(format!("VARCHAR payload length {} exceeds declared limit {}", s.len(), max_len));
+                        }
+                        Some(DataValue::Varchar(s.clone()))
+                    }
                     DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
                         let num = crate::types::value::parse_numeric_literal(s, *precision, *scale)
                             .map_err(|e| format!("Invalid numeric literal '{}': {}", s, e))?;
@@ -372,6 +380,22 @@ fn apply_assignments_typed(
             }
         };
 
+        if let Some(ref dv) = new_val {
+            match (target_type, dv) {
+                (DataType::Varchar(max_len), DataValue::Varchar(s)) => {
+                    if s.len() > *max_len as usize {
+                        return Err(format!("VARCHAR payload length {} exceeds declared limit {}", s.len(), max_len));
+                    }
+                }
+                (DataType::Char(n) | DataType::Character(n), DataValue::Char(s)) => {
+                    if s.len() > *n as usize {
+                        return Err(format!("CHAR payload length {} exceeds declared limit {}", s.len(), n));
+                    }
+                }
+                _ => {}
+            }
+        }
+
         values[target_idx] = new_val;
     }
     Ok(values)
@@ -387,6 +411,8 @@ struct PendingUpdate {
     old_decoded: Vec<(String, ColumnValue)>,
     /// The decoded row AFTER the update, for FK cascade propagation.
     updated_decoded: Vec<(String, ColumnValue)>,
+    /// The updated typed values, used for intra-batch constraint validation.
+    updated_values: Vec<Option<DataValue>>,
 }
 
 fn update_log_details(
@@ -616,19 +642,28 @@ pub fn update_by_pointers(
         let updated_values = match apply_assignments_typed(columns, decoded.clone(), assignments) {
             Ok(v) => v,
             Err(e) => {
-                log::warn!("[UpdateByPointers] Skipping row due to assignment error: {}", e);
-                continue;
+                log::warn!("[UpdateByPointers] Aborting update due to assignment error: {}", e);
+                return Ok(UpdateResult {
+                    updated_count: 0,
+                    returning_rows: Vec::new(),
+                });
             }
         };
         let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                log::warn!("[UpdateByPointers] Aborting update due to serialization error: {}", e);
+                return Ok(UpdateResult {
+                    updated_count: 0,
+                    returning_rows: Vec::new(),
+                });
+            }
         };
 
         let old_decoded = values_to_column_values(columns, &decoded);
         let updated_decoded = values_to_column_values(columns, &updated_values);
 
-        // Constraint validation
+        // Constraint validation against disk, excluding all pointers in this batch
         let new_strings: Vec<String> = updated_values.iter().map(|val| {
             match val {
                 Some(dv) => dv.to_string(),
@@ -636,23 +671,29 @@ pub fn update_by_pointers(
             }
         }).collect();
         let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
-        if let Err(e) = crate::backend::constraint::validate_row_update(
+        if let Err(e) = crate::backend::constraint::validate_row_update_with_excludes(
             catalog, db_name, table_name, &new_values,
-            Some((page_num, slot_idx)),
+            pointers,
         ) {
             log::warn!(
-                "[UpdateByPointers] Skipping row due to constraint violation: {}", e
+                "[UpdateByPointers] Aborting update due to constraint violation: {}", e
             );
-            continue;
+            return Ok(UpdateResult {
+                updated_count: 0,
+                returning_rows: Vec::new(),
+            });
         }
 
         if let Err(e) = crate::backend::constraint::validate_update_restrict(
             db_name, table_name, &old_decoded, &updated_decoded,
         ) {
             log::warn!(
-                "[UpdateByPointers] Skipping row due to FOREIGN KEY RESTRICT constraint: {}", e
+                "[UpdateByPointers] Aborting update due to FOREIGN KEY RESTRICT constraint: {}", e
             );
-            continue;
+            return Ok(UpdateResult {
+                updated_count: 0,
+                returning_rows: Vec::new(),
+            });
         }
 
         pending_updates.push(PendingUpdate {
@@ -661,9 +702,90 @@ pub fn update_by_pointers(
             new_bytes,
             old_decoded,
             updated_decoded,
+            updated_values,
         });
 
         updated_count += 1;
+    }
+
+    // Intra-batch uniqueness validation: ensure no two updated rows in the same
+    // statement produce duplicate keys for any UNIQUE constraint or index.
+    let meta = crate::backend::cache::metadata(db_name, table_name);
+    let mut has_intra_batch_conflict = false;
+
+    // Check column-level UNIQUE constraints
+    for (col_idx, col) in columns.iter().enumerate() {
+        if !col.constraints.unique {
+            continue;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for pu in &pending_updates {
+            if let Some(Some(dv)) = pu.updated_values.get(col_idx) {
+                let val_str = dv.to_string();
+                if !seen.insert(val_str) {
+                    has_intra_batch_conflict = true;
+                    log::warn!(
+                        "[UpdateByPointers] Batch UNIQUE violation on column '{}': duplicate value '{}'",
+                        col.name, dv
+                    );
+                    break;
+                }
+            }
+        }
+        if has_intra_batch_conflict {
+            break;
+        }
+    }
+
+    // Check unique indexes (including composite)
+    if !has_intra_batch_conflict {
+        if let Some(ref m) = meta {
+            for (idx_name, idx_cols) in &m.unique_indexes {
+                let col_indices: Vec<usize> = idx_cols
+                    .iter()
+                    .filter_map(|c| columns.iter().position(|col| col.name.eq_ignore_ascii_case(c)))
+                    .collect();
+                if col_indices.len() != idx_cols.len() {
+                    continue;
+                }
+
+                let mut seen = std::collections::HashSet::new();
+                for pu in &pending_updates {
+                    let mut has_null = false;
+                    let mut key_parts = Vec::with_capacity(col_indices.len());
+                    for &idx in &col_indices {
+                        match pu.updated_values.get(idx) {
+                            Some(Some(dv)) => key_parts.push(dv.to_string()),
+                            _ => {
+                                has_null = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !has_null {
+                        let composite_key = key_parts.join("|||");
+                        if !seen.insert(composite_key) {
+                            has_intra_batch_conflict = true;
+                            log::warn!(
+                                "[UpdateByPointers] Batch UNIQUE violation on index '{}': duplicate key ({})",
+                                idx_name, key_parts.join(", ")
+                            );
+                            break;
+                        }
+                    }
+                }
+                if has_intra_batch_conflict {
+                    break;
+                }
+            }
+        }
+    }
+
+    if has_intra_batch_conflict {
+        return Ok(UpdateResult {
+            updated_count: 0,
+            returning_rows: Vec::new(),
+        });
     }
 
     // Phase 2: apply delete+insert for all pending updates

@@ -701,6 +701,12 @@ impl DataValue {
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
             }
+            (DataType::Varchar(max_len), DataValue::Varchar(v)) => {
+                if v.len() > *max_len as usize {
+                    return Err(format!("VARCHAR payload length {} exceeds declared limit {}", v.len(), max_len));
+                }
+                Ok(self.to_bytes())
+            }
             _ => Ok(self.to_bytes()),
         }
     }

@@ -59,7 +59,7 @@ pub fn validate_row_insert(
     let meta = crate::backend::cache::metadata(db_name, table_name);
 
     // 2. UNIQUE (via B+ Tree if index exists) — inserts have no self-row
-    validation::check_unique_insert_meta(db_name, table_name, columns, values, None, meta.as_deref())?;
+    validation::check_unique_insert_meta(db_name, table_name, columns, values, &[], meta.as_deref())?;
 
     // 3. FOREIGN KEY (parent key must exist)
     validation::check_foreign_key_insert_meta(catalog, db_name, table_name, columns, values, meta.as_deref())?;
@@ -325,6 +325,21 @@ pub fn validate_row_update(
     new_values: &[&str],
     exclude: Option<(u32, u32)>,
 ) -> Result<(), RookError> {
+    let exclude_slice: &[(u32, u32)] = match &exclude {
+        Some(ptr) => std::slice::from_ref(ptr),
+        None => &[],
+    };
+    validate_row_update_with_excludes(catalog, db_name, table_name, new_values, exclude_slice)
+}
+
+/// Validate row update with multiple excluded pointers (for batch updates).
+pub fn validate_row_update_with_excludes(
+    catalog: &crate::catalog::types::Catalog,
+    db_name: &str,
+    table_name: &str,
+    new_values: &[&str],
+    exclude_ptrs: &[(u32, u32)],
+) -> Result<(), RookError> {
     let db = catalog.databases.get(db_name).ok_or_else(|| RookError::NotFound {
         entity: "Database",
         name: db_name.to_string(),
@@ -342,8 +357,8 @@ pub fn validate_row_update(
     // 1. NOT NULL (new values must not violate)
     validation::check_not_null(table_name, columns, new_values)?;
 
-    // 2. UNIQUE — self-match excluded via `exclude`
-    validation::check_unique_insert_meta(db_name, table_name, columns, new_values, exclude, meta.as_deref())?;
+    // 2. UNIQUE — self/batch matches excluded via `exclude_ptrs`
+    validation::check_unique_insert_meta(db_name, table_name, columns, new_values, exclude_ptrs, meta.as_deref())?;
 
     // 3. FOREIGN KEY (parent key must exist)
     validation::check_foreign_key_insert_meta(catalog, db_name, table_name, columns, new_values, meta.as_deref())?;

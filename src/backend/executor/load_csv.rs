@@ -303,12 +303,12 @@ pub fn load_csv(
 /// index maintenance goes through the cached B+ Tree registry with batched
 /// fsyncs. Callers that need data on disk should hit a checkpoint
 /// (`backend::cache::checkpoint`) — heap scans do this automatically.
-pub fn insert_single_tuple(
+pub fn insert_single_tuple_with_location(
     catalog: &Catalog,
     db_name: &str,
     table_name: &str,
     values: &[&str],
-) -> io::Result<bool> {
+) -> io::Result<Option<(u32, u32)>> {
     log::info!(" Starting single tuple insertion");
 
     let db = catalog.databases.get(db_name).ok_or_else(|| {
@@ -329,7 +329,7 @@ pub fn insert_single_tuple(
 
     if values.len() != columns.len() {
         log::info!(" Expected {} values, got {}", columns.len(), values.len());
-        return Ok(false);
+        return Ok(None);
     }
 
     // Validate all values
@@ -342,7 +342,7 @@ pub fn insert_single_tuple(
 
         if let Err(e) = validate_value(&data_type, val) {
             log::info!("Column '{}': {}", col.name, e);
-            return Ok(false);
+            return Ok(None);
         }
     }
 
@@ -351,7 +351,7 @@ pub fn insert_single_tuple(
         catalog, db_name, table_name, values,
     ) {
         log::info!("Constraint violation: {}", e);
-        return Ok(false);
+        return Ok(None);
     }
 
     // Serialize tuple
@@ -375,7 +375,7 @@ pub fn insert_single_tuple(
     }
 
     if !row_ok {
-        return Ok(false);
+        return Ok(None);
     }
 
     // Build datatype list
@@ -400,7 +400,7 @@ pub fn insert_single_tuple(
         Ok(bytes) => bytes,
         Err(e) => {
             log::info!(" Failed to serialize tuple: {}", e);
-            return Ok(false);
+            return Ok(None);
         }
     };
 
@@ -426,13 +426,22 @@ pub fn insert_single_tuple(
                 log::warn!(" Failed to update index: {}", e);
             }
 
-            Ok(true)
+            Ok(Some((page_id, slot_id)))
         }
         Err(e) => {
             log::info!(" Failed to insert tuple: {}", e);
-            Ok(false)
+            Ok(None)
         }
     }
+}
+
+pub fn insert_single_tuple(
+    catalog: &Catalog,
+    db_name: &str,
+    table_name: &str,
+    values: &[&str],
+) -> io::Result<bool> {
+    insert_single_tuple_with_location(catalog, db_name, table_name, values).map(|opt| opt.is_some())
 }
 
 /// RFC-4180 compliant CSV line parser.

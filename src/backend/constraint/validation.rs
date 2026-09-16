@@ -50,26 +50,182 @@ pub(crate) fn check_unique_insert_meta(
     table_name: &str,
     columns: &[Column],
     values: &[&str],
-    exclude: Option<(u32, u32)>,
+    exclude_ptrs: &[(u32, u32)],
     meta: Option<&TableMeta>,
 ) -> Result<(), RookError> {
-    let unique_indexes: Vec<(String, String)> = match meta {
+    let unique_indexes: Vec<(String, Vec<String>)> = match meta {
         Some(m) => m.unique_indexes.clone(),
         None => Vec::new(),
     };
 
+    // 1. Check all UNIQUE indexes (composite or single-column)
+    for (idx_name, idx_cols) in &unique_indexes {
+        if idx_cols.is_empty() {
+            continue;
+        }
+
+        let mut key_values = Vec::with_capacity(idx_cols.len());
+        let mut key_types = Vec::with_capacity(idx_cols.len());
+        let mut col_positions = Vec::with_capacity(idx_cols.len());
+        let mut has_null = false;
+
+        for col_name in idx_cols {
+            let col_pos = match columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name)) {
+                Some(p) => p,
+                None => continue,
+            };
+            col_positions.push(col_pos);
+
+            let raw_val = values.get(col_pos).unwrap_or(&"");
+            let trimmed = raw_val.trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                has_null = true;
+                break;
+            }
+
+            let col_type = columns[col_pos].data_type.clone();
+            let dv = crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
+                .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
+            key_values.push(dv);
+            key_types.push(col_type);
+        }
+
+        // Under standard SQL UNIQUE constraint semantics, a composite key containing
+        // any NULL component does not violate uniqueness.
+        if has_null || key_values.len() != idx_cols.len() {
+            continue;
+        }
+
+        let mut found_via_index = false;
+        let mut checked_index = false;
+
+        let idx_path = std::path::PathBuf::from(format!(
+            "database/base/{}/{}.{}.idx", db_name, table_name, idx_name
+        ));
+        if idx_path.exists() {
+            let kt1 = key_types.clone();
+            let kt2 = key_types.clone();
+            let open_path = idx_path.clone();
+            match crate::backend::cache::with_btree(
+                &idx_path,
+                move || -> std::io::Result<crate::backend::index::btree::BTree> {
+                    let mut bt = crate::backend::index::btree::BTree::open(open_path)?;
+                    bt.set_key_types(kt1);
+                    Ok(bt)
+                },
+                |bt| {
+                    bt.set_key_types(kt2);
+                    bt.search_all_keys(&key_values)
+                },
+            ) {
+                Ok(tids) => {
+                    checked_index = true;
+                    if tids.iter().any(|tid| !exclude_ptrs.contains(tid)) {
+                        found_via_index = true;
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[Constraint] BTree search error for UNIQUE check on '{}.{}' (index '{}'): {}",
+                        db_name, table_name, idx_name, e
+                    );
+                }
+            }
+        }
+
+        if found_via_index {
+            let vals_str = idx_cols.iter().zip(key_values.iter())
+                .map(|(c, v)| format!("{}={}", c, v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(RookError::constraint(
+                ConstraintKind::Unique,
+                table_name,
+                Some(&idx_cols.join(",")),
+                format!(
+                    "UNIQUE constraint violated on index '{}': duplicate key ({})",
+                    idx_name, vals_str
+                ),
+            ));
+        }
+
+        if checked_index {
+            continue;
+        }
+
+        // Heap-scan fallback for this unique index if no index file exists
+        let heap_path = std::path::PathBuf::from(format!(
+            "database/base/{}/{}.dat", db_name, table_name
+        ));
+        if heap_path.exists() {
+            if let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path) {
+                let schema_types: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
+                for result in heap.scan() {
+                    let (page_id, slot_id, raw_bytes) = match result {
+                        Ok(triple) => triple,
+                        Err(_) => continue,
+                    };
+                    if exclude_ptrs.contains(&(page_id, slot_id)) {
+                        continue;
+                    }
+
+                    let decoded = match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+
+                    let mut matches = true;
+                    use crate::types::Comparable;
+                    for (i, &pos) in col_positions.iter().enumerate() {
+                        match decoded.get(pos) {
+                            Some(Some(existing_val)) => {
+                                if let Ok(cmp) = existing_val.compare(&key_values[i]) {
+                                    if cmp != std::cmp::Ordering::Equal {
+                                        matches = false;
+                                        break;
+                                    }
+                                } else {
+                                    matches = false;
+                                    break;
+                                }
+                            }
+                            _ => {
+                                matches = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if matches {
+                        return Err(RookError::constraint(
+                            ConstraintKind::Unique,
+                            table_name,
+                            Some(&idx_cols.join(",")),
+                            format!(
+                                "UNIQUE constraint violated on index '{}': duplicate key values in heap",
+                                idx_name
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check column-level UNIQUE constraints (`col.constraints.unique`)
     for (col_pos, col) in columns.iter().enumerate() {
-        let has_unique_via_index = unique_indexes.iter().any(|(_, idx_col)| idx_col.eq_ignore_ascii_case(&col.name));
-        let is_unique = has_unique_via_index || col.constraints.unique;
-        if !is_unique {
+        if !col.constraints.unique {
+            continue;
+        }
+
+        // If this column is already covered by a single-column unique index, skip it
+        if unique_indexes.iter().any(|(_, cols)| cols.len() == 1 && cols[0].eq_ignore_ascii_case(&col.name)) {
             continue;
         }
 
         let raw_val = values.get(col_pos).unwrap_or(&"");
         let trimmed = raw_val.trim();
-
-        // NULL values are not indexed in the B+ Tree — skip UNIQUE check for NULLs
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") || trimmed.eq_ignore_ascii_case("NULL") {
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
             continue;
         }
 
@@ -80,21 +236,15 @@ pub(crate) fn check_unique_insert_meta(
         let mut found_via_index = false;
         let mut checked_index = false;
 
-        // Named unique indexes on this column (cached B+ Tree handles).
-        for (idx_name, idx_col) in &unique_indexes {
-            if !idx_col.eq_ignore_ascii_case(&col.name) {
-                continue;
-            }
-            let idx_path = std::path::PathBuf::from(format!(
-                "database/base/{}/{}.{}.idx", db_name, table_name, idx_name
-            ));
-            if !idx_path.exists() {
-                continue;
-            }
+        // Legacy single-index file fallback
+        let legacy_idx_path = std::path::PathBuf::from(format!(
+            "database/base/{}/{}.idx", db_name, table_name
+        ));
+        if legacy_idx_path.exists() {
             match crate::backend::cache::with_btree(
-                &idx_path,
+                &legacy_idx_path,
                 || -> std::io::Result<crate::backend::index::btree::BTree> {
-                    let mut bt = crate::backend::index::btree::BTree::open(idx_path.clone())?;
+                    let mut bt = crate::backend::index::btree::BTree::open(legacy_idx_path.clone())?;
                     bt.set_key_type(col_type.clone());
                     Ok(bt)
                 },
@@ -105,50 +255,15 @@ pub(crate) fn check_unique_insert_meta(
             ) {
                 Ok(tids) => {
                     checked_index = true;
-                    if tids.iter().any(|tid| Some(*tid) != exclude) {
+                    if tids.iter().any(|tid| !exclude_ptrs.contains(tid)) {
                         found_via_index = true;
-                        break;
                     }
                 }
                 Err(e) => {
                     log::warn!(
-                        "[Constraint] BTree search error for UNIQUE check on '{}.{}': {}",
+                        "[Constraint] Legacy BTree search error for UNIQUE check on '{}.{}': {}",
                         db_name, table_name, e
                     );
-                }
-            }
-        }
-
-        // Fallback to legacy single-index file (cached handle as well).
-        if !found_via_index && !checked_index {
-            let legacy_idx_path = std::path::PathBuf::from(format!(
-                "database/base/{}/{}.idx", db_name, table_name
-            ));
-            if legacy_idx_path.exists() {
-                match crate::backend::cache::with_btree(
-                    &legacy_idx_path,
-                    || -> std::io::Result<crate::backend::index::btree::BTree> {
-                        let mut bt = crate::backend::index::btree::BTree::open(legacy_idx_path.clone())?;
-                        bt.set_key_type(col_type.clone());
-                        Ok(bt)
-                    },
-                    |bt| {
-                        bt.set_key_type(col_type.clone());
-                        bt.search_all(&key_value)
-                    },
-                ) {
-                    Ok(tids) => {
-                        checked_index = true;
-                        if tids.iter().any(|tid| Some(*tid) != exclude) {
-                            found_via_index = true;
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[Constraint] Legacy BTree search error for UNIQUE check on '{}.{}': {}",
-                            db_name, table_name, e
-                        );
-                    }
                 }
             }
         }
@@ -165,21 +280,15 @@ pub(crate) fn check_unique_insert_meta(
             ));
         }
 
-        // If an index was checked and no duplicates found, skip the expensive O(N) heap scan.
         if checked_index {
             continue;
         }
 
-        // No usable index match → heap-scan fallback so UNIQUE still holds
-        // (original semantics: run whenever the index path found nothing).
-        {
-            let heap_path = std::path::PathBuf::from(format!(
-                "database/base/{}/{}.dat", db_name, table_name
-            ));
-            if !heap_path.exists() {
-                continue;
-            }
-
+        // Heap-scan fallback for column-level unique
+        let heap_path = std::path::PathBuf::from(format!(
+            "database/base/{}/{}.dat", db_name, table_name
+        ));
+        if heap_path.exists() {
             if let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path) {
                 let schema_types: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
                 for result in heap.scan() {
@@ -187,7 +296,7 @@ pub(crate) fn check_unique_insert_meta(
                         Ok(triple) => triple,
                         Err(_) => continue,
                     };
-                    if exclude == Some((page_id, slot_id)) {
+                    if exclude_ptrs.contains(&(page_id, slot_id)) {
                         continue;
                     }
 
