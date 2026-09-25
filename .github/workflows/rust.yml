@@ -33,6 +33,10 @@ jobs:
         repository: RookDB/rook-parser
         ref: main
         path: rook-parser
+    - name: Link sibling crates for ../ path dependencies
+      run: |
+        ln -sfn "$GITHUB_WORKSPACE/rook-ast" "$GITHUB_WORKSPACE/../rook-ast"
+        ln -sfn "$GITHUB_WORKSPACE/rook-parser" "$GITHUB_WORKSPACE/../rook-parser"
     - name: Setup Node
       uses: actions/setup-node@v4
       with:
