@@ -7,11 +7,11 @@
 //! 2. **Plan building**: construct the logical operator tree matching the query's
 //!    intent (filter, project, sort, aggregate, join, etc.).
 
-pub mod semantic;
-pub mod optimizer;
-pub mod helpers;
 pub mod alias;
+pub mod helpers;
+pub mod optimizer;
 pub mod plan_cache;
+pub mod semantic;
 #[cfg(test)]
 pub mod tests;
 
@@ -45,7 +45,10 @@ impl std::error::Error for PlanError {}
 /// Tables whose heap files don't exist yet (e.g. freshly created with no
 /// data) are silently skipped. Returns an empty map if no stats can be
 /// collected.
-fn load_table_statistics(db_name: &str, catalog: &Catalog) -> std::collections::HashMap<String, crate::statistics::TableStatistics> {
+fn load_table_statistics(
+    db_name: &str,
+    catalog: &Catalog,
+) -> std::collections::HashMap<String, crate::statistics::TableStatistics> {
     let db = match catalog.databases.get(db_name) {
         Some(d) => d,
         None => return std::collections::HashMap::new(),
@@ -56,8 +59,7 @@ fn load_table_statistics(db_name: &str, catalog: &Catalog) -> std::collections::
         // Process-cached (file-size validated): collection reads every heap
         // page and would otherwise dominate per-query planning latency.
         if let Ok(table_stats) = crate::backend::cache::table_statistics(db_name, table_name) {
-            let cloned: crate::statistics::TableStatistics =
-                (*table_stats).clone();
+            let cloned: crate::statistics::TableStatistics = (*table_stats).clone();
             stats.insert(table_name.clone(), cloned);
         }
     }
@@ -191,7 +193,11 @@ fn default_to_constant(dv: &crate::types::DataValue) -> ConstantValue {
 }
 
 /// Plan a `QueryPlan` into a `LogicalPlan` using the given catalog.
-pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> Result<LogicalPlan, PlanError> {
+pub fn plan_query(
+    query: &QueryPlan,
+    catalog: &Catalog,
+    db_name: &str,
+) -> Result<LogicalPlan, PlanError> {
     match query {
         QueryPlan::Select(select) => {
             let plan = plan_select(select, catalog, db_name)?;
@@ -240,12 +246,22 @@ pub fn plan_query(query: &QueryPlan, catalog: &Catalog, db_name: &str) -> Result
             Ok(optimizer.optimize(plan))
         }
         QueryPlan::Insert(ins) => plan_insert(ins, catalog, db_name),
-        QueryPlan::CreateTable(_) | QueryPlan::DropTable(_) | QueryPlan::DropDatabase(_)
-        | QueryPlan::AlterTable(_) | QueryPlan::CreateView(_) | QueryPlan::DropView(_)
-        | QueryPlan::CreateIndex(_) | QueryPlan::CreateDatabase(_)
-        | QueryPlan::CreateTableAsSelect(_) | QueryPlan::ShowTables | QueryPlan::ShowDatabases
+        QueryPlan::CreateTable(_)
+        | QueryPlan::DropTable(_)
+        | QueryPlan::DropDatabase(_)
+        | QueryPlan::AlterTable(_)
+        | QueryPlan::CreateView(_)
+        | QueryPlan::DropView(_)
+        | QueryPlan::CreateIndex(_)
+        | QueryPlan::CreateDatabase(_)
+        | QueryPlan::CreateTableAsSelect(_)
+        | QueryPlan::ShowTables
+        | QueryPlan::ShowDatabases
         | QueryPlan::UseDatabase(_) => Err(PlanError {
-            message: format!("DDL/DQL statement '{}' must be handled by the executor, not the logical planner", query.statement_type()),
+            message: format!(
+                "DDL/DQL statement '{}' must be handled by the executor, not the logical planner",
+                query.statement_type()
+            ),
         }),
         _ => Err(PlanError {
             message: format!("Planning not yet supported for {}", query.statement_type()),
@@ -272,24 +288,24 @@ fn plan_select_with_ctes(
     existing_ctes: Option<&std::collections::HashMap<String, (LogicalPlan, ColumnSchema)>>,
 ) -> Result<LogicalPlan, PlanError> {
     // 0. Resolve CTEs and build a registry
-    let db = catalog
-        .databases
-        .get(db_name)
-        .ok_or_else(|| PlanError {
-            message: format!("Database '{}' not found", db_name),
-        })?;
+    let db = catalog.databases.get(db_name).ok_or_else(|| PlanError {
+        message: format!("Database '{}' not found", db_name),
+    })?;
 
     let mut cte_registry: std::collections::HashMap<String, (LogicalPlan, ColumnSchema)> =
         std::collections::HashMap::new();
 
     if let Some(existing) = existing_ctes {
         for (key, val) in existing {
-            cte_registry.entry(key.clone()).or_insert_with(|| val.clone());
+            cte_registry
+                .entry(key.clone())
+                .or_insert_with(|| val.clone());
         }
     }
 
     for cte_def in &select.ctes {
-        let inner_plan = plan_select_with_ctes(&cte_def.query, catalog, db_name, Some(&cte_registry))?;
+        let inner_plan =
+            plan_select_with_ctes(&cte_def.query, catalog, db_name, Some(&cte_registry))?;
         let schema = derive_schema(&inner_plan);
         cte_registry.insert(cte_def.name.to_ascii_lowercase(), (inner_plan, schema));
     }
@@ -340,7 +356,8 @@ fn plan_select_with_ctes(
     }
 
     // 4. Apply GROUP BY / HAVING
-    let has_aggregates = !select.group_by.is_empty() || select.having.is_some()
+    let has_aggregates = !select.group_by.is_empty()
+        || select.having.is_some()
         || select.projections.iter().any(contains_aggregate);
 
     if has_aggregates {
@@ -428,7 +445,8 @@ fn plan_select_with_ctes(
                     return Err(PlanError {
                         message: format!(
                             "ORDER BY position {} is out of range (1..{})",
-                            pos, projections.len()
+                            pos,
+                            projections.len()
                         ),
                     });
                 }
@@ -478,9 +496,8 @@ fn plan_select_with_ctes(
                 (**rec_select_plan).clone()
             };
 
-            let rec_logical = plan_select_with_ctes(
-                &adjusted_rec_plan, catalog, db_name, Some(&cte_registry),
-            )?;
+            let rec_logical =
+                plan_select_with_ctes(&adjusted_rec_plan, catalog, db_name, Some(&cte_registry))?;
 
             cte_registry.remove(&cte_key);
 

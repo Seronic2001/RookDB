@@ -32,9 +32,7 @@ use storage_manager::backend::executor::physical::operators::{PhysicalOperator, 
 use storage_manager::backend::executor::physical::tuple::{ColumnInfo, Tuple};
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::delete::delete_by_pointers;
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::executor::update::{parse_set_clause, update_by_pointers};
@@ -103,7 +101,12 @@ fn setup_empty(db: &str, table: &str, cols: Vec<Column>, tag: &str) {
     delete_by_pointers(&catalog, db, table, &ptrs).expect("delete");
 }
 
-fn setup_with_rows(db: &str, table: &str, cols: Vec<Column>, rows: &[&[&str]]) -> storage_manager::catalog::types::Catalog {
+fn setup_with_rows(
+    db: &str,
+    table: &str,
+    cols: Vec<Column>,
+    rows: &[&[&str]],
+) -> storage_manager::catalog::types::Catalog {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, db), "create db");
     let mut catalog = load_catalog();
@@ -119,7 +122,11 @@ fn setup_with_rows(db: &str, table: &str, cols: Vec<Column>, rows: &[&[&str]]) -
 
 /// Run a SELECT through parser → logical planner → Volcano engine and return
 /// the collected tuples.
-fn run_select(catalog: &storage_manager::catalog::types::Catalog, db: &str, sql: &str) -> Vec<Tuple> {
+fn run_select(
+    catalog: &storage_manager::catalog::types::Catalog,
+    db: &str,
+    sql: &str,
+) -> Vec<Tuple> {
     let select = match rook_parser::parse_sql(sql) {
         Ok(QueryPlan::Select(s)) => s,
         other => panic!("parse failed for {:?}: {:?}", sql, other.err()),
@@ -143,7 +150,10 @@ fn agg_empty_input_multi_aggregate_returns_one_row() {
     setup_empty(
         "testdb",
         "agg_t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
         "aggmulti",
     );
     let catalog = load_catalog();
@@ -155,8 +165,15 @@ fn agg_empty_input_multi_aggregate_returns_one_row() {
         "BUG A CONFIRMED: global aggregate over empty input returned {} rows (SQL says exactly 1)",
         tuples.len()
     );
-    assert_eq!(tuples[0].values[0], Some(DataValue::BigInt(0)), "COUNT(id) over empty must be 0");
-    assert!(tuples[0].values[1].is_none(), "SUM(v) over empty must be NULL");
+    assert_eq!(
+        tuples[0].values[0],
+        Some(DataValue::BigInt(0)),
+        "COUNT(id) over empty must be 0"
+    );
+    assert!(
+        tuples[0].values[1].is_none(),
+        "SUM(v) over empty must be NULL"
+    );
 }
 
 #[test]
@@ -166,7 +183,10 @@ fn agg_empty_input_count_col_returns_one_row() {
     setup_empty(
         "testdb",
         "agg_c",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
         "aggcount",
     );
     let catalog = load_catalog();
@@ -191,13 +211,20 @@ fn agg_empty_input_count_star_returns_one_row() {
     setup_empty(
         "testdb",
         "agg_s",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
         "aggstar",
     );
     let catalog = load_catalog();
 
     let tuples = run_select(&catalog, "testdb", "SELECT COUNT(*) FROM agg_s");
-    assert_eq!(tuples.len(), 1, "COUNT(*) over empty input must return 1 row");
+    assert_eq!(
+        tuples.len(),
+        1,
+        "COUNT(*) over empty input must return 1 row"
+    );
     assert_eq!(tuples[0].values[0], Some(DataValue::BigInt(0)));
 }
 
@@ -228,7 +255,8 @@ impl PhysicalOperator for MockSource {
 
     fn next_batch(&mut self, batch: &mut Vec<Tuple>) -> RookResult<usize> {
         batch.clear();
-        while batch.len() < storage_manager::backend::executor::physical::operators::DEFAULT_BATCH_SIZE
+        while batch.len()
+            < storage_manager::backend::executor::physical::operators::DEFAULT_BATCH_SIZE
             && self.pos < self.tuples.len()
         {
             batch.push(self.tuples[self.pos].clone());
@@ -263,7 +291,11 @@ fn int_tuples(descending: bool, n: usize) -> (Vec<Tuple>, Vec<ColumnInfo>) {
     }];
     let tuples: Vec<Tuple> = (0..n)
         .map(|i| {
-            let v = if descending { (n - 1 - i) as i64 } else { i as i64 };
+            let v = if descending {
+                (n - 1 - i) as i64
+            } else {
+                i as i64
+            };
             Tuple::new(vec![Some(DataValue::Int(v as i32))])
         })
         .collect();
@@ -274,7 +306,12 @@ fn int_tuples(descending: bool, n: usize) -> (Vec<Tuple>, Vec<ColumnInfo>) {
 fn sort_next_batch_clears_batch_per_contract() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let (tuples, schema) = int_tuples(true, 5);
-    let src = MockSource { tuples, schema, pos: 0, estimate: 0 };
+    let src = MockSource {
+        tuples,
+        schema,
+        pos: 0,
+        estimate: 0,
+    };
 
     let mut sort = SortOperator::new(Box::new(src), vec![(0, false)]);
 
@@ -306,7 +343,12 @@ fn adaptive_sort_threshold_crossing_keeps_rows() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let (tuples, schema) = int_tuples(true, 50);
     // estimate 0 ("unknown") but 50 actual rows > threshold 10 → bug path
-    let src = MockSource { tuples, schema, pos: 0, estimate: 0 };
+    let src = MockSource {
+        tuples,
+        schema,
+        pos: 0,
+        estimate: 0,
+    };
 
     let mut sort = SortOperator::new_adaptive(Box::new(src), vec![(0, false)], 10);
 
@@ -327,7 +369,12 @@ fn adaptive_sort_threshold_crossing_keeps_rows() {
         out.len()
     );
     for (i, t) in out.iter().enumerate() {
-        assert_eq!(t.values[0], Some(DataValue::Int(i as i32)), "row {} must be sorted", i);
+        assert_eq!(
+            t.values[0],
+            Some(DataValue::Int(i as i32)),
+            "row {} must be sorted",
+            i
+        );
     }
 }
 
@@ -337,7 +384,12 @@ fn adaptive_sort_threshold_crossing_keeps_rows() {
 fn adaptive_sort_predeclared_external_works() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let (tuples, schema) = int_tuples(true, 50);
-    let src = MockSource { tuples, schema, pos: 0, estimate: 100 };
+    let src = MockSource {
+        tuples,
+        schema,
+        pos: 0,
+        estimate: 100,
+    };
 
     let mut sort = SortOperator::new_adaptive(Box::new(src), vec![(0, false)], 10);
 
@@ -351,15 +403,28 @@ fn adaptive_sort_predeclared_external_works() {
         out.append(&mut batch);
     }
 
-    assert_eq!(out.len(), 50, "external mode chosen up-front must return all rows");
+    assert_eq!(
+        out.len(),
+        50,
+        "external mode chosen up-front must return all rows"
+    );
     for (i, t) in out.iter().enumerate() {
-        assert_eq!(t.values[0], Some(DataValue::Int(i as i32)), "row {} must be sorted", i);
+        assert_eq!(
+            t.values[0],
+            Some(DataValue::Int(i as i32)),
+            "row {} must be sorted",
+            i
+        );
     }
 }
 
 // ── Findings D & E: SET-clause literal parsing ──────────────────────────────
 
-fn read_text_column(catalog: &storage_manager::catalog::types::Catalog, table: &str, column: &str) -> Vec<String> {
+fn read_text_column(
+    catalog: &storage_manager::catalog::types::Catalog,
+    table: &str,
+    column: &str,
+) -> Vec<String> {
     let path: PathBuf = format!("database/base/testdb/{}.dat", table).into();
     let heap = HeapManager::open(path).expect("open heap");
     let t = catalog
@@ -378,8 +443,12 @@ fn read_text_column(catalog: &storage_manager::catalog::types::Catalog, table: &
 
     let mut out = Vec::new();
     for result in heap.scan() {
-        let Ok((_page, _slot, raw)) = result else { continue };
-        let Ok(decoded) = deserialize_nullable_row(&schema, &raw) else { continue };
+        let Ok((_page, _slot, raw)) = result else {
+            continue;
+        };
+        let Ok(decoded) = deserialize_nullable_row(&schema, &raw) else {
+            continue;
+        };
         match decoded.get(pos) {
             Some(Some(DataValue::Varchar(s))) => out.push(s.clone()),
             Some(Some(DataValue::Char(s))) => out.push(s.clone()),
@@ -401,7 +470,10 @@ fn update_quoted_string_with_arith_char_is_literal() {
     let catalog = setup_with_rows(
         "testdb",
         "u_q",
-        vec![col("id", DataType::Int, false), col("tag", DataType::Varchar(20), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("tag", DataType::Varchar(20), true),
+        ],
         &[&["1", "'zzz'"]],
     );
 
@@ -427,7 +499,10 @@ fn update_escaped_quote_in_literal() {
     let catalog = setup_with_rows(
         "testdb",
         "u_n",
-        vec![col("id", DataType::Int, false), col("name", DataType::Varchar(30), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("name", DataType::Varchar(30), true),
+        ],
         &[&["1", "'x'"]],
     );
 

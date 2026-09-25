@@ -85,11 +85,11 @@ pub fn with_heap<T>(
     // Fast path: existing entry.
     {
         let mut cache = lock(heap_cache());
-        if let Some(entry) = cache.get(&key) {
-            if entry.manager.is_file_stale(path) {
-                cache.remove(&key);
-                crate::backend::buffer_manager::shared_pool::invalidate(path);
-            }
+        if let Some(entry) = cache.get(&key)
+            && entry.manager.is_file_stale(path)
+        {
+            cache.remove(&key);
+            crate::backend::buffer_manager::shared_pool::invalidate(path);
         }
         if let Some(entry) = cache.get_mut(&key) {
             entry.manager.reload_header()?;
@@ -106,11 +106,11 @@ pub fn with_heap<T>(
     // Miss: open outside the map lock, then insert (double-check).
     let mut manager = HeapManager::open(path.to_path_buf())?;
     let mut cache = lock(heap_cache());
-    if let Some(entry) = cache.get(&key) {
-        if entry.manager.is_file_stale(path) {
-            cache.remove(&key);
-            crate::backend::buffer_manager::shared_pool::invalidate(path);
-        }
+    if let Some(entry) = cache.get(&key)
+        && entry.manager.is_file_stale(path)
+    {
+        cache.remove(&key);
+        crate::backend::buffer_manager::shared_pool::invalidate(path);
     }
     if let Some(entry) = cache.get_mut(&key) {
         // Raced with another opener in between; use the resident one.
@@ -120,7 +120,13 @@ pub fn with_heap<T>(
         return Ok(result);
     }
     let result = f(&mut manager)?;
-    cache.insert(key, CachedHeap { manager, ops_since_flush: 1 });
+    cache.insert(
+        key,
+        CachedHeap {
+            manager,
+            ops_since_flush: 1,
+        },
+    );
     Ok(result)
 }
 
@@ -205,9 +211,10 @@ pub fn sync_and_clear_btrees<E>() {
     let mut cache = lock(btree_cache());
     for (_, (mut tree, ops)) in cache.drain() {
         if ops > 0
-            && let Err(e) = tree.sync() {
-                log::warn!("[cache] btree sync on close failed: {}", e);
-            }
+            && let Err(e) = tree.sync()
+        {
+            log::warn!("[cache] btree sync on close failed: {}", e);
+        }
     }
 }
 
@@ -299,11 +306,11 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
     use crate::backend::system_table::{SYS_CONSTRAINTS_SCHEMA, SYS_INDEXES_SCHEMA};
 
     // One resolve pass (scans sys_databases + sys_tables).
-    let (table_id, db_id) = match crate::backend::system_table::resolve_table_id(db_name, table_name)
-    {
-        Ok(ids) => ids,
-        Err(_) => return None,
-    };
+    let (table_id, db_id) =
+        match crate::backend::system_table::resolve_table_id(db_name, table_name) {
+            Ok(ids) => ids,
+            Err(_) => return None,
+        };
 
     // Scan sys_indexes once.
     let mut unique_indexes = Vec::new();
@@ -325,8 +332,10 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
             if name.is_empty() || columns_field.is_empty() {
                 continue;
             }
-            let cols: Vec<String> =
-                columns_field.split(',').map(|c| c.trim().to_string()).collect();
+            let cols: Vec<String> = columns_field
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .collect();
             let is_unique = matches!(&row[3], Some(crate::types::DataValue::Bool(v)) if *v);
             // Only genuinely UNIQUE indexes feed the UNIQUE checker —
             // regular indexes must NOT enforce uniqueness.
@@ -370,13 +379,14 @@ fn load_meta(db_name: &str, table_name: &str) -> Option<Arc<TableMeta>> {
 
     let mut check_ast = Vec::new();
     if !check_exprs.is_empty()
-        && let Some(parser) = CHECK_PARSER.get() {
-            for expr in &check_exprs {
-                if let Ok(ast_node) = parser(expr) {
-                    check_ast.push((expr.clone(), ast_node));
-                }
+        && let Some(parser) = CHECK_PARSER.get()
+    {
+        for expr in &check_exprs {
+            if let Ok(ast_node) = parser(expr) {
+                check_ast.push((expr.clone(), ast_node));
             }
         }
+    }
 
     Some(Arc::new(TableMeta {
         table_id,
@@ -449,7 +459,8 @@ pub fn invalidate_metadata() {
 
 // ── table statistics cache ───────────────────────────────────────────────────
 
-type StatsCacheMap = HashMap<(String, String), (u64, std::sync::Arc<crate::statistics::TableStatistics>)>;
+type StatsCacheMap =
+    HashMap<(String, String), (u64, std::sync::Arc<crate::statistics::TableStatistics>)>;
 
 fn stats_cache() -> &'static Mutex<StatsCacheMap> {
     static CACHE: OnceLock<Mutex<StatsCacheMap>> = OnceLock::new();
@@ -467,16 +478,14 @@ pub fn table_statistics(
     table_name: &str,
 ) -> io::Result<std::sync::Arc<crate::statistics::TableStatistics>> {
     let key = (db_name.to_string(), table_name.to_string());
-    let path = PathBuf::from(format!(
-        "database/base/{}/{}.dat",
-        db_name, table_name
-    ));
+    let path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
     let file_len = std::fs::metadata(&path)?.len();
 
     if let Some((len, hit)) = lock(stats_cache()).get(&key)
-        && *len == file_len {
-            return Ok(std::sync::Arc::clone(hit));
-        }
+        && *len == file_len
+    {
+        return Ok(std::sync::Arc::clone(hit));
+    }
 
     let stats = crate::statistics::collect_table_statistics(db_name, table_name)?;
     let arc = std::sync::Arc::new(stats);
@@ -507,11 +516,9 @@ pub fn referencing_fks(db_name: &str, table_name: &str) -> std::sync::Arc<RefFks
     if let Some(hit) = lock(ref_fk_cache()).get(&key) {
         return std::sync::Arc::clone(hit);
     }
-    let loaded = crate::backend::constraint::loaders::load_referencing_foreign_keys(
-        db_name,
-        table_name,
-    )
-    .unwrap_or_default();
+    let loaded =
+        crate::backend::constraint::loaders::load_referencing_foreign_keys(db_name, table_name)
+            .unwrap_or_default();
     let arc = std::sync::Arc::new(loaded);
     lock(ref_fk_cache()).insert(key, std::sync::Arc::clone(&arc));
     arc

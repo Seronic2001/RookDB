@@ -30,24 +30,26 @@
 //!            └──────────────┘
 //! ```
 
-pub mod tuple;
+pub mod engine;
 pub mod expr;
+pub mod external_sort;
 pub mod operators;
 pub mod planner;
-pub mod engine;
-pub mod external_sort;
+pub mod tuple;
 
-pub use tuple::{ColumnInfo, Tuple, display_tuples, format_tuple,
-                serialize_tuple_to_bytes, deserialize_tuple_from_bytes};
-pub use expr::{Expr, Predicate, ComparisonOp, evaluate_predicate};
-pub use operators::{PhysicalOperator, SeqScanOperator, FilterOperator, ProjectionOperator,
-                    LimitOperator, DistinctOperator, SortOperator, NullOperator, SingleRowOperator,
-                    CteScanOperator,
-                    AggregateOperator, AggregateInfo, AggregateFunction, infer_aggregate_output_type,
-                    NestedLoopJoinOperator, HashJoinOperator, IndexNestedLoopJoinOperator, JoinType,
-                    SetOpOperator, SetOpType,
-                    SubqueryExecOperator, SubqueryType,
-                    IndexScanOperator, IndexScanMode};
-pub use external_sort::{ExternalSortOperator, ExternalSortConfig};
-pub use planner::PhysicalPlanner;
 pub use engine::{execute_plan, execute_plan_collect};
+pub use expr::{ComparisonOp, Expr, Predicate, evaluate_predicate};
+pub use external_sort::{ExternalSortConfig, ExternalSortOperator};
+pub use operators::{
+    AggregateFunction, AggregateInfo, AggregateOperator, CteScanOperator, DistinctOperator,
+    FilterOperator, HashJoinOperator, IndexNestedLoopJoinOperator, IndexScanMode,
+    IndexScanOperator, JoinType, LimitOperator, NestedLoopJoinOperator, NullOperator,
+    PhysicalOperator, ProjectionOperator, SeqScanOperator, SetOpOperator, SetOpType,
+    SingleRowOperator, SortOperator, SubqueryExecOperator, SubqueryType,
+    infer_aggregate_output_type,
+};
+pub use planner::PhysicalPlanner;
+pub use tuple::{
+    ColumnInfo, Tuple, deserialize_tuple_from_bytes, display_tuples, format_tuple,
+    serialize_tuple_to_bytes,
+};

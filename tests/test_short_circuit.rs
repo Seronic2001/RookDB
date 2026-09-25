@@ -10,15 +10,15 @@
 
 mod common;
 
+use common::TestWorkspace;
 use rook_ast::QueryPlan;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-use common::TestWorkspace;
 
 fn setup(db: &str) -> Catalog {
     let mut catalog = load_catalog();
@@ -29,9 +29,24 @@ fn setup(db: &str) -> Catalog {
         db,
         "emp",
         vec![
-            Column { name: "id".into(), data_type: DataType::Int, nullable: true, constraints: Default::default() },
-            Column { name: "name".into(), data_type: DataType::Varchar(30), nullable: true, constraints: Default::default() },
-            Column { name: "salary".into(), data_type: DataType::Int, nullable: true, constraints: Default::default() },
+            Column {
+                name: "id".into(),
+                data_type: DataType::Int,
+                nullable: true,
+                constraints: Default::default(),
+            },
+            Column {
+                name: "name".into(),
+                data_type: DataType::Varchar(30),
+                nullable: true,
+                constraints: Default::default(),
+            },
+            Column {
+                name: "salary".into(),
+                data_type: DataType::Int,
+                nullable: true,
+                constraints: Default::default(),
+            },
         ],
     );
     save_catalog(&catalog).unwrap();
@@ -50,14 +65,17 @@ fn run(catalog: &Catalog, db: &str, sql: &str) -> Vec<Vec<String>> {
     };
     let logical = storage_manager::planner::plan_query(&QueryPlan::Select(select), catalog, db)
         .expect("plan failed");
-    let tuples: Vec<Tuple> =
-        execute_plan_collect(&logical, catalog, db).expect("execution failed");
+    let tuples: Vec<Tuple> = execute_plan_collect(&logical, catalog, db).expect("execution failed");
     tuples
         .iter()
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -74,7 +92,10 @@ fn and_never_evaluates_rhs_when_lhs_is_false() {
         "sdb",
         "SELECT name FROM emp WHERE salary > 1000 AND 1/0 = 1",
     );
-    assert!(out.is_empty(), "no rows match; eager RHS would have errored");
+    assert!(
+        out.is_empty(),
+        "no rows match; eager RHS would have errored"
+    );
 }
 
 #[test]

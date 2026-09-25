@@ -25,7 +25,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::page::{Page, PAGE_SIZE, init_page};
+use crate::page::{PAGE_SIZE, Page, init_page};
 
 /// Opaque identifier for a frame within the buffer pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -185,9 +185,7 @@ impl BufferPool {
             let mut header = Page::new();
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut header.data)?;
-            pool.total_pages = u32::from_le_bytes(
-                header.data[0..4].try_into().unwrap(),
-            );
+            pool.total_pages = u32::from_le_bytes(header.data[0..4].try_into().unwrap());
         }
 
         pool.file_path = Some(file_path);
@@ -203,7 +201,12 @@ impl BufferPool {
 
     /// Create a buffer pool for a raw page file (such as a B+ Tree .idx file)
     /// where total pages is derived directly from file size, not a heap header.
-    pub fn with_file_raw(capacity: usize, file: File, file_path: PathBuf, total_pages: u32) -> Self {
+    pub fn with_file_raw(
+        capacity: usize,
+        file: File,
+        file_path: PathBuf,
+        total_pages: u32,
+    ) -> Self {
         let mut pool = Self::new(capacity);
         pool.file_path = Some(file_path);
         pool.file = Some(file);
@@ -229,9 +232,7 @@ impl BufferPool {
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut header.data)?;
             // Page count is stored in first 4 bytes of the header
-            self.total_pages = u32::from_le_bytes(
-                header.data[0..4].try_into().unwrap(),
-            );
+            self.total_pages = u32::from_le_bytes(header.data[0..4].try_into().unwrap());
         } else {
             // File is empty or too small — treat as new
             self.total_pages = 0;
@@ -260,14 +261,19 @@ impl BufferPool {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                if let (Ok(open_meta), Ok(disk_meta)) = (open_file.metadata(), std::fs::metadata(path)) {
-                    return open_meta.ino() != disk_meta.ino() || open_meta.dev() != disk_meta.dev();
+                if let (Ok(open_meta), Ok(disk_meta)) =
+                    (open_file.metadata(), std::fs::metadata(path))
+                {
+                    return open_meta.ino() != disk_meta.ino()
+                        || open_meta.dev() != disk_meta.dev();
                 }
             }
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
-                if let (Ok(open_meta), Ok(disk_meta)) = (open_file.metadata(), std::fs::metadata(path)) {
+                if let (Ok(open_meta), Ok(disk_meta)) =
+                    (open_file.metadata(), std::fs::metadata(path))
+                {
                     return open_meta.file_index() != disk_meta.file_index()
                         || open_meta.volume_serial_number() != disk_meta.volume_serial_number();
                 }
@@ -321,7 +327,11 @@ impl BufferPool {
         // 5. Update lookup table
         self.frame_table.insert(page_id, frame_idx);
 
-        log::trace!("BufferPool: fetched page {} into frame {}", page_id, frame_idx);
+        log::trace!(
+            "BufferPool: fetched page {} into frame {}",
+            page_id,
+            frame_idx
+        );
         Ok(FrameId(frame_idx))
     }
 
@@ -453,9 +463,10 @@ impl BufferPool {
     /// Flush a specific page to disk if it is dirty.
     pub fn flush_page(&mut self, page_id: u32) -> io::Result<()> {
         if let Some(&frame_idx) = self.frame_table.get(&page_id)
-            && self.frames[frame_idx].is_dirty {
-                self.write_page_to_disk(frame_idx)?;
-            }
+            && self.frames[frame_idx].is_dirty
+        {
+            self.write_page_to_disk(frame_idx)?;
+        }
         Ok(())
     }
 
@@ -477,11 +488,10 @@ impl BufferPool {
                 wrote_any = true;
             }
         }
-        if wrote_any
-            && let Some(ref mut file) = self.file {
-                file.flush()?;
-                file.sync_all()?;
-            }
+        if wrote_any && let Some(ref mut file) = self.file {
+            file.flush()?;
+            file.sync_all()?;
+        }
         Ok(())
     }
 
@@ -509,7 +519,10 @@ impl BufferPool {
 
     /// Number of dirty frames.
     pub fn dirty_count(&self) -> usize {
-        self.frames.iter().filter(|f| f.occupied && f.is_dirty).count()
+        self.frames
+            .iter()
+            .filter(|f| f.occupied && f.is_dirty)
+            .count()
     }
 
     /// Total capacity of the pool.
@@ -700,7 +713,10 @@ mod tests {
         let frame_id = pool.fetch_page(1).expect("fetch page");
         let page = pool.get_page(frame_id);
         let lower = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
-        assert_eq!(lower, 8, "initialized page should have lower=8 (PAGE_HEADER_SIZE)");
+        assert_eq!(
+            lower, 8,
+            "initialized page should have lower=8 (PAGE_HEADER_SIZE)"
+        );
 
         pool.unpin(frame_id, false);
 
@@ -813,11 +829,17 @@ mod tests {
         }
 
         // Fetch page 5 — this should trigger eviction of one of the first 4
-        let f5 = pool.fetch_page(5).expect("fetch page 5 should trigger eviction");
+        let f5 = pool
+            .fetch_page(5)
+            .expect("fetch page 5 should trigger eviction");
         pool.unpin(f5, false);
 
         // The 5th fetch succeeded — eviction worked
-        assert_eq!(pool.occupied_count(), 4, "pool should have 4 frames occupied after eviction");
+        assert_eq!(
+            pool.occupied_count(),
+            4,
+            "pool should have 4 frames occupied after eviction"
+        );
 
         // We should be able to re-fetch a page that may have been evicted
         let re_fetch = pool.fetch_page(1).expect("re-fetch page 1");
@@ -873,7 +895,8 @@ mod tests {
             let f = pool.fetch_page(1).expect("fetch");
             {
                 let page = pool.get_page_mut(f);
-                page.data[check_offset..check_offset + 4].copy_from_slice(&data_at_index.to_le_bytes());
+                page.data[check_offset..check_offset + 4]
+                    .copy_from_slice(&data_at_index.to_le_bytes());
             }
             pool.unpin(f, true);
             // Pool drops here — should flush dirty pages
@@ -884,8 +907,15 @@ mod tests {
         let mut page = Page::new();
         file.seek(SeekFrom::Start(PAGE_SIZE as u64)).expect("seek");
         file.read_exact(&mut page.data).expect("read");
-        let value = u32::from_le_bytes(page.data[check_offset..check_offset + 4].try_into().unwrap());
-        assert_eq!(value, data_at_index, "dirty page should have been flushed on drop");
+        let value = u32::from_le_bytes(
+            page.data[check_offset..check_offset + 4]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            value, data_at_index,
+            "dirty page should have been flushed on drop"
+        );
 
         fs::remove_file(&path).ok();
     }

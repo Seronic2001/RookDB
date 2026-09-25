@@ -25,11 +25,11 @@
 //! | Vacuum scan      | `vm_is_visible(db, tbl, page_id)` → skip if true |
 //! | Table drop/trunc | delete the `_vm` file               |
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -43,7 +43,7 @@ fn vm_path(db_name: &str, table_name: &str) -> PathBuf {
 #[inline]
 fn byte_and_mask(page_id: u32) -> (u64, u8) {
     let byte_idx = page_id as u64 / 8;
-    let bit_pos  = (page_id % 8) as u8;
+    let bit_pos = (page_id % 8) as u8;
     (byte_idx, 1u8 << bit_pos)
 }
 
@@ -63,9 +63,15 @@ struct VmRegistry {
 }
 
 impl VmRegistry {
-    fn new() -> Self { Self { tables: HashMap::new() } }
+    fn new() -> Self {
+        Self {
+            tables: HashMap::new(),
+        }
+    }
 
-    fn key(db: &str, table: &str) -> String { format!("{}::{}", db, table) }
+    fn key(db: &str, table: &str) -> String {
+        format!("{}::{}", db, table)
+    }
 
     /// Ensure the cache holds at least `needed_bytes` bytes.
     fn ensure_capacity(cache: &mut VmCache, needed_bytes: usize) {
@@ -114,7 +120,11 @@ fn write_vm_byte(path: &std::path::Path, byte_idx: u64, value: u8) -> io::Result
         std::fs::create_dir_all(parent)?;
     }
     let mut file = OpenOptions::new()
-        .read(true).write(true).create(true).truncate(false).open(path)?;
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
 
     let len = file.seek(SeekFrom::End(0))?;
     if byte_idx >= len {

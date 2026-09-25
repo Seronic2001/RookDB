@@ -46,8 +46,12 @@ fn sweep_stale_workspaces() {
             if parts.len() < 4 || !name.starts_with("database_") {
                 continue;
             }
-            let Some(pid_str) = parts[2].strip_prefix('p') else { continue };
-            let Ok(pid) = pid_str.parse::<u32>() else { continue };
+            let Some(pid_str) = parts[2].strip_prefix('p') else {
+                continue;
+            };
+            let Ok(pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
 
             let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
             if !alive {
@@ -56,8 +60,6 @@ fn sweep_stale_workspaces() {
         }
     });
 }
-
-
 
 pub struct TestWorkspace {
     /// Absolute path of the original CWD, restored on drop.
@@ -94,7 +96,9 @@ impl TestWorkspace {
         std::fs::create_dir_all(path.join("base")).expect("create workspace");
 
         std::env::set_current_dir(&path).expect("chdir into workspace");
-        storage_manager::backend::executor::row_select::register_where_parser(rook_parser::parse_where_text);
+        storage_manager::backend::executor::row_select::register_where_parser(
+            rook_parser::parse_where_text,
+        );
         storage_manager::backend::cache::register_check_parser(rook_parser::parse_check_expr);
         storage_manager::catalog::init_catalog();
 

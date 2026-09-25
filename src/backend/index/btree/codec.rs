@@ -6,8 +6,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::types::value::DataValue;
 use crate::types::DataType;
+use crate::types::value::DataValue;
 
 pub const BTREE_PAGE_SIZE: usize = 8192;
 
@@ -51,7 +51,10 @@ pub(crate) fn write_root_sidecar(idx_path: &Path, root_page_id: u32) -> io::Resu
 pub(crate) fn read_root_sidecar(idx_path: &Path) -> io::Result<u32> {
     let bytes = std::fs::read(root_sidecar_path(idx_path))?;
     if bytes.len() < 4 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "short root sidecar"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short root sidecar",
+        ));
     }
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
@@ -68,11 +71,17 @@ pub(crate) fn encode_key(key: &DataValue) -> Vec<u8> {
 /// Decode a key from on-disk format. Returns `(key, bytes_consumed)`.
 pub(crate) fn decode_key(data: &[u8], ty: &DataType) -> io::Result<(DataValue, usize)> {
     if data.len() < KEY_LEN_SIZE {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key length"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "Truncated key length",
+        ));
     }
     let len = u16::from_le_bytes([data[0], data[1]]) as usize;
     if data.len() < KEY_LEN_SIZE + len {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Truncated key data"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "Truncated key data",
+        ));
     }
     let key_bytes = &data[KEY_LEN_SIZE..KEY_LEN_SIZE + len];
     let value = DataValue::from_bytes(ty, key_bytes)

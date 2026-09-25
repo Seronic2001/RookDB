@@ -15,7 +15,10 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
     match expr {
         ExprNode::Column(_) | ExprNode::Constant(_) => expr.clone(),
         ExprNode::Compound(_) => expr.clone(),
-        ExprNode::Cast { expr: inner, data_type } => {
+        ExprNode::Cast {
+            expr: inner,
+            data_type,
+        } => {
             let folded = fold_expr(inner);
             ExprNode::Cast {
                 expr: Box::new(folded),
@@ -23,7 +26,11 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
             }
         }
         ExprNode::ScalarSubquery(_) => expr.clone(),
-        ExprNode::Function { name, args, distinct } => {
+        ExprNode::Function {
+            name,
+            args,
+            distinct,
+        } => {
             let folded_args = args
                 .iter()
                 .map(|a| match a {
@@ -39,7 +46,10 @@ pub fn fold_expr(expr: &ExprNode) -> ExprNode {
                 distinct: *distinct,
             }
         }
-        ExprNode::Case { when_then_pairs, else_result } => {
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+        } => {
             let folded_pairs: Vec<_> = when_then_pairs
                 .iter()
                 .map(|(when, then)| (Box::new(fold_expr(when)), Box::new(fold_expr(then))))
@@ -102,7 +112,9 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Sub => ai.saturating_sub(*bi),
                 ArithOp::Mul => ai.saturating_mul(*bi),
                 ArithOp::Div => {
-                    if *bi == 0 { return ExprNode::Constant(ConstantValue::Null); }
+                    if *bi == 0 {
+                        return ExprNode::Constant(ConstantValue::Null);
+                    }
                     ai / bi
                 }
             };
@@ -114,7 +126,9 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Sub => af - bf,
                 ArithOp::Mul => af * bf,
                 ArithOp::Div => {
-                    if *bf == 0.0 { return ExprNode::Constant(ConstantValue::Null); }
+                    if *bf == 0.0 {
+                        return ExprNode::Constant(ConstantValue::Null);
+                    }
                     af / bf
                 }
             };
@@ -127,7 +141,9 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Sub => af - bf,
                 ArithOp::Mul => af * bf,
                 ArithOp::Div => {
-                    if *bf == 0.0 { return ExprNode::Constant(ConstantValue::Null); }
+                    if *bf == 0.0 {
+                        return ExprNode::Constant(ConstantValue::Null);
+                    }
                     af / bf
                 }
             };
@@ -140,7 +156,9 @@ pub fn fold_binary_op(a: &ConstantValue, op: ArithOp, b: &ConstantValue) -> Expr
                 ArithOp::Sub => af - bf,
                 ArithOp::Mul => af * bf,
                 ArithOp::Div => {
-                    if bf == 0.0 { return ExprNode::Constant(ConstantValue::Null); }
+                    if bf == 0.0 {
+                        return ExprNode::Constant(ConstantValue::Null);
+                    }
                     af / bf
                 }
             };
@@ -181,13 +199,14 @@ pub fn fold_predicate(pred: &PredicateNode) -> PredicateNode {
             let left = fold_expr(left);
             let right = fold_expr(right);
             if let (ExprNode::Constant(a), ExprNode::Constant(b)) = (&left, &right)
-                && let Some(result) = fold_comparison(a, *op, b) {
-                    return PredicateNode::Compare {
-                        left: Box::new(ExprNode::Constant(ConstantValue::Boolean(result))),
-                        op: *op,
-                        right: Box::new(ExprNode::Constant(b.clone())),
-                    };
-                }
+                && let Some(result) = fold_comparison(a, *op, b)
+            {
+                return PredicateNode::Compare {
+                    left: Box::new(ExprNode::Constant(ConstantValue::Boolean(result))),
+                    op: *op,
+                    right: Box::new(ExprNode::Constant(b.clone())),
+                };
+            }
             PredicateNode::Compare {
                 left: Box::new(left),
                 op: *op,
@@ -205,13 +224,21 @@ pub fn fold_predicate(pred: &PredicateNode) -> PredicateNode {
             expr: Box::new(fold_expr(expr)),
             list: list.iter().map(fold_expr).collect(),
         },
-        PredicateNode::Like { expr, pattern, escape_char } => PredicateNode::Like {
+        PredicateNode::Like {
+            expr,
+            pattern,
+            escape_char,
+        } => PredicateNode::Like {
             expr: Box::new(fold_expr(expr)),
             pattern: pattern.clone(),
             escape_char: *escape_char,
         },
         PredicateNode::Exists(subquery) => PredicateNode::Exists(subquery.clone()),
-        PredicateNode::InSubquery { expr, subquery, negated } => PredicateNode::InSubquery {
+        PredicateNode::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => PredicateNode::InSubquery {
             expr: Box::new(fold_expr(expr)),
             subquery: subquery.clone(),
             negated: *negated,
@@ -220,7 +247,11 @@ pub fn fold_predicate(pred: &PredicateNode) -> PredicateNode {
             left: Box::new(fold_expr(left)),
             right: Box::new(fold_expr(right)),
         },
-        PredicateNode::IsBoolean { expr, test, negated } => PredicateNode::IsBoolean {
+        PredicateNode::IsBoolean {
+            expr,
+            test,
+            negated,
+        } => PredicateNode::IsBoolean {
             expr: Box::new(fold_expr(expr)),
             test: *test,
             negated: *negated,
@@ -308,13 +339,17 @@ fn columns_in_predicate_recursive(pred: &PredicateNode, cols: &mut HashSet<Strin
             extract_expr_columns_into(left, cols);
             extract_expr_columns_into(right, cols);
         }
-        PredicateNode::IsNull(expr) | PredicateNode::IsNotNull(expr)
-        | PredicateNode::Like { expr, .. } | PredicateNode::Between { expr, .. } => {
+        PredicateNode::IsNull(expr)
+        | PredicateNode::IsNotNull(expr)
+        | PredicateNode::Like { expr, .. }
+        | PredicateNode::Between { expr, .. } => {
             extract_expr_columns_into(expr, cols);
         }
         PredicateNode::InList { expr, list } => {
             extract_expr_columns_into(expr, cols);
-            for item in list { extract_expr_columns_into(item, cols); }
+            for item in list {
+                extract_expr_columns_into(item, cols);
+            }
         }
         PredicateNode::Exists(_) => {}
         PredicateNode::InSubquery { expr, .. } => extract_expr_columns_into(expr, cols),
@@ -335,9 +370,13 @@ pub fn extract_expr_columns(expr: &ExprNode) -> HashSet<String> {
 
 fn extract_expr_columns_into(expr: &ExprNode, cols: &mut HashSet<String>) {
     match expr {
-        ExprNode::Column(name) => { cols.insert(name.clone()); }
+        ExprNode::Column(name) => {
+            cols.insert(name.clone());
+        }
         ExprNode::Compound(parts) => {
-            if let Some(last) = parts.last() { cols.insert(last.clone()); }
+            if let Some(last) = parts.last() {
+                cols.insert(last.clone());
+            }
         }
         ExprNode::Binary { left, right, .. } => {
             extract_expr_columns_into(left, cols);
@@ -353,7 +392,10 @@ fn extract_expr_columns_into(expr: &ExprNode, cols: &mut HashSet<String>) {
                 }
             }
         }
-        ExprNode::Case { when_then_pairs, else_result } => {
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+        } => {
             for (when, then) in when_then_pairs {
                 extract_expr_columns_into(when, cols);
                 extract_expr_columns_into(then, cols);
@@ -387,24 +429,36 @@ fn collect_required_columns_recursive(plan: &LogicalPlan, cols: &mut HashSet<Str
             collect_required_columns_recursive(&f.child, cols);
         }
         LogicalPlan::Project(p) => {
-            for ne in &p.expressions { extract_expr_columns_into(&ne.expr, cols); }
+            for ne in &p.expressions {
+                extract_expr_columns_into(&ne.expr, cols);
+            }
         }
         LogicalPlan::Sort(s) => {
-            for ob in &s.order_by { extract_expr_columns_into(&ob.expr, cols); }
+            for ob in &s.order_by {
+                extract_expr_columns_into(&ob.expr, cols);
+            }
             collect_required_columns_recursive(&s.child, cols);
         }
         LogicalPlan::Distinct(d) => collect_required_columns_recursive(&d.child, cols),
         LogicalPlan::Limit(l) => collect_required_columns_recursive(&l.child, cols),
         LogicalPlan::Aggregate(a) => {
-            for expr in &a.group_by { extract_expr_columns_into(expr, cols); }
-            for ag in &a.aggregates {
-                for arg in &ag.args { extract_expr_columns_into(arg, cols); }
+            for expr in &a.group_by {
+                extract_expr_columns_into(expr, cols);
             }
-            if let Some(ref having) = a.having { columns_in_predicate_recursive(having, cols); }
+            for ag in &a.aggregates {
+                for arg in &ag.args {
+                    extract_expr_columns_into(arg, cols);
+                }
+            }
+            if let Some(ref having) = a.having {
+                columns_in_predicate_recursive(having, cols);
+            }
             collect_required_columns_recursive(&a.child, cols);
         }
         LogicalPlan::Join(j) => {
-            if let Some(ref cond) = j.condition { columns_in_predicate_recursive(cond, cols); }
+            if let Some(ref cond) = j.condition {
+                columns_in_predicate_recursive(cond, cols);
+            }
             collect_required_columns_recursive(&j.left, cols);
             collect_required_columns_recursive(&j.right, cols);
         }
@@ -442,13 +496,17 @@ fn extract_column_names_recursive(pred: &PredicateNode, names: &mut Vec<String>)
             extract_column_names_from_expr(left, names);
             extract_column_names_from_expr(right, names);
         }
-        PredicateNode::IsNull(expr) | PredicateNode::IsNotNull(expr)
-        | PredicateNode::Like { expr, .. } | PredicateNode::Between { expr, .. } => {
+        PredicateNode::IsNull(expr)
+        | PredicateNode::IsNotNull(expr)
+        | PredicateNode::Like { expr, .. }
+        | PredicateNode::Between { expr, .. } => {
             extract_column_names_from_expr(expr, names);
         }
         PredicateNode::InList { expr, list } => {
             extract_column_names_from_expr(expr, names);
-            for item in list { extract_column_names_from_expr(item, names); }
+            for item in list {
+                extract_column_names_from_expr(item, names);
+            }
         }
         PredicateNode::Exists(_) => {}
         PredicateNode::InSubquery { expr, .. } => extract_column_names_from_expr(expr, names),
@@ -464,7 +522,9 @@ fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<String>) {
     match expr {
         ExprNode::Column(name) => names.push(name.clone()),
         ExprNode::Compound(parts) => {
-            if let Some(last) = parts.last() { names.push(last.clone()); }
+            if let Some(last) = parts.last() {
+                names.push(last.clone());
+            }
         }
         ExprNode::Binary { left, right, .. } => {
             extract_column_names_from_expr(left, names);
@@ -480,7 +540,10 @@ fn extract_column_names_from_expr(expr: &ExprNode, names: &mut Vec<String>) {
                 }
             }
         }
-        ExprNode::Case { when_then_pairs, else_result } => {
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+        } => {
             for (when, then) in when_then_pairs {
                 extract_column_names_from_expr(when, names);
                 extract_column_names_from_expr(then, names);

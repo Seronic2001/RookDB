@@ -21,6 +21,18 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Checkout sibling crate rook-ast (path dependency)
+      uses: actions/checkout@v4
+      with:
+        repository: RookDB/rook-ast
+        ref: main
+        path: rook-ast
+    - name: Checkout sibling crate rook-parser (dev-dependency)
+      uses: actions/checkout@v4
+      with:
+        repository: RookDB/rook-parser
+        ref: main
+        path: rook-parser
     - name: Setup Node
       uses: actions/setup-node@v4
       with:
@@ -29,8 +41,8 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       with:
         components: rustfmt, clippy
-    - name: Run rustfmt
-      run: cargo fmt --all
+    - name: Check formatting
+      run: cargo fmt --all -- --check
 
     - name: Run clippy
       run: cargo clippy --all-targets -- -D warnings

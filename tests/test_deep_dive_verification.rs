@@ -82,7 +82,10 @@ fn verify_index_scan_null_eq() {
     create_test_table(
         &mut catalog,
         "t_null",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
 
     // Insert a row with v = 0 and a row with v = NULL
@@ -160,8 +163,7 @@ fn read_text_column(catalog: &Catalog, table: &str, column: &str) -> Vec<String>
     use storage_manager::heap::HeapManager;
     use storage_manager::types::row::deserialize_nullable_row;
 
-    let path: std::path::PathBuf =
-        format!("database/base/testdb/{}.dat", table).into();
+    let path: std::path::PathBuf = format!("database/base/testdb/{}.dat", table).into();
     let heap = HeapManager::open(path).expect("open heap");
     let t = catalog
         .databases
@@ -179,15 +181,15 @@ fn read_text_column(catalog: &Catalog, table: &str, column: &str) -> Vec<String>
 
     let mut out = Vec::new();
     for result in heap.scan() {
-        let Ok((_page, _slot, raw)) = result else { continue };
-        let Ok(decoded) = deserialize_nullable_row(&schema, &raw) else { continue };
+        let Ok((_page, _slot, raw)) = result else {
+            continue;
+        };
+        let Ok(decoded) = deserialize_nullable_row(&schema, &raw) else {
+            continue;
+        };
         match decoded.get(pos) {
-            Some(Some(storage_manager::types::value::DataValue::Varchar(s))) => {
-                out.push(s.clone())
-            }
-            Some(Some(storage_manager::types::value::DataValue::Char(s))) => {
-                out.push(s.clone())
-            }
+            Some(Some(storage_manager::types::value::DataValue::Varchar(s))) => out.push(s.clone()),
+            Some(Some(storage_manager::types::value::DataValue::Char(s))) => out.push(s.clone()),
             Some(Some(v)) => out.push(format!("{:?}", v)),
             _ => out.push("NULL".to_string()),
         }
@@ -213,7 +215,9 @@ fn run_text_arith(tag: &str, rows: &[&str]) -> Vec<String> {
     );
 
     for (i, row) in rows.iter().enumerate() {
-        assert!(insert_single_tuple(&catalog, "testdb", "u_t", &[&(i + 1).to_string(), row]).unwrap());
+        assert!(
+            insert_single_tuple(&catalog, "testdb", "u_t", &[&(i + 1).to_string(), row]).unwrap()
+        );
     }
 
     let assignments = parse_set_clause("note = note - 2").expect("parse set");
@@ -221,7 +225,11 @@ fn run_text_arith(tag: &str, rows: &[&str]) -> Vec<String> {
     let ptrs = select_matching_pointers(&catalog, "testdb", "u_t", sel).expect("select");
     assert_eq!(ptrs.len(), rows.len());
     storage_manager::executor::update::update_by_pointers(
-        &catalog, "testdb", "u_t", &ptrs, &assignments,
+        &catalog,
+        "testdb",
+        "u_t",
+        &ptrs,
+        &assignments,
     )
     .expect("update");
 
@@ -280,12 +288,22 @@ fn verify_update_roundtrip_corruption() {
 
     // Row 1: normal typed values; Row 2: varchar containing literal "NULL"
     assert!(
-        insert_single_tuple(&catalog, "testdb", "r_t", &["1", "123456789012", "2.5", "'2024-01-15'", "'ok'"])
-            .unwrap()
+        insert_single_tuple(
+            &catalog,
+            "testdb",
+            "r_t",
+            &["1", "123456789012", "2.5", "'2024-01-15'", "'ok'"]
+        )
+        .unwrap()
     );
     assert!(
-        insert_single_tuple(&catalog, "testdb", "r_t", &["2", "42", "1.0", "'2024-06-01'", "'NULL'"])
-            .unwrap()
+        insert_single_tuple(
+            &catalog,
+            "testdb",
+            "r_t",
+            &["2", "42", "1.0", "'2024-06-01'", "'NULL'"]
+        )
+        .unwrap()
     );
 
     // Touch every row with a no-op arithmetic UPDATE on the Int column
@@ -296,7 +314,11 @@ fn verify_update_roundtrip_corruption() {
     let ptrs = select_matching_pointers(&catalog, "testdb", "r_t", sel).expect("select");
     assert_eq!(ptrs.len(), 2);
     storage_manager::executor::update::update_by_pointers(
-        &catalog, "testdb", "r_t", &ptrs, &assignments,
+        &catalog,
+        "testdb",
+        "r_t",
+        &ptrs,
+        &assignments,
     )
     .expect("update");
 
@@ -312,7 +334,9 @@ fn verify_update_roundtrip_corruption() {
     let mut rows: Vec<Vec<Option<DataValue>>> = Vec::new();
     for result in heap.scan() {
         let Ok((_p, _s, raw)) = result else { continue };
-        let Ok(decoded) = deserialize_nullable_row(&schema, &raw) else { continue };
+        let Ok(decoded) = deserialize_nullable_row(&schema, &raw) else {
+            continue;
+        };
         rows.push(decoded);
     }
     rows.sort_by_key(|r| match &r[0] {
@@ -324,21 +348,37 @@ fn verify_update_roundtrip_corruption() {
 
     // Row 1 must be untouched
     if rows[0][1] != Some(DataValue::BigInt(123456789012)) {
-        corruptions.push(format!("BUG 4d: BIGINT destroyed by UPDATE roundtrip — got {:?}", rows[0][1]));
+        corruptions.push(format!(
+            "BUG 4d: BIGINT destroyed by UPDATE roundtrip — got {:?}",
+            rows[0][1]
+        ));
     }
     if !matches!(rows[0][2], Some(DataValue::DoublePrecision(_))) {
-        corruptions.push(format!("BUG 4d: DOUBLE destroyed by UPDATE roundtrip — got {:?}", rows[0][2]));
+        corruptions.push(format!(
+            "BUG 4d: DOUBLE destroyed by UPDATE roundtrip — got {:?}",
+            rows[0][2]
+        ));
     }
     if !matches!(rows[0][3], Some(DataValue::Date(_))) {
-        corruptions.push(format!("BUG 4d: DATE destroyed by UPDATE roundtrip — got {:?}", rows[0][3]));
+        corruptions.push(format!(
+            "BUG 4d: DATE destroyed by UPDATE roundtrip — got {:?}",
+            rows[0][3]
+        ));
     }
 
     // Row 2's varchar containing the literal text "NULL" must survive
     if rows[1][4] != Some(DataValue::Varchar("NULL".to_string())) {
-        corruptions.push(format!("BUG 4c: literal text 'NULL' corrupted by UPDATE roundtrip — got {:?}", rows[1][4]));
+        corruptions.push(format!(
+            "BUG 4c: literal text 'NULL' corrupted by UPDATE roundtrip — got {:?}",
+            rows[1][4]
+        ));
     }
 
-    assert!(corruptions.is_empty(), "roundtrip corruption:\n{}", corruptions.join("\n"));
+    assert!(
+        corruptions.is_empty(),
+        "roundtrip corruption:\n{}",
+        corruptions.join("\n")
+    );
 }
 
 /// Bug 4e candidate: `SET col = col` parses the RHS column reference as a
@@ -366,7 +406,11 @@ fn verify_update_self_reference() {
     let sel = parse_where_text("id = 1").expect("parse where");
     let ptrs = select_matching_pointers(&catalog, "testdb", "s_t", sel).expect("select");
     storage_manager::executor::update::update_by_pointers(
-        &catalog, "testdb", "s_t", &ptrs, &assignments,
+        &catalog,
+        "testdb",
+        "s_t",
+        &ptrs,
+        &assignments,
     )
     .expect("update");
 
@@ -392,7 +436,10 @@ fn verify_duplicate_keys_straddle_free() {
     create_test_table(
         &mut catalog,
         "d_t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
 
     // Insert many duplicate keys to force index splits

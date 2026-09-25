@@ -1,6 +1,6 @@
+use chrono::{SecondsFormat, Utc};
 use std::fs::{OpenOptions, create_dir_all};
 use std::io::{self, Write};
-use chrono::{SecondsFormat, Utc};
 
 use serde_json::{Value, json};
 
@@ -20,10 +20,7 @@ fn append_log(
     create_dir_all(&dir)?;
 
     let path = format!("{}/{}", dir, file_name);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
     let entry = json!({
         "timestamp": current_timestamp_iso(),
@@ -36,21 +33,11 @@ fn append_log(
     Ok(())
 }
 
-pub fn log_update(
-    db_name: &str,
-    table_name: &str,
-    details: Value,
-    status: &str,
-) -> io::Result<()> {
+pub fn log_update(db_name: &str, table_name: &str, details: Value, status: &str) -> io::Result<()> {
     append_log(db_name, table_name, "update", "update.log", details, status)
 }
 
-pub fn log_delete(
-    db_name: &str,
-    table_name: &str,
-    details: Value,
-    status: &str,
-) -> io::Result<()> {
+pub fn log_delete(db_name: &str, table_name: &str, details: Value, status: &str) -> io::Result<()> {
     append_log(db_name, table_name, "delete", "delete.log", details, status)
 }
 

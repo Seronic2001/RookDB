@@ -4,7 +4,7 @@
 //! and CHECK constraints, called by the public API functions.
 
 use crate::catalog::types::Column;
-use crate::types::{DataValue, DataType};
+use crate::types::{DataType, DataValue};
 
 use super::value_lookup;
 use super::{ConstraintKind, RookError};
@@ -20,7 +20,10 @@ pub(crate) fn check_not_null(
         if !col.nullable {
             let val = values.get(i).unwrap_or(&"");
             let trimmed = val.trim();
-            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") || trimmed.eq_ignore_ascii_case("NULL") {
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("null")
+                || trimmed.eq_ignore_ascii_case("NULL")
+            {
                 return Err(RookError::constraint(
                     ConstraintKind::NotNull,
                     table_name,
@@ -35,8 +38,6 @@ pub(crate) fn check_not_null(
     }
     Ok(())
 }
-
-
 
 /// Metadata-driven UNIQUE check — the hot path used by row inserts/updates.
 ///
@@ -70,7 +71,10 @@ pub(crate) fn check_unique_insert_meta(
         let mut has_null = false;
 
         for col_name in idx_cols {
-            let col_pos = match columns.iter().position(|c| c.name.eq_ignore_ascii_case(col_name)) {
+            let col_pos = match columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(col_name))
+            {
                 Some(p) => p,
                 None => continue,
             };
@@ -84,8 +88,9 @@ pub(crate) fn check_unique_insert_meta(
             }
 
             let col_type = columns[col_pos].data_type.clone();
-            let dv = crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
-                .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
+            let dv =
+                crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
+                    .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
             key_values.push(dv);
             key_types.push(col_type);
         }
@@ -100,7 +105,8 @@ pub(crate) fn check_unique_insert_meta(
         let mut checked_index = false;
 
         let idx_path = std::path::PathBuf::from(format!(
-            "database/base/{}/{}.{}.idx", db_name, table_name, idx_name
+            "database/base/{}/{}.{}.idx",
+            db_name, table_name, idx_name
         ));
         if idx_path.exists() {
             let kt1 = key_types.clone();
@@ -127,14 +133,19 @@ pub(crate) fn check_unique_insert_meta(
                 Err(e) => {
                     log::warn!(
                         "[Constraint] BTree search error for UNIQUE check on '{}.{}' (index '{}'): {}",
-                        db_name, table_name, idx_name, e
+                        db_name,
+                        table_name,
+                        idx_name,
+                        e
                     );
                 }
             }
         }
 
         if found_via_index {
-            let vals_str = idx_cols.iter().zip(key_values.iter())
+            let vals_str = idx_cols
+                .iter()
+                .zip(key_values.iter())
                 .map(|(c, v)| format!("{}={}", c, v))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -154,59 +165,60 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         // Heap-scan fallback for this unique index if no index file exists
-        let heap_path = std::path::PathBuf::from(format!(
-            "database/base/{}/{}.dat", db_name, table_name
-        ));
-        if heap_path.exists() {
-            if let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path) {
-                let schema_types: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
-                for result in heap.scan() {
-                    let (page_id, slot_id, raw_bytes) = match result {
-                        Ok(triple) => triple,
-                        Err(_) => continue,
-                    };
-                    if exclude_ptrs.contains(&(page_id, slot_id)) {
-                        continue;
-                    }
+        let heap_path =
+            std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+        if heap_path.exists()
+            && let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path)
+        {
+            let schema_types: Vec<crate::types::DataType> =
+                columns.iter().map(|c| c.data_type.clone()).collect();
+            for result in heap.scan() {
+                let (page_id, slot_id, raw_bytes) = match result {
+                    Ok(triple) => triple,
+                    Err(_) => continue,
+                };
+                if exclude_ptrs.contains(&(page_id, slot_id)) {
+                    continue;
+                }
 
-                    let decoded = match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
+                let decoded =
+                    match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
 
-                    let mut matches = true;
-                    use crate::types::Comparable;
-                    for (i, &pos) in col_positions.iter().enumerate() {
-                        match decoded.get(pos) {
-                            Some(Some(existing_val)) => {
-                                if let Ok(cmp) = existing_val.compare(&key_values[i]) {
-                                    if cmp != std::cmp::Ordering::Equal {
-                                        matches = false;
-                                        break;
-                                    }
-                                } else {
+                let mut matches = true;
+                use crate::types::Comparable;
+                for (i, &pos) in col_positions.iter().enumerate() {
+                    match decoded.get(pos) {
+                        Some(Some(existing_val)) => {
+                            if let Ok(cmp) = existing_val.compare(&key_values[i]) {
+                                if cmp != std::cmp::Ordering::Equal {
                                     matches = false;
                                     break;
                                 }
-                            }
-                            _ => {
+                            } else {
                                 matches = false;
                                 break;
                             }
                         }
+                        _ => {
+                            matches = false;
+                            break;
+                        }
                     }
+                }
 
-                    if matches {
-                        return Err(RookError::constraint(
-                            ConstraintKind::Unique,
-                            table_name,
-                            Some(&idx_cols.join(",")),
-                            format!(
-                                "UNIQUE constraint violated on index '{}': duplicate key values in heap",
-                                idx_name
-                            ),
-                        ));
-                    }
+                if matches {
+                    return Err(RookError::constraint(
+                        ConstraintKind::Unique,
+                        table_name,
+                        Some(&idx_cols.join(",")),
+                        format!(
+                            "UNIQUE constraint violated on index '{}': duplicate key values in heap",
+                            idx_name
+                        ),
+                    ));
                 }
             }
         }
@@ -219,7 +231,10 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         // If this column is already covered by a single-column unique index, skip it
-        if unique_indexes.iter().any(|(_, cols)| cols.len() == 1 && cols[0].eq_ignore_ascii_case(&col.name)) {
+        if unique_indexes
+            .iter()
+            .any(|(_, cols)| cols.len() == 1 && cols[0].eq_ignore_ascii_case(&col.name))
+        {
             continue;
         }
 
@@ -230,21 +245,22 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         let col_type = columns[col_pos].data_type.clone();
-        let key_value = crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
-            .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
+        let key_value =
+            crate::backend::executor::create_index::parse_string_to_value(&col_type, trimmed)
+                .map_err(|e| format!("Failed to parse value for UNIQUE check: {}", e))?;
 
         let mut found_via_index = false;
         let mut checked_index = false;
 
         // Legacy single-index file fallback
-        let legacy_idx_path = std::path::PathBuf::from(format!(
-            "database/base/{}/{}.idx", db_name, table_name
-        ));
+        let legacy_idx_path =
+            std::path::PathBuf::from(format!("database/base/{}/{}.idx", db_name, table_name));
         if legacy_idx_path.exists() {
             match crate::backend::cache::with_btree(
                 &legacy_idx_path,
                 || -> std::io::Result<crate::backend::index::btree::BTree> {
-                    let mut bt = crate::backend::index::btree::BTree::open(legacy_idx_path.clone())?;
+                    let mut bt =
+                        crate::backend::index::btree::BTree::open(legacy_idx_path.clone())?;
                     bt.set_key_type(col_type.clone());
                     Ok(bt)
                 },
@@ -262,7 +278,9 @@ pub(crate) fn check_unique_insert_meta(
                 Err(e) => {
                     log::warn!(
                         "[Constraint] Legacy BTree search error for UNIQUE check on '{}.{}': {}",
-                        db_name, table_name, e
+                        db_name,
+                        table_name,
+                        e
                     );
                 }
             }
@@ -285,40 +303,42 @@ pub(crate) fn check_unique_insert_meta(
         }
 
         // Heap-scan fallback for column-level unique
-        let heap_path = std::path::PathBuf::from(format!(
-            "database/base/{}/{}.dat", db_name, table_name
-        ));
-        if heap_path.exists() {
-            if let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path) {
-                let schema_types: Vec<crate::types::DataType> = columns.iter().map(|c| c.data_type.clone()).collect();
-                for result in heap.scan() {
-                    let (page_id, slot_id, raw_bytes) = match result {
-                        Ok(triple) => triple,
-                        Err(_) => continue,
-                    };
-                    if exclude_ptrs.contains(&(page_id, slot_id)) {
-                        continue;
-                    }
+        let heap_path =
+            std::path::PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
+        if heap_path.exists()
+            && let Ok(heap) = crate::backend::heap::HeapManager::open(heap_path)
+        {
+            let schema_types: Vec<crate::types::DataType> =
+                columns.iter().map(|c| c.data_type.clone()).collect();
+            for result in heap.scan() {
+                let (page_id, slot_id, raw_bytes) = match result {
+                    Ok(triple) => triple,
+                    Err(_) => continue,
+                };
+                if exclude_ptrs.contains(&(page_id, slot_id)) {
+                    continue;
+                }
 
-                    let decoded = match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
+                let decoded =
+                    match crate::types::deserialize_nullable_row(&schema_types, &raw_bytes) {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
 
-                    if let Some(Some(existing_val)) = decoded.get(col_pos) {
-                        use crate::types::Comparable;
-                        if let Ok(cmp) = existing_val.compare(&key_value)
-                            && cmp == std::cmp::Ordering::Equal {
-                                return Err(RookError::constraint(
-                                    ConstraintKind::Unique,
-                                    table_name,
-                                    Some(&col.name),
-                                    format!(
-                                        "UNIQUE constraint violated: value '{}' already exists for column '{}'",
-                                        trimmed, col.name
-                                    ),
-                                ));
-                            }
+                if let Some(Some(existing_val)) = decoded.get(col_pos) {
+                    use crate::types::Comparable;
+                    if let Ok(cmp) = existing_val.compare(&key_value)
+                        && cmp == std::cmp::Ordering::Equal
+                    {
+                        return Err(RookError::constraint(
+                            ConstraintKind::Unique,
+                            table_name,
+                            Some(&col.name),
+                            format!(
+                                "UNIQUE constraint violated: value '{}' already exists for column '{}'",
+                                trimmed, col.name
+                            ),
+                        ));
                     }
                 }
             }
@@ -354,24 +374,41 @@ pub(crate) fn check_foreign_key_insert_meta(
         let parent_table = &fk.1;
         let parent_col = &fk.2;
 
-        let col_pos = columns.iter().position(|c| c.name.eq_ignore_ascii_case(child_col))
+        let col_pos = columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(child_col))
             .ok_or_else(|| format!("FK column '{}' not found in table schema", child_col))?;
 
         let raw_val = values.get(col_pos).unwrap_or(&"");
         let trimmed = raw_val.trim();
 
         // NULL values in FK columns are allowed (SQL standard)
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") || trimmed.eq_ignore_ascii_case("NULL") {
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("null")
+            || trimmed.eq_ignore_ascii_case("NULL")
+        {
             continue;
         }
 
-        let parent_col_type = catalog.databases.get(db_name)
+        let parent_col_type = catalog
+            .databases
+            .get(db_name)
             .and_then(|db| db.tables.get(parent_table))
-            .and_then(|t| t.columns.iter().find(|c| c.name.eq_ignore_ascii_case(parent_col)))
+            .and_then(|t| {
+                t.columns
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(parent_col))
+            })
             .map(|c| c.data_type.clone())
             .unwrap_or(DataType::Varchar(255));
 
-        if !value_lookup::value_exists_in_table(db_name, parent_table, parent_col, &parent_col_type, trimmed)? {
+        if !value_lookup::value_exists_in_table(
+            db_name,
+            parent_table,
+            parent_col,
+            &parent_col_type,
+            trimmed,
+        )? {
             return Err(RookError::constraint(
                 ConstraintKind::ForeignKey,
                 table_name,
@@ -386,8 +423,6 @@ pub(crate) fn check_foreign_key_insert_meta(
 
     Ok(())
 }
-
-
 
 /// Check CHECK constraints loaded from `sys_constraints`.
 ///
@@ -435,12 +470,18 @@ pub(crate) fn check_constraints_meta(
     // Fast path: evaluate precompiled check AST nodes directly (no SQL parsing)
     if !meta.check_ast.is_empty() {
         for (expr, ast_node) in &meta.check_ast {
-            let pred = crate::backend::executor::physical::expr::predicate_from_ast(ast_node, &col_names)
-                .map_err(|e| RookError::Internal(format!(
-                    "Failed to compile CHECK constraint '{}': {}", expr, e
-                )))?;
-            match crate::backend::executor::physical::expr::evaluate_predicate(&pred, &tuple, &schema) {
-                Ok(Some(true)) => {}                       // satisfied
+            let pred =
+                crate::backend::executor::physical::expr::predicate_from_ast(ast_node, &col_names)
+                    .map_err(|e| {
+                        RookError::Internal(format!(
+                            "Failed to compile CHECK constraint '{}': {}",
+                            expr, e
+                        ))
+                    })?;
+            match crate::backend::executor::physical::expr::evaluate_predicate(
+                &pred, &tuple, &schema,
+            ) {
+                Ok(Some(true)) => {} // satisfied
                 Ok(Some(false)) => {
                     return Err(RookError::constraint(
                         ConstraintKind::Check,
@@ -449,10 +490,11 @@ pub(crate) fn check_constraints_meta(
                         format!("CHECK constraint violated: '{}'", expr),
                     ));
                 }
-                Ok(None) => {}                             // UNKNOWN (NULL) → pass, per SQL
+                Ok(None) => {} // UNKNOWN (NULL) → pass, per SQL
                 Err(e) => {
                     return Err(RookError::Internal(format!(
-                        "Failed to evaluate CHECK constraint '{}': {}", expr, e
+                        "Failed to evaluate CHECK constraint '{}': {}",
+                        expr, e
                     )));
                 }
             }
@@ -463,14 +505,23 @@ pub(crate) fn check_constraints_meta(
     // Fallback path: parse and compile using registered hook if check_ast is empty
     if let Some(parser) = crate::backend::cache::get_check_parser() {
         for expr in &meta.check_exprs {
-            let node = parser(expr).map_err(|e| RookError::Internal(format!(
-                "Failed to parse CHECK constraint expression '{}': {}", expr, e
-            )))?;
-            let pred = crate::backend::executor::physical::expr::predicate_from_ast(&node, &col_names)
-                .map_err(|e| RookError::Internal(format!(
-                    "Failed to compile CHECK constraint '{}': {}", expr, e
-                )))?;
-            match crate::backend::executor::physical::expr::evaluate_predicate(&pred, &tuple, &schema) {
+            let node = parser(expr).map_err(|e| {
+                RookError::Internal(format!(
+                    "Failed to parse CHECK constraint expression '{}': {}",
+                    expr, e
+                ))
+            })?;
+            let pred =
+                crate::backend::executor::physical::expr::predicate_from_ast(&node, &col_names)
+                    .map_err(|e| {
+                        RookError::Internal(format!(
+                            "Failed to compile CHECK constraint '{}': {}",
+                            expr, e
+                        ))
+                    })?;
+            match crate::backend::executor::physical::expr::evaluate_predicate(
+                &pred, &tuple, &schema,
+            ) {
                 Ok(Some(true)) => {}
                 Ok(Some(false)) => {
                     return Err(RookError::constraint(
@@ -483,7 +534,8 @@ pub(crate) fn check_constraints_meta(
                 Ok(None) => {}
                 Err(e) => {
                     return Err(RookError::Internal(format!(
-                        "Failed to evaluate CHECK constraint '{}': {}", expr, e
+                        "Failed to evaluate CHECK constraint '{}': {}",
+                        expr, e
                     )));
                 }
             }
@@ -497,7 +549,10 @@ pub(crate) fn check_constraints_meta(
 ///
 /// NULL (empty or literal "null", case-insensitive) becomes `None`, which
 /// makes comparisons evaluate to UNKNOWN under three-valued logic.
-fn build_check_tuple(columns: &[Column], values: &[&str]) -> crate::backend::executor::physical::tuple::Tuple {
+fn build_check_tuple(
+    columns: &[Column],
+    values: &[&str],
+) -> crate::backend::executor::physical::tuple::Tuple {
     use crate::backend::executor::physical::tuple::Tuple;
 
     let mut vals: Vec<Option<crate::types::DataValue>> = Vec::with_capacity(columns.len());
@@ -507,12 +562,13 @@ fn build_check_tuple(columns: &[Column], values: &[&str]) -> crate::backend::exe
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
             vals.push(None);
         } else {
-            vals.push(DataValue::parse_and_encode(&col.data_type, trimmed).ok().and_then(|bytes| {
-                DataValue::from_bytes(&col.data_type, &bytes).ok()
-            }));
+            vals.push(
+                DataValue::parse_and_encode(&col.data_type, trimmed)
+                    .ok()
+                    .and_then(|bytes| DataValue::from_bytes(&col.data_type, &bytes).ok()),
+            );
         }
     }
 
     Tuple::new(vals)
 }
-

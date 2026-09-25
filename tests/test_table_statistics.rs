@@ -5,7 +5,7 @@ use std::io::Seek;
 #[allow(deprecated)]
 use storage_manager::heap::{init_table, insert_tuple};
 use storage_manager::statistics::collect_table_statistics_from_file;
-use storage_manager::types::{serialize_nullable_row, DataType};
+use storage_manager::types::{DataType, serialize_nullable_row};
 
 #[test]
 #[allow(deprecated)]

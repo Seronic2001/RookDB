@@ -141,7 +141,9 @@ impl RowLayout {
                 cursor += align - (cursor % align);
             }
             fixed_col_offsets.push(cursor);
-            cursor += ty.fixed_size().expect("fixed-length type must have fixed_size") as usize;
+            cursor += ty
+                .fixed_size()
+                .expect("fixed-length type must have fixed_size") as usize;
         }
 
         Self {

@@ -159,7 +159,11 @@ fn try_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect())
@@ -202,11 +206,10 @@ fn n_plan_cache_insert_with_null_literal_is_rejected() {
     // Control: the planner path inserts the row with b = NULL (valid SQL).
     let plan = rook_parser::parse_sql("INSERT INTO t VALUES (1, NULL)").expect("parse");
     let logical = plan_query(&plan, &catalog, "db12n").expect("plan");
-    let tuples =
-        storage_manager::backend::executor::physical::engine::execute_plan_collect(
-            &logical, &catalog, "db12n",
-        )
-        .expect("planner insert with NULL must execute");
+    let tuples = storage_manager::backend::executor::physical::engine::execute_plan_collect(
+        &logical, &catalog, "db12n",
+    )
+    .expect("planner insert with NULL must execute");
     assert_eq!(tuples.len(), 1, "planner control: row inserted");
     assert_eq!(
         try_select(&catalog, "db12n", "SELECT a, b FROM t WHERE a = 1").expect("select"),
@@ -244,7 +247,11 @@ fn o_update_unknown_set_column_silently_dropped_row_reported_updated() {
 
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db12o"), "create db");
-    make_table("db12o", "emp", vec![col("name", DataType::Varchar(50), true)]);
+    make_table(
+        "db12o",
+        "emp",
+        vec![col("name", DataType::Varchar(50), true)],
+    );
     insert("db12o", "emp", &["'alice'"]);
     let catalog = load_catalog();
 
@@ -317,7 +324,14 @@ fn p_update_numeric_text_literal_parse_failure_silently_nulls() {
     make_table(
         "db12p",
         "acc",
-        vec![col("sal", DataType::Numeric { precision: 10, scale: 2 }, true)],
+        vec![col(
+            "sal",
+            DataType::Numeric {
+                precision: 10,
+                scale: 2,
+            },
+            true,
+        )],
     );
     insert("db12p", "acc", &["100.50"]);
     let catalog = load_catalog();
@@ -537,7 +551,10 @@ fn x3_plan_cache_plain_inserts_still_work() {
     make_table(
         "db12x3",
         "t",
-        vec![col("a", DataType::Int, true), col("b", DataType::Varchar(10), true)],
+        vec![
+            col("a", DataType::Int, true),
+            col("b", DataType::Varchar(10), true),
+        ],
     );
     let catalog = load_catalog();
 

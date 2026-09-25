@@ -10,7 +10,8 @@ fn test_page_free_space() {
     let file_path = "tests/test_page_free_space.bin";
 
     // --- Step 0: Initialize the table header (Table metadata region)
-    let _hm = HeapManager::create(std::path::PathBuf::from(file_path)).expect("Failed to create heap manager");
+    let _hm = HeapManager::create(std::path::PathBuf::from(file_path))
+        .expect("Failed to create heap manager");
     println!("Table initialized successfully.");
 
     let mut file = OpenOptions::new()

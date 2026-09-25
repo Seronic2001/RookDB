@@ -9,13 +9,13 @@
 
 mod common;
 
+use common::TestWorkspace;
 use rook_ast::QueryPlan;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-use common::TestWorkspace;
 
 fn col(name: &str, ty: DataType) -> Column {
     Column {
@@ -52,21 +52,20 @@ fn insert_rows(catalog: &Catalog, db: &str, sql: &str) -> Result<usize, String> 
         Ok(other) => return Err(format!("expected INSERT, got {:?}", other.statement_type())),
         Err(e) => return Err(e),
     };
-    let logical = storage_manager::planner::plan_query(&plan, catalog, db)
-        .map_err(|e| e.to_string())?;
-    let tuples =
-        storage_manager::backend::executor::physical::engine::execute_plan_collect(
-            &logical, catalog, db,
-        )
-        .map_err(|e| e.to_string())?;
+    let logical =
+        storage_manager::planner::plan_query(&plan, catalog, db).map_err(|e| e.to_string())?;
+    let tuples = storage_manager::backend::executor::physical::engine::execute_plan_collect(
+        &logical, catalog, db,
+    )
+    .map_err(|e| e.to_string())?;
     // InsertOperator yields one tuple per successfully inserted row.
     Ok(tuples.len())
 }
 
 fn table_contents(catalog: &Catalog, db: &str) -> Vec<Vec<String>> {
+    use rook_ast::QueryPlan;
     use storage_manager::backend::executor::physical::engine::execute_plan_collect;
     use storage_manager::backend::executor::physical::tuple::Tuple;
-    use rook_ast::QueryPlan;
     let select = match rook_parser::parse_sql("SELECT * FROM staff ORDER BY id") {
         Ok(QueryPlan::Select(s)) => s,
         _ => panic!("setup select"),
@@ -124,7 +123,10 @@ fn values_expressions_are_evaluated() {
     .unwrap();
     assert_eq!(n, 1);
 
-    assert_eq!(table_contents(&catalog, "edb"), vec![vec!["14", "'AB'", "50"]]);
+    assert_eq!(
+        table_contents(&catalog, "edb"),
+        vec![vec!["14", "'AB'", "50"]]
+    );
 }
 
 #[test]
@@ -139,7 +141,11 @@ fn column_subset_and_defaults_fill_missing_columns() {
         &mut catalog,
         "ddb",
         "staff",
-        vec![col("id", DataType::Int), col("name", DataType::Varchar(30)), col("salary", DataType::Int)],
+        vec![
+            col("id", DataType::Int),
+            col("name", DataType::Varchar(30)),
+            col("salary", DataType::Int),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -149,7 +155,7 @@ fn column_subset_and_defaults_fill_missing_columns() {
     let n = insert_rows(
         &catalog,
         "ddb",
-        "INSERT INTO staff (id, name) VALUES (7, 'g')"
+        "INSERT INTO staff (id, name) VALUES (7, 'g')",
     )
     .unwrap();
     assert_eq!(n, 1);

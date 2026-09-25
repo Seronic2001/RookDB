@@ -18,21 +18,19 @@ pub fn init_catalog() {
 
     // Create directory if not exist
     if let Some(parent) = catalog_path.parent()
-        && !parent.exists() {
-            match fs::create_dir_all(parent) {
-                Ok(_) => {
-                    debug_print_catalog(&format!(
-                        " Created catalog directory: {}",
-                        parent.display()
-                    ));
-                }
-                Err(e) => {
-                    log::error!("Failed to create catalog directory: {}", e);
-                    log::error!("Please check directory permissions and disk space.");
-                    return;
-                }
+        && !parent.exists()
+    {
+        match fs::create_dir_all(parent) {
+            Ok(_) => {
+                debug_print_catalog(&format!(" Created catalog directory: {}", parent.display()));
+            }
+            Err(e) => {
+                log::error!("Failed to create catalog directory: {}", e);
+                log::error!("Please check directory permissions and disk space.");
+                return;
             }
         }
+    }
 
     // Ensure base database directory exists
     let base_dir = Path::new(DATABASE_DIR);
@@ -54,9 +52,10 @@ pub fn init_catalog() {
     // Create system directory if not exist
     let system_dir = Path::new(SYSTEM_DIR);
     if !system_dir.exists()
-        && let Err(e) = fs::create_dir_all(system_dir) {
-            log::error!("Failed to create system directory: {}", e);
-        }
+        && let Err(e) = fs::create_dir_all(system_dir)
+    {
+        log::error!("Failed to create system directory: {}", e);
+    }
 
     // Bootstrap: migrate catalog.json → system tables if needed
     let migrated = crate::backend::system_table::bootstrap_system_catalog();
@@ -98,11 +97,15 @@ pub fn load_catalog() -> Catalog {
     match fs::read_to_string(catalog_path) {
         Ok(data) => serde_json::from_str::<Catalog>(&data).unwrap_or_else(|e| {
             log::error!("Failed to parse catalog JSON: {}", e);
-            Catalog { databases: HashMap::new() }
+            Catalog {
+                databases: HashMap::new(),
+            }
         }),
         Err(e) => {
             log::error!("Failed to read catalog.json: {}", e);
-            Catalog { databases: HashMap::new() }
+            Catalog {
+                databases: HashMap::new(),
+            }
         }
     }
 }
@@ -251,8 +254,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
 
         println!(
             "Database '{}' does not exist. Cannot create table '{}'.",
-            db_name,
-            table_name
+            db_name, table_name
         );
 
         return;
@@ -270,8 +272,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
 
         println!(
             "Table '{}' already exists in database '{}'. Skipping creation.",
-            table_name,
-            db_name
+            table_name, db_name
         );
 
         return;
@@ -335,8 +336,7 @@ pub fn create_table(catalog: &mut Catalog, db_name: &str, table_name: &str, colu
 
                 println!(
                     "Failed to create table data file '{}': {}",
-                    table_file_path,
-                    e
+                    table_file_path, e
                 );
 
                 return;
@@ -378,6 +378,6 @@ pub fn show_tables(catalog: &Catalog, db_name: &str) {
         log::info!("");
     } else {
         log::info!("Database '{}' not found.\n", db_name);
-         println!("Database '{}' not found.", db_name);
+        println!("Database '{}' not found.", db_name);
     }
 }

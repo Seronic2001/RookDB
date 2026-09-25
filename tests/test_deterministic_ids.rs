@@ -9,9 +9,7 @@
 
 mod common;
 
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Column,
-};
+use storage_manager::catalog::{Column, create_database, create_table, load_catalog, save_catalog};
 use storage_manager::types::DataType;
 
 fn plain_col(name: &str) -> Column {
@@ -29,7 +27,7 @@ fn read_id_pairs(
     schema: &[storage_manager::types::DataType],
     name_idx: usize,
 ) -> Vec<(String, i32)> {
-    use storage_manager::types::{deserialize_nullable_row, DataValue};
+    use storage_manager::types::{DataValue, deserialize_nullable_row};
     let path = std::path::PathBuf::from(format!(
         "{}/{}.dat",
         storage_manager::layout::SYSTEM_DIR,
@@ -39,18 +37,19 @@ fn read_id_pairs(
     let mut pairs = Vec::new();
     for result in heap.scan() {
         if let Ok((_, _, raw)) = result
-            && let Ok(row) = deserialize_nullable_row(schema, &raw) {
-                let id = match row.first() {
-                    Some(Some(DataValue::Int(id))) => *id,
-                    _ => continue,
-                };
-                let name = match row.get(name_idx) {
-                    Some(Some(DataValue::Varchar(s))) => s.clone(),
-                    Some(Some(DataValue::Char(s))) => s.clone(),
-                    _ => continue,
-                };
-                pairs.push((name, id));
-            }
+            && let Ok(row) = deserialize_nullable_row(schema, &raw)
+        {
+            let id = match row.first() {
+                Some(Some(DataValue::Int(id))) => *id,
+                _ => continue,
+            };
+            let name = match row.get(name_idx) {
+                Some(Some(DataValue::Varchar(s))) => s.clone(),
+                Some(Some(DataValue::Char(s))) => s.clone(),
+                _ => continue,
+            };
+            pairs.push((name, id));
+        }
     }
     pairs
 }

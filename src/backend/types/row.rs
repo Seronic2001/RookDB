@@ -38,9 +38,7 @@ pub fn row_byte_size(schema: &[DataType], values: &[Option<&DataValue>]) -> usiz
     let mut size = layout.min_row_size();
     for (k, &log_idx) in physical.varlen_indices_logical.iter().enumerate() {
         if let Some(Some(val)) = values.get(log_idx) {
-            let bytes = val
-                .to_bytes_for_type(&schema[log_idx])
-                .unwrap_or_default();
+            let bytes = val.to_bytes_for_type(&schema[log_idx]).unwrap_or_default();
             // stored bytes for varchar are exclusively raw payload
             let payload_len = bytes.len();
             let _ = k; // offset-table slot already counted in min_row_size
@@ -163,8 +161,7 @@ fn serialize_encoded(
 
     // ── Null bitmap ───────────────────────────────────────────────────────────
     let bm_start = RowLayout::bitmap_offset();
-    buf[bm_start..bm_start + layout.null_bitmap_size]
-        .copy_from_slice(bitmap.as_bytes());
+    buf[bm_start..bm_start + layout.null_bitmap_size].copy_from_slice(bitmap.as_bytes());
 
     // ── Var-len offset table (initialised to 0x0000) ──────────────────────────
     // (Already zeroed by vec![0u8; …])
@@ -262,8 +259,7 @@ pub fn deserialize_nullable_row(
 
     // Build a lookup: varlen physical-group rank → row-byte range
     // length[k] = offset[k+1] - offset[k];  length[last] = total_row_size - offset[last]
-    let mut varlen_ranges: Vec<Option<(usize, usize)>> =
-        vec![None; physical.num_varlen()];
+    let mut varlen_ranges: Vec<Option<(usize, usize)>> = vec![None; physical.num_varlen()];
 
     // Collect non-null offsets with their ranks for range computation
     let non_null_slots: Vec<(usize, usize)> = varlen_offsets
@@ -298,7 +294,8 @@ pub fn deserialize_nullable_row(
             let rank = phys_idx;
             let col_start = layout.fixed_data_start + layout.fixed_col_offsets[rank];
             let col_size =
-                ty.fixed_size().expect("fixed-length type must have fixed_size") as usize;
+                ty.fixed_size()
+                    .expect("fixed-length type must have fixed_size") as usize;
             let value = DataValue::from_bytes(ty, &row_bytes[col_start..col_start + col_size])?;
             out[log_idx] = Some(value);
         } else {
@@ -383,7 +380,7 @@ impl Row {
         let phys_idx = self.physical.logical_to_physical[column_index];
         let bm_start = RowLayout::bitmap_offset();
         let data_start_in_row = bm_start + self.layout.null_bitmap_size;
-        
+
         self.null_bitmap.clear_null(column_index);
 
         if ty.is_fixed_length() {
@@ -398,11 +395,11 @@ impl Row {
         let (payload_start, payload_end) = self.get_varlen_bounds(vl_rank);
         let old_len = payload_end - payload_start;
         let new_len = enc.len();
-        
+
         // Ensure its offset is active
         let slot = vl_rank * 2;
         let mut raw_offset = u16::from_le_bytes([self.data[slot], self.data[slot + 1]]) as usize;
-        
+
         if raw_offset == 0 {
             raw_offset = payload_start + data_start_in_row;
             self.data[slot..slot + 2].copy_from_slice(&(raw_offset as u16).to_le_bytes());
@@ -441,7 +438,7 @@ impl Row {
         let vl_rank = phys_idx - self.physical.num_fixed();
         let (payload_start, payload_end) = self.get_varlen_bounds(vl_rank);
         let bytes_to_remove = payload_end - payload_start;
-        
+
         if bytes_to_remove > 0 {
             self.data.drain(payload_start..payload_end);
             self.adjust_varlen_offsets(vl_rank, -(bytes_to_remove as isize));
@@ -473,8 +470,10 @@ impl Row {
             let rank = phys_idx;
             let row_col_start = self.layout.fixed_data_start + self.layout.fixed_col_offsets[rank];
             let self_col_start = row_col_start - data_start_in_row;
-            
-            let col_size = ty.fixed_size().expect("fixed-length type must have fixed_size") as usize;
+
+            let col_size =
+                ty.fixed_size()
+                    .expect("fixed-length type must have fixed_size") as usize;
             let bytes = &self.data[self_col_start..self_col_start + col_size];
             return Ok(Some(DataValue::from_bytes(ty, bytes)?));
         }
@@ -518,8 +517,10 @@ impl Row {
 
         // Extract null bitmap and raw data from the byte slice.
         let bm_start = RowLayout::bitmap_offset();
-        let null_bitmap =
-            NullBitmap::from_bytes(schema.len(), &bytes[bm_start..bm_start + layout.null_bitmap_size])?;
+        let null_bitmap = NullBitmap::from_bytes(
+            schema.len(),
+            &bytes[bm_start..bm_start + layout.null_bitmap_size],
+        )?;
 
         // `data` = everything after the header and null bitmap
         let data_start = bm_start + layout.null_bitmap_size;
@@ -542,17 +543,18 @@ impl Row {
     fn get_varlen_bounds(&self, vl_rank: usize) -> (usize, usize) {
         let bm_start = RowLayout::bitmap_offset();
         let data_start_in_row = bm_start + self.layout.null_bitmap_size;
-        
+
         let slot = vl_rank * 2;
         let raw_offset = u16::from_le_bytes([self.data[slot], self.data[slot + 1]]) as usize;
-        
+
         if raw_offset == 0 {
-            // Null column: its theoretical insertion point is the beginning 
+            // Null column: its theoretical insertion point is the beginning
             // of the next sequence.
             let mut insertion_point = self.data.len();
             for r in (vl_rank + 1)..self.physical.num_varlen() {
                 let next_slot = r * 2;
-                let next_off = u16::from_le_bytes([self.data[next_slot], self.data[next_slot + 1]]) as usize;
+                let next_off =
+                    u16::from_le_bytes([self.data[next_slot], self.data[next_slot + 1]]) as usize;
                 if next_off != 0 {
                     insertion_point = next_off - data_start_in_row;
                     break;
@@ -565,13 +567,14 @@ impl Row {
         let mut end = self.data.len();
         for r in (vl_rank + 1)..self.physical.num_varlen() {
             let next_slot = r * 2;
-            let next_off = u16::from_le_bytes([self.data[next_slot], self.data[next_slot + 1]]) as usize;
+            let next_off =
+                u16::from_le_bytes([self.data[next_slot], self.data[next_slot + 1]]) as usize;
             if next_off != 0 {
                 end = next_off - data_start_in_row;
                 break;
             }
         }
-        
+
         (start, end)
     }
 
@@ -588,5 +591,3 @@ impl Row {
         }
     }
 }
-
-

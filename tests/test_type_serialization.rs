@@ -21,11 +21,7 @@ fn roundtrip_serialization_for_all_datatypes() {
             "-900000000000",
             DataValue::BigInt(-900000000000),
         ),
-        (
-            DataType::Real,
-            "3.5",
-            DataValue::Real(OrderedF32(3.5_f32)),
-        ),
+        (DataType::Real, "3.5", DataValue::Real(OrderedF32(3.5_f32))),
         (
             DataType::DoublePrecision,
             "2.718281828",
@@ -100,4 +96,3 @@ fn varchar_decoding_rejects_invalid_utf8() {
     let err = DataValue::from_bytes(&DataType::Varchar(10), &[0xFF, 0xFF]).unwrap_err();
     assert!(err.contains("UTF-8"));
 }
-

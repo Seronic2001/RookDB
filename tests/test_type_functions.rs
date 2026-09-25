@@ -9,8 +9,14 @@ fn string_functions_work() {
     let v = DataValue::Varchar("  RookDB  ".to_string());
     assert_eq!(length(&v).unwrap(), 10);
     assert_eq!(trim(&v).unwrap(), DataValue::Varchar("RookDB".to_string()));
-    assert_eq!(upper(&v).unwrap(), DataValue::Varchar("  ROOKDB  ".to_string()));
-    assert_eq!(lower(&v).unwrap(), DataValue::Varchar("  rookdb  ".to_string()));
+    assert_eq!(
+        upper(&v).unwrap(),
+        DataValue::Varchar("  ROOKDB  ".to_string())
+    );
+    assert_eq!(
+        lower(&v).unwrap(),
+        DataValue::Varchar("  rookdb  ".to_string())
+    );
     assert_eq!(
         substring(&DataValue::Varchar("abcdef".to_string()), 2, 3).unwrap(),
         DataValue::Varchar("bcd".to_string())

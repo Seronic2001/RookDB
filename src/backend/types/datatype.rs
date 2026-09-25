@@ -190,7 +190,10 @@ impl FromStr for DataType {
                     let inner = &upper[8..upper.len() - 1];
                     let (precision, scale) = parse_precision_scale(inner)?;
                     Ok(DataType::Decimal { precision, scale })
-                } else if upper.starts_with("CHAR(") && upper.ends_with(')') && !upper.starts_with("CHARACTER(") {
+                } else if upper.starts_with("CHAR(")
+                    && upper.ends_with(')')
+                    && !upper.starts_with("CHARACTER(")
+                {
                     let inner = &upper[5..upper.len() - 1];
                     inner
                         .parse::<u16>()

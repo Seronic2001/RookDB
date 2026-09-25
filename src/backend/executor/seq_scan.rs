@@ -35,7 +35,7 @@ pub fn show_tuples(
 
     println!("\n════════════════════════════════════════════");
     println!("   Tuples in '{}.{}'", db_name, table_name);
-    println!("   Total pages: {}", total_pages);          
+    println!("   Total pages: {}", total_pages);
     println!("════════════════════════════════════════════");
 
     // Display column headers
@@ -105,17 +105,20 @@ pub fn show_tuples(
                 io::ErrorKind::InvalidData,
                 format!(
                     "Corrupted slot directory alignment on page {}: lower={}, header={}, item_size={}",
-                    page_num,
-                    lower,
-                    PAGE_HEADER_SIZE,
-                    ITEM_ID_SIZE
+                    page_num, lower, PAGE_HEADER_SIZE, ITEM_ID_SIZE
                 ),
             ));
         }
 
         let num_items = (lower - PAGE_HEADER_SIZE) / ITEM_ID_SIZE;
 
-        log::trace!("[PAGE {}] Lower: {}, Upper: {}, Tuples: {}", page_num, lower, upper, num_items);
+        log::trace!(
+            "[PAGE {}] Lower: {}, Upper: {}, Tuples: {}",
+            page_num,
+            lower,
+            upper,
+            num_items
+        );
 
         // 4. For each tuple
         for i in 0..num_items {
@@ -124,7 +127,10 @@ pub fn show_tuples(
             let offset = u32::from_le_bytes(page.data[base..base + 4].try_into().unwrap());
             let length = u32::from_le_bytes(page.data[base + 4..base + 8].try_into().unwrap());
 
-            if offset > page.data.len() as u32 || length > page.data.len() as u32 || offset + length > page.data.len() as u32 {
+            if offset > page.data.len() as u32
+                || length > page.data.len() as u32
+                || offset + length > page.data.len() as u32
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(

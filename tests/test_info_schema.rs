@@ -7,14 +7,10 @@
 
 mod common;
 
-
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::types::DataType;
-
 
 /// One database with one two-column table.
 fn setup() -> storage_manager::catalog::Catalog {
@@ -46,8 +42,8 @@ fn setup() -> storage_manager::catalog::Catalog {
 
 fn query(catalog: &storage_manager::catalog::Catalog, sql: &str) -> Vec<Vec<String>> {
     let plan = parse_sql(sql).unwrap();
-    let logical = storage_manager::planner::plan_query(&plan, catalog, "meta_db")
-        .expect("planning failed");
+    let logical =
+        storage_manager::planner::plan_query(&plan, catalog, "meta_db").expect("planning failed");
     execute_plan_collect(&logical, catalog, "meta_db")
         .expect("execution failed")
         .iter()
@@ -91,10 +87,21 @@ fn columns_view_exposes_sql99_names() {
 
     // The COLUMNS view exposes SQL-99 names; its positional mapping makes
     // `column_name` report the actual column names of the table.
-    let out = query(&catalog, "SELECT column_name FROM information_schema.columns");
+    let out = query(
+        &catalog,
+        "SELECT column_name FROM information_schema.columns",
+    );
     let names: Vec<&String> = out.iter().map(|r| &r[0]).collect();
-    assert!(names.contains(&&"'id'".to_string()), "id present: {:?}", names);
-    assert!(names.contains(&&"'label'".to_string()), "label present: {:?}", names);
+    assert!(
+        names.contains(&&"'id'".to_string()),
+        "id present: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&&"'label'".to_string()),
+        "label present: {:?}",
+        names
+    );
 }
 
 #[test]

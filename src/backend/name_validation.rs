@@ -50,7 +50,10 @@ pub fn validate_identifier(name: &str) -> Result<(), String> {
 
     // Reject any "." or ".." path segment (covers "..", "a/..", "a..b" is fine,
     // but "a/../b" is not).
-    if name == ".." || name.split('/').any(|seg| seg == "..") || name.split('\\').any(|seg| seg == "..") {
+    if name == ".."
+        || name.split('/').any(|seg| seg == "..")
+        || name.split('\\').any(|seg| seg == "..")
+    {
         return Err(format!(
             "Identifier '{}' cannot contain '..' path segments",
             escape_control(name)
@@ -94,8 +97,20 @@ mod tests {
 
     #[test]
     fn accepts_ordinary_names() {
-        for good in ["users", "my_db", "db1", "Table_2", "a", "order-details", "café"] {
-            assert!(validate_identifier(good).is_ok(), "'{}' should be accepted", good);
+        for good in [
+            "users",
+            "my_db",
+            "db1",
+            "Table_2",
+            "a",
+            "order-details",
+            "café",
+        ] {
+            assert!(
+                validate_identifier(good).is_ok(),
+                "'{}' should be accepted",
+                good
+            );
         }
     }
 
@@ -116,7 +131,10 @@ mod tests {
     fn rejects_parent_directory_segments() {
         assert!(validate_identifier("..").is_err());
         assert!(validate_identifier("../etc").is_err());
-        assert!(validate_identifier("a..b").is_ok(), "'a..b' has no path segment '..'");
+        assert!(
+            validate_identifier("a..b").is_ok(),
+            "'a..b' has no path segment '..'"
+        );
     }
 
     #[test]

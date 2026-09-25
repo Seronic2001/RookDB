@@ -21,7 +21,7 @@
 mod common;
 
 use std::collections::HashMap;
-use std::fs::{remove_file, OpenOptions};
+use std::fs::{OpenOptions, remove_file};
 
 use storage_manager::backend::executor::delete_by_pointers;
 use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
@@ -66,7 +66,13 @@ fn make_catalog() -> Catalog {
             ],
         },
     );
-    databases.insert(DB.to_string(), Database { tables, views: HashMap::new() });
+    databases.insert(
+        DB.to_string(),
+        Database {
+            tables,
+            views: HashMap::new(),
+        },
+    );
     Catalog { databases }
 }
 
@@ -122,8 +128,7 @@ fn count_live() -> usize {
 /// the Volcano engine, then delete them. Empty text = DELETE ALL.
 fn exec_delete(catalog: &Catalog, where_text: &str) -> storage_manager::executor::DeleteResult {
     let selection = parse_where_text(where_text).expect("parse WHERE");
-    let pointers =
-        select_matching_pointers(catalog, DB, TBL, selection).expect("select pointers");
+    let pointers = select_matching_pointers(catalog, DB, TBL, selection).expect("select pointers");
     delete_by_pointers(catalog, DB, TBL, &pointers).expect("delete_by_pointers")
 }
 
@@ -385,7 +390,10 @@ fn delete_text_eq_case_sensitivity() {
     // BEHAVIOUR CHANGE vs the legacy matcher: text comparison follows SQL
     // and is case-sensitive — 'ROW_01' is a different string from 'row_01'.
     let result = exec_delete(&catalog, "name = 'ROW_01'");
-    assert_eq!(result.deleted_count, 0, "text comparison must be case-sensitive");
+    assert_eq!(
+        result.deleted_count, 0,
+        "text comparison must be case-sensitive"
+    );
     assert_eq!(count_live(), 5);
 
     let result = exec_delete(&catalog, "name = 'row_01'");
@@ -435,7 +443,10 @@ fn delete_like_on_int_column_never_matches() {
     // LIKE against an INT column evaluates to UNKNOWN per row → no match,
     // no error. Same observable behaviour as the legacy path.
     let result = exec_delete(&catalog, "id LIKE '1%'");
-    assert_eq!(result.deleted_count, 0, "LIKE on INT column must never match");
+    assert_eq!(
+        result.deleted_count, 0,
+        "LIKE on INT column must never match"
+    );
     assert_eq!(count_live(), 10);
 }
 
@@ -447,7 +458,10 @@ fn delete_not_like_on_int_column_never_matches() {
 
     // NOT (UNKNOWN) is still UNKNOWN → never matches either.
     let result = exec_delete(&catalog, "id NOT LIKE '1%'");
-    assert_eq!(result.deleted_count, 0, "NOT LIKE on INT column must never match");
+    assert_eq!(
+        result.deleted_count, 0,
+        "NOT LIKE on INT column must never match"
+    );
 }
 
 // ===========================================================================

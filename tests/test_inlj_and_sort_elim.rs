@@ -7,7 +7,7 @@ use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::planner::PhysicalPlanner;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::executor::create_index::create_index;
 use storage_manager::insert_single_tuple;
@@ -81,7 +81,8 @@ fn setup_join_db(db: &str) -> Catalog {
         "departments",
         "idx_dept_id",
         &[String::from("id")],
-    ).expect("create_index departments.id");
+    )
+    .expect("create_index departments.id");
 
     load_catalog()
 }
@@ -120,7 +121,11 @@ fn test_inlj_inner_join_matches() {
         other => other,
     };
     let join_phys = planner.plan(logical_child).unwrap();
-    assert_eq!(join_phys.name(), "IndexNestedLoopJoin", "Planner must select IndexNestedLoopJoin");
+    assert_eq!(
+        join_phys.name(),
+        "IndexNestedLoopJoin",
+        "Planner must select IndexNestedLoopJoin"
+    );
 
     let mut rows = run_query(&catalog, db, sql);
     rows.sort();
@@ -151,7 +156,11 @@ fn test_inlj_left_join_null_padding() {
         other => other,
     };
     let join_phys = planner.plan(logical_child).unwrap();
-    assert_eq!(join_phys.name(), "IndexNestedLoopJoin", "Planner must select IndexNestedLoopJoin for LEFT join");
+    assert_eq!(
+        join_phys.name(),
+        "IndexNestedLoopJoin",
+        "Planner must select IndexNestedLoopJoin for LEFT join"
+    );
 
     let mut rows = run_query(&catalog, db, sql);
     rows.sort();
@@ -194,30 +203,22 @@ fn setup_items_db(db: &str) -> Catalog {
         &mut catalog,
         db,
         "items",
-        vec![
-            column("id", DataType::Int),
-            column("price", DataType::Int),
-        ],
+        vec![column("id", DataType::Int), column("price", DataType::Int)],
     );
     save_catalog(&catalog).unwrap();
 
-    for (id, price) in [
-        (1, 40),
-        (2, 10),
-        (3, 50),
-        (4, 20),
-        (5, 30),
-    ] {
-        insert_single_tuple(&catalog, db, "items", &[&id.to_string(), &price.to_string()]).unwrap();
+    for (id, price) in [(1, 40), (2, 10), (3, 50), (4, 20), (5, 30)] {
+        insert_single_tuple(
+            &catalog,
+            db,
+            "items",
+            &[&id.to_string(), &price.to_string()],
+        )
+        .unwrap();
     }
 
-    create_index(
-        &catalog,
-        db,
-        "items",
-        "idx_price",
-        &[String::from("price")],
-    ).expect("create_index items.price");
+    create_index(&catalog, db, "items", "idx_price", &[String::from("price")])
+        .expect("create_index items.price");
 
     load_catalog()
 }
@@ -268,7 +269,11 @@ fn test_sort_elimination_with_limit() {
     };
     let phys = planner.plan(logical_child).unwrap();
     // When LIMIT is present and Sort is eliminated, node should be LimitOperator
-    assert_eq!(phys.name(), "Limit", "Should pipeline directly into LimitOperator");
+    assert_eq!(
+        phys.name(),
+        "Limit",
+        "Should pipeline directly into LimitOperator"
+    );
 
     let rows = run_query(&catalog, db, sql);
     let expected = vec![
@@ -296,7 +301,11 @@ fn test_sort_desc_retains_sort_operator() {
     };
     let phys = planner.plan(logical_child).unwrap();
     // Descending order cannot be satisfied by forward index scan, so SortOperator must be retained
-    assert_eq!(phys.name(), "Sort", "SortOperator must be retained for DESC order");
+    assert_eq!(
+        phys.name(),
+        "Sort",
+        "SortOperator must be retained for DESC order"
+    );
 
     let rows = run_query(&catalog, db, sql);
     let expected = vec![

@@ -56,10 +56,7 @@ pub enum RookError {
         message: String,
     },
     /// A referenced database / table / column does not exist.
-    NotFound {
-        entity: &'static str,
-        name: String,
-    },
+    NotFound { entity: &'static str, name: String },
     /// A name failed path-safety validation (see `name_validation`).
     InvalidIdentifier(String),
     /// A value could not be interpreted for its column's data type.
@@ -242,9 +239,14 @@ mod tests {
         // std::error::Error::source chains to the inner error (one hop at a
         // time: Contextual → Io → std::io::Error)
         let src = std::error::Error::source(&ctx).expect("contextual error has a source");
-        let inner = src.downcast_ref::<RookError>().expect("source is a RookError");
+        let inner = src
+            .downcast_ref::<RookError>()
+            .expect("source is a RookError");
         assert!(inner.is_io());
-        assert!(std::error::Error::source(inner).is_some(), "Io wraps the io::Error");
+        assert!(
+            std::error::Error::source(inner).is_some(),
+            "Io wraps the io::Error"
+        );
     }
 
     #[test]

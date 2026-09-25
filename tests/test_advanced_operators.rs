@@ -6,13 +6,12 @@
 
 mod common;
 
-
 use rook_ast::{QueryPlan, SelectPlan};
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
@@ -70,7 +69,11 @@ fn setup_tables(db: &str) -> Catalog {
     ] {
         insert_single_tuple(&catalog, db, "employees", &row).unwrap();
     }
-    for row in [vec!["10", "Engineering"], vec!["20", "Sales"], vec!["30", "HR"]] {
+    for row in [
+        vec!["10", "Engineering"],
+        vec!["20", "Sales"],
+        vec!["30", "HR"],
+    ] {
         insert_single_tuple(&catalog, db, "departments", &row).unwrap();
     }
     load_catalog()
@@ -79,10 +82,9 @@ fn setup_tables(db: &str) -> Catalog {
 /// Run any SELECT-shaped query through both planners and render as strings.
 fn run_query(catalog: &Catalog, db: &str, sql: &str) -> Vec<Vec<String>> {
     let plan = parse_sql(sql).expect("parse failed");
-    let logical = storage_manager::planner::plan_query(&plan, catalog, db)
-        .expect("logical planning failed");
-    let tuples: Vec<Tuple> =
-        execute_plan_collect(&logical, catalog, db).expect("execution failed");
+    let logical =
+        storage_manager::planner::plan_query(&plan, catalog, db).expect("logical planning failed");
+    let tuples: Vec<Tuple> = execute_plan_collect(&logical, catalog, db).expect("execution failed");
     tuples
         .iter()
         .map(|t| {
@@ -118,7 +120,11 @@ fn inner_join_matches_rows() {
         "SELECT name, dept_name FROM employees \
          JOIN departments ON employees.dept_id = departments.id",
     );
-    assert_eq!(out.len(), 4, "Alice+Cara and Bob+Eve match; Dan's dangling 99 must not");
+    assert_eq!(
+        out.len(),
+        4,
+        "Alice+Cara and Bob+Eve match; Dan's dangling 99 must not"
+    );
     assert_eq!(out[0][0], "'Alice'");
     assert_eq!(out[0][1], "'Engineering'");
 }
@@ -239,7 +245,11 @@ fn union_deduplicates() {
         "SELECT dept_id FROM employees WHERE dept_id = 10 \
          UNION SELECT id FROM departments WHERE id = 10",
     );
-    assert_eq!(out, vec![vec!["10"]], "UNION collapses duplicates to one '10'");
+    assert_eq!(
+        out,
+        vec![vec!["10"]],
+        "UNION collapses duplicates to one '10'"
+    );
 }
 
 #[test]
@@ -252,7 +262,11 @@ fn except_removes_matching_rows() {
         "set_db",
         "SELECT id FROM employees EXCEPT SELECT id FROM departments",
     );
-    assert_eq!(out.len(), 5, "employee ids never collide with department ids");
+    assert_eq!(
+        out.len(),
+        5,
+        "employee ids never collide with department ids"
+    );
 }
 
 // ── Subqueries ────────────────────────────────────────────────────────────────
@@ -337,19 +351,13 @@ fn insert_into_select_copies_rows() {
         ],
     );
 
-    let plan = parse_sql(
-        "INSERT INTO engineers SELECT * FROM employees WHERE dept_id = 10",
-    )
-    .unwrap();
-    let logical = storage_manager::planner::plan_query(&plan, &catalog, "iis_db")
-        .expect("planning failed");
+    let plan =
+        parse_sql("INSERT INTO engineers SELECT * FROM employees WHERE dept_id = 10").unwrap();
+    let logical =
+        storage_manager::planner::plan_query(&plan, &catalog, "iis_db").expect("planning failed");
     execute_plan_collect(&logical, &catalog, "iis_db").expect("execution failed");
 
-    let out = run_select(
-        &catalog,
-        "iis_db",
-        "SELECT name FROM engineers ORDER BY id",
-    );
+    let out = run_select(&catalog, "iis_db", "SELECT name FROM engineers ORDER BY id");
     assert_eq!(out.len(), 2);
     assert_eq!(out[0][0], "'Alice'");
     assert_eq!(out[1][0], "'Cara'");

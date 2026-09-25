@@ -40,17 +40,17 @@ mod codec;
 mod node;
 
 pub(crate) use codec::{
-    decode_key, encode_key, encode_key_multi, read_root_sidecar, write_root_sidecar,
-    BTREE_PAGE_SIZE, KEY_LEN_SIZE,
+    BTREE_PAGE_SIZE, KEY_LEN_SIZE, decode_key, encode_key, encode_key_multi, read_root_sidecar,
+    write_root_sidecar,
 };
 pub use node::BTreeNode;
 
 use crate::backend::buffer_manager::buffer_pool::BufferPool;
 use crate::backend::page::page_lock::PageWriteLock;
 use crate::backend::table::table_file::file_identity_from_file;
-use crate::types::value::DataValue;
 use crate::types::Comparable;
 use crate::types::DataType;
+use crate::types::value::DataValue;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -87,7 +87,11 @@ impl BTree {
 
     /// Create a new composite-key B+ Tree index file.
     pub fn create_composite(file_path: PathBuf, key_types: Vec<DataType>) -> io::Result<Self> {
-        log::info!("[BTree::create] Creating new index at {:?} ({} col)", file_path, key_types.len());
+        log::info!(
+            "[BTree::create] Creating new index at {:?} ({} col)",
+            file_path,
+            key_types.len()
+        );
 
         if key_types.is_empty() {
             return Err(io::Error::new(
@@ -120,12 +124,7 @@ impl BTree {
         // Persist the root pointer sidecar so reopen lands on the real root.
         write_root_sidecar(&file_path, 0)?;
 
-        let pool = BufferPool::with_file_raw(
-            INDEX_POOL_CAPACITY,
-            file,
-            file_path.clone(),
-            1,
-        );
+        let pool = BufferPool::with_file_raw(INDEX_POOL_CAPACITY, file, file_path.clone(), 1);
 
         log::info!("[BTree::create] Created with 1 page, root=0");
         Ok(Self {
@@ -143,24 +142,20 @@ impl BTree {
         log::info!("[BTree::open] Opening index at {:?}", file_path);
 
         if !file_path.exists() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "Index file not found"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Index file not found",
+            ));
         }
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&file_path)?;
+        let file = OpenOptions::new().read(true).write(true).open(&file_path)?;
 
         let file_id = file_identity_from_file(&file)?;
         let file_size = file.metadata()?.len();
         let total_pages = (file_size as usize / BTREE_PAGE_SIZE) as u32;
 
-        let pool = BufferPool::with_file_raw(
-            INDEX_POOL_CAPACITY,
-            file,
-            file_path.clone(),
-            total_pages,
-        );
+        let pool =
+            BufferPool::with_file_raw(INDEX_POOL_CAPACITY, file, file_path.clone(), total_pages);
 
         // The key_type is not stored in the file yet — callers must provide it
         // In a full implementation, type info would be stored in a header page.
@@ -174,7 +169,8 @@ impl BTree {
 
         log::info!(
             "[BTree::open] Opened with {} pages, root={}",
-            total_pages, root_page_id
+            total_pages,
+            root_page_id
         );
         Ok(Self {
             file_path,
@@ -250,7 +246,6 @@ impl BTree {
         }
     }
 
-
     /// Compare two encoded keys segment-by-segment using `key_types`.
     ///
     /// Encoded keys are opaque `[len][bytes]` concatenations; decoding each
@@ -271,7 +266,10 @@ impl BTree {
         // Composite: strip the outer envelope from both sides, then walk
         // inner segments in lockstep.
         if a.len() < KEY_LEN_SIZE || b.len() < KEY_LEN_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Truncated composite key envelope"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Truncated composite key envelope",
+            ));
         }
         let mut ia = KEY_LEN_SIZE;
         let mut ib = KEY_LEN_SIZE;
@@ -303,7 +301,11 @@ impl BTree {
     /// segment). Used by range bounds and lookups supplied as values.
     fn cmp_encoded_vs_values(&self, encoded: &[u8], values: &[DataValue]) -> io::Result<Ordering> {
         use std::cmp::Ordering as O;
-        debug_assert_eq!(values.len(), self.key_types.len(), "value/key arity mismatch");
+        debug_assert_eq!(
+            values.len(),
+            self.key_types.len(),
+            "value/key arity mismatch"
+        );
         if self.key_types.len() == 1 {
             let (ev, _) = decode_key(encoded, &self.key_types[0])?;
             return ev
@@ -311,7 +313,10 @@ impl BTree {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()));
         }
         if encoded.len() < KEY_LEN_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Truncated composite key envelope"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Truncated composite key envelope",
+            ));
         }
         let mut off = KEY_LEN_SIZE;
         for (i, v) in values.iter().enumerate() {
@@ -345,7 +350,9 @@ impl BTree {
         loop {
             let node = self.read_node(current)?;
             match node {
-                BTreeNode::Leaf { values, next_leaf, .. } => {
+                BTreeNode::Leaf {
+                    values, next_leaf, ..
+                } => {
                     results.extend(values);
                     if next_leaf == 0 {
                         break;
@@ -363,9 +370,7 @@ impl BTree {
     fn find_leftmost_leaf(&mut self, page_id: u32) -> io::Result<u32> {
         let node = self.read_node(page_id)?;
         match node {
-            BTreeNode::Internal { children, .. } => {
-                self.find_leftmost_leaf(children[0])
-            }
+            BTreeNode::Internal { children, .. } => self.find_leftmost_leaf(children[0]),
             BTreeNode::Leaf { .. } => Ok(page_id),
         }
     }
@@ -422,13 +427,21 @@ impl BTree {
     /// Range search: find all entries with keys in `[low, high]`.
     ///
     /// Returns a vector of heap tuple identifiers.
-    pub fn search_range(&mut self, low: &DataValue, high: &DataValue) -> io::Result<Vec<(u32, u32)>> {
+    pub fn search_range(
+        &mut self,
+        low: &DataValue,
+        high: &DataValue,
+    ) -> io::Result<Vec<(u32, u32)>> {
         self.search_range_keys(std::slice::from_ref(low), std::slice::from_ref(high))
     }
 
     /// Range search over composite keys: find entries with key segments
     /// lexicographically within `[low_parts, high_parts]`.
-    pub fn search_range_keys(&mut self, low: &[DataValue], high: &[DataValue]) -> io::Result<Vec<(u32, u32)>> {
+    pub fn search_range_keys(
+        &mut self,
+        low: &[DataValue],
+        high: &[DataValue],
+    ) -> io::Result<Vec<(u32, u32)>> {
         let low_encoded = self.encode_key_for(low)?;
         let mut results = Vec::new();
 
@@ -440,7 +453,12 @@ impl BTree {
         loop {
             let node = self.read_node(current_leaf)?;
             match node {
-                BTreeNode::Leaf { ref keys, ref values, next_leaf, .. } => {
+                BTreeNode::Leaf {
+                    ref keys,
+                    ref values,
+                    next_leaf,
+                    ..
+                } => {
                     for (i, key) in keys.iter().enumerate() {
                         let cmp_low = self.cmp_encoded_vs_values(key, low)?;
                         let cmp_high = self.cmp_encoded_vs_values(key, high)?;
@@ -491,7 +509,11 @@ impl BTree {
     }
 
     /// Internal search_all: return all entries matching encoded_key.
-    fn search_all_in_tree(&mut self, page_id: u32, encoded_key: &[u8]) -> io::Result<Vec<(u32, u32)>> {
+    fn search_all_in_tree(
+        &mut self,
+        page_id: u32,
+        encoded_key: &[u8],
+    ) -> io::Result<Vec<(u32, u32)>> {
         let node = self.read_node(page_id)?;
         match node {
             BTreeNode::Internal { keys, children, .. } => {
@@ -539,20 +561,36 @@ impl BTree {
     }
 
     /// Delete a (possibly composite) key from the B+ Tree.
-    pub fn delete_keys(&mut self, keys: &[DataValue], page_id: u32, slot_id: u32) -> io::Result<bool> {
+    pub fn delete_keys(
+        &mut self,
+        keys: &[DataValue],
+        page_id: u32,
+        slot_id: u32,
+    ) -> io::Result<bool> {
         let encoded = self.encode_key_for(keys)?;
         self.delete_from_tree(self.root_page_id, &encoded, page_id, slot_id)
     }
 
     /// Internal delete: search and remove a specific (key, page_id, slot_id) entry.
-    fn delete_from_tree(&mut self, page_id: u32, encoded_key: &[u8], value_page_id: u32, value_slot_id: u32) -> io::Result<bool> {
+    fn delete_from_tree(
+        &mut self,
+        page_id: u32,
+        encoded_key: &[u8],
+        value_page_id: u32,
+        value_slot_id: u32,
+    ) -> io::Result<bool> {
         let node = self.read_node(page_id)?;
 
         if matches!(node, BTreeNode::Leaf { .. }) {
             // Leaf node — find and remove the specific entry
             let mut node = node;
             match &mut node {
-                BTreeNode::Leaf { num_keys, keys, values, .. } => {
+                BTreeNode::Leaf {
+                    num_keys,
+                    keys,
+                    values,
+                    ..
+                } => {
                     for i in 0..keys.len() {
                         let cmp = self.cmp_encoded_keys(&keys[i], encoded_key)?;
                         if cmp == Ordering::Equal && values[i] == (value_page_id, value_slot_id) {
@@ -588,7 +626,12 @@ impl BTree {
                 }
             }
 
-            self.delete_from_tree(children[child_idx], encoded_key, value_page_id, value_slot_id)
+            self.delete_from_tree(
+                children[child_idx],
+                encoded_key,
+                value_page_id,
+                value_slot_id,
+            )
         }
     }
 
@@ -603,8 +646,17 @@ impl BTree {
     }
 
     /// Insert a (possibly composite) key-value pair into the B+ Tree.
-    pub fn insert_keys(&mut self, keys: &[DataValue], page_id: u32, slot_id: u32) -> io::Result<()> {
-        debug_assert_eq!(keys.len(), self.key_types.len(), "key arity must match index arity");
+    pub fn insert_keys(
+        &mut self,
+        keys: &[DataValue],
+        page_id: u32,
+        slot_id: u32,
+    ) -> io::Result<()> {
+        debug_assert_eq!(
+            keys.len(),
+            self.key_types.len(),
+            "key arity must match index arity"
+        );
         let encoded = self.encode_key_for(keys)?;
 
         // Acquire page write lock for the root
@@ -619,7 +671,11 @@ impl BTree {
             let old_root = self.root_page_id;
             let mut new_root_node = BTreeNode::new_internal();
             match &mut new_root_node {
-                BTreeNode::Internal { num_keys, keys, children } => {
+                BTreeNode::Internal {
+                    num_keys,
+                    keys,
+                    children,
+                } => {
                     *num_keys = 1;
                     keys.push(new_key);
                     children.push(old_root);
@@ -639,7 +695,11 @@ impl BTree {
     // ─── Internal Tree Operations ──────────────────────────────────────────
 
     /// Recursive search within the tree starting from the given page.
-    fn search_in_tree(&mut self, page_id: u32, encoded_key: &[u8]) -> io::Result<Option<(u32, u32)>> {
+    fn search_in_tree(
+        &mut self,
+        page_id: u32,
+        encoded_key: &[u8],
+    ) -> io::Result<Option<(u32, u32)>> {
         let node = self.read_node(page_id)?;
         match node {
             BTreeNode::Internal { keys, children, .. } => {
@@ -694,13 +754,9 @@ impl BTree {
     /// Convert the first key segment from on-disk encoded bytes to a DataValue.
     #[allow(dead_code)]
     fn key_from_encoded(&self, encoded: &[u8]) -> DataValue {
-        let (key, _) = decode_key(encoded, &self.key_types[0]).unwrap_or({
-            (DataValue::Int(0), 0)
-        });
+        let (key, _) = decode_key(encoded, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
         key
     }
-
-
 
     /// Internal insert: returns `Ok(None)` if no split, or `Ok(Some((middle_key, new_child_id)))` if split.
     fn insert_internal(
@@ -719,7 +775,8 @@ impl BTree {
                 self.insert_into_leaf(page_id, encoded_key, value_page_id, value_slot_id)?;
                 Ok(None)
             } else {
-                let (new_key, new_leaf_id) = self.split_leaf(page_id, encoded_key, value_page_id, value_slot_id)?;
+                let (new_key, new_leaf_id) =
+                    self.split_leaf(page_id, encoded_key, value_page_id, value_slot_id)?;
                 Ok(Some((new_key, new_leaf_id)))
             }
         } else {
@@ -745,7 +802,8 @@ impl BTree {
             let _lock = PageWriteLock::acquire(file_id, child_id);
 
             // Recursively insert
-            let result = self.insert_internal(child_id, encoded_key, value_page_id, value_slot_id)?;
+            let result =
+                self.insert_internal(child_id, encoded_key, value_page_id, value_slot_id)?;
 
             // If child was split, we need to insert the promoted key into this node
             if let Some((promoted_key, new_child_id)) = result {
@@ -756,7 +814,8 @@ impl BTree {
                     self.insert_into_internal(page_id, child_idx, &promoted_key, new_child_id)?;
                     Ok(None)
                 } else {
-                    let (new_key, new_sibling_id) = self.split_internal(page_id, child_idx, &promoted_key, new_child_id)?;
+                    let (new_key, new_sibling_id) =
+                        self.split_internal(page_id, child_idx, &promoted_key, new_child_id)?;
                     Ok(Some((new_key, new_sibling_id)))
                 }
             } else {
@@ -780,7 +839,12 @@ impl BTree {
         let mut node = self.read_node(page_id)?;
 
         match &mut node {
-            BTreeNode::Leaf { num_keys, keys, values, .. } => {
+            BTreeNode::Leaf {
+                num_keys,
+                keys,
+                values,
+                ..
+            } => {
                 let nk = *num_keys as usize;
                 let target_encoded = encoded_key.to_vec();
 
@@ -821,7 +885,12 @@ impl BTree {
         let mut node = self.read_node(page_id)?;
 
         match &mut node {
-            BTreeNode::Internal { num_keys, keys, children, .. } => {
+            BTreeNode::Internal {
+                num_keys,
+                keys,
+                children,
+                ..
+            } => {
                 // The promoted key goes at position child_idx in the key array.
                 // The new child goes at position child_idx + 1 in the children array.
                 keys.insert(child_idx, promoted_key.to_vec());
@@ -847,9 +916,13 @@ impl BTree {
         let node = self.read_node(page_id)?;
 
         let (old_keys, old_values, old_next_leaf, old_prev_leaf) = match &node {
-            BTreeNode::Leaf { keys, values, next_leaf, prev_leaf, .. } => {
-                (keys.clone(), values.clone(), *next_leaf, *prev_leaf)
-            }
+            BTreeNode::Leaf {
+                keys,
+                values,
+                next_leaf,
+                prev_leaf,
+                ..
+            } => (keys.clone(), values.clone(), *next_leaf, *prev_leaf),
             _ => unreachable!(),
         };
 
@@ -906,42 +979,52 @@ impl BTree {
 
         // Update left node's next_leaf to point to the new sibling
         let left_node = match left_node {
-            BTreeNode::Leaf { num_keys, keys, values, next_leaf: _, prev_leaf } => {
-                BTreeNode::Leaf {
-                    num_keys,
-                    keys,
-                    values,
-                    next_leaf: new_leaf_id,
-                    prev_leaf,
-                }
-            }
+            BTreeNode::Leaf {
+                num_keys,
+                keys,
+                values,
+                next_leaf: _,
+                prev_leaf,
+            } => BTreeNode::Leaf {
+                num_keys,
+                keys,
+                values,
+                next_leaf: new_leaf_id,
+                prev_leaf,
+            },
             _ => unreachable!(),
         };
         self.write_node(page_id, &left_node)?;
 
         // Update the right sibling's prev_leaf
         let right_node = match right_node {
-            BTreeNode::Leaf { num_keys, keys, values, next_leaf, prev_leaf: _ } => {
-                BTreeNode::Leaf {
-                    num_keys,
-                    keys,
-                    values,
-                    next_leaf,
-                    prev_leaf: page_id,
-                }
-            }
+            BTreeNode::Leaf {
+                num_keys,
+                keys,
+                values,
+                next_leaf,
+                prev_leaf: _,
+            } => BTreeNode::Leaf {
+                num_keys,
+                keys,
+                values,
+                next_leaf,
+                prev_leaf: page_id,
+            },
             _ => unreachable!(),
         };
         self.write_node(new_leaf_id, &right_node)?;
 
         // If there was a next leaf, update its prev_leaf to point to the new sibling
-        if old_next_leaf != 0 && old_next_leaf < self.total_pages
-            && let Ok(mut next_node) = self.read_node(old_next_leaf) {
-                if let BTreeNode::Leaf { prev_leaf, .. } = &mut next_node {
-                    *prev_leaf = new_leaf_id;
-                }
-                self.write_node(old_next_leaf, &next_node)?;
+        if old_next_leaf != 0
+            && old_next_leaf < self.total_pages
+            && let Ok(mut next_node) = self.read_node(old_next_leaf)
+        {
+            if let BTreeNode::Leaf { prev_leaf, .. } = &mut next_node {
+                *prev_leaf = new_leaf_id;
             }
+            self.write_node(old_next_leaf, &next_node)?;
+        }
 
         Ok((promoted_key, new_leaf_id))
     }
@@ -957,9 +1040,7 @@ impl BTree {
         let node = self.read_node(page_id)?;
 
         let (old_keys, old_children) = match &node {
-            BTreeNode::Internal { keys, children, .. } => {
-                (keys.clone(), children.clone())
-            }
+            BTreeNode::Internal { keys, children, .. } => (keys.clone(), children.clone()),
             _ => unreachable!(),
         };
 
@@ -1018,11 +1099,18 @@ impl BTree {
         let indent = "  ".repeat(depth);
         let node = self.read_node(page_id)?;
         match &node {
-            BTreeNode::Internal { num_keys, keys, children } => {
-                println!("{}[Internal] page={}, num_keys={}, children={:?}",
-                    indent, page_id, num_keys, children);
+            BTreeNode::Internal {
+                num_keys,
+                keys,
+                children,
+            } => {
+                println!(
+                    "{}[Internal] page={}, num_keys={}, children={:?}",
+                    indent, page_id, num_keys, children
+                );
                 for (i, key) in keys.iter().enumerate() {
-                    let (val, _) = decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
+                    let (val, _) =
+                        decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
                     println!("{}  key[{}] = {}", indent, i, val);
                 }
                 // Recursively print children
@@ -1030,12 +1118,24 @@ impl BTree {
                     self.print_node(child, depth + 1)?;
                 }
             }
-            BTreeNode::Leaf { num_keys, keys, values, next_leaf, prev_leaf } => {
-                println!("{}[Leaf] page={}, num_keys={}, next={}, prev={}",
-                    indent, page_id, num_keys, next_leaf, prev_leaf);
+            BTreeNode::Leaf {
+                num_keys,
+                keys,
+                values,
+                next_leaf,
+                prev_leaf,
+            } => {
+                println!(
+                    "{}[Leaf] page={}, num_keys={}, next={}, prev={}",
+                    indent, page_id, num_keys, next_leaf, prev_leaf
+                );
                 for (i, (key, val)) in keys.iter().zip(values.iter()).enumerate() {
-                    let (dv, _) = decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
-                    println!("{}  entry[{}]: key={}, tid=({},{})", indent, i, dv, val.0, val.1);
+                    let (dv, _) =
+                        decode_key(key, &self.key_types[0]).unwrap_or((DataValue::Int(0), 0));
+                    println!(
+                        "{}  entry[{}]: key={}, tid=({},{})",
+                        indent, i, dv, val.0, val.1
+                    );
                 }
             }
         }
@@ -1212,7 +1312,9 @@ mod tests {
         }
 
         // Search range [50, 150]
-        let results = btree.search_range(&DataValue::Int(50), &DataValue::Int(150)).unwrap();
+        let results = btree
+            .search_range(&DataValue::Int(50), &DataValue::Int(150))
+            .unwrap();
         // Expect: 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150
         // Our data: 0, 10, 20, ..., 190
         // In range: 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150
@@ -1242,7 +1344,10 @@ mod tests {
         }
 
         // Verify tree structure (should have multiple levels now)
-        assert!(btree.total_pages > 1, "Tree should have multiple pages after 2000 inserts");
+        assert!(
+            btree.total_pages > 1,
+            "Tree should have multiple pages after 2000 inserts"
+        );
 
         cleanup(&path);
     }
@@ -1303,14 +1408,24 @@ mod tests {
 
         let mut btree = BTree::create(path.clone(), key_type).unwrap();
 
-        btree.insert(&DataValue::Varchar("apple".to_string()), 1, 0).unwrap();
-        btree.insert(&DataValue::Varchar("banana".to_string()), 2, 1).unwrap();
-        btree.insert(&DataValue::Varchar("cherry".to_string()), 3, 2).unwrap();
+        btree
+            .insert(&DataValue::Varchar("apple".to_string()), 1, 0)
+            .unwrap();
+        btree
+            .insert(&DataValue::Varchar("banana".to_string()), 2, 1)
+            .unwrap();
+        btree
+            .insert(&DataValue::Varchar("cherry".to_string()), 3, 2)
+            .unwrap();
 
-        let result = btree.search(&DataValue::Varchar("banana".to_string())).unwrap();
+        let result = btree
+            .search(&DataValue::Varchar("banana".to_string()))
+            .unwrap();
         assert_eq!(result, Some((2, 1)));
 
-        let result = btree.search(&DataValue::Varchar("grape".to_string())).unwrap();
+        let result = btree
+            .search(&DataValue::Varchar("grape".to_string()))
+            .unwrap();
         assert_eq!(result, None);
 
         cleanup(&path);
@@ -1323,15 +1438,27 @@ mod tests {
 
         let mut btree = BTree::create(path.clone(), key_type).unwrap();
 
-        let fruits = ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape"];
+        let fruits = [
+            "apple",
+            "banana",
+            "cherry",
+            "date",
+            "elderberry",
+            "fig",
+            "grape",
+        ];
         for (i, fruit) in fruits.iter().enumerate() {
-            btree.insert(&DataValue::Varchar(fruit.to_string()), i as u32, 0).unwrap();
+            btree
+                .insert(&DataValue::Varchar(fruit.to_string()), i as u32, 0)
+                .unwrap();
         }
 
-        let results = btree.search_range(
-            &DataValue::Varchar("banana".to_string()),
-            &DataValue::Varchar("fig".to_string()),
-        ).unwrap();
+        let results = btree
+            .search_range(
+                &DataValue::Varchar("banana".to_string()),
+                &DataValue::Varchar("fig".to_string()),
+            )
+            .unwrap();
 
         // Range [banana, fig] inclusive → 5 items
         assert_eq!(results.len(), 5); // banana, cherry, date, elderberry, fig
@@ -1350,12 +1477,20 @@ mod tests {
 
         // Insert keys that are long enough to cause splits with fewer entries
         for i in 0..100u32 {
-            let s = format!("key_{}_with_padding_{}_done", i, "x".repeat(i as usize % 50));
+            let s = format!(
+                "key_{}_with_padding_{}_done",
+                i,
+                "x".repeat(i as usize % 50)
+            );
             btree.insert(&DataValue::Varchar(s.clone()), i, 0).unwrap();
         }
 
         for i in 0..100u32 {
-            let s = format!("key_{}_with_padding_{}_done", i, "x".repeat(i as usize % 50));
+            let s = format!(
+                "key_{}_with_padding_{}_done",
+                i,
+                "x".repeat(i as usize % 50)
+            );
             let result = btree.search(&DataValue::Varchar(s)).unwrap();
             assert!(result.is_some(), "Key {} should exist", i);
         }

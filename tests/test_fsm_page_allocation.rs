@@ -28,11 +28,7 @@ fn test_fsm_page_allocation() {
 
     // Use the provided load_csv with HeapManager for proper FSM integration
     use storage_manager::catalog::{
-        create_database,
-        create_table,
-        init_catalog,
-        load_catalog,
-        save_catalog,
+        create_database, create_table, init_catalog, load_catalog, save_catalog,
     };
 
     use storage_manager::catalog::types::{Column, Constraints};
@@ -78,8 +74,7 @@ fn test_fsm_page_allocation() {
     use std::path::PathBuf;
 
     // Note: HeapManager expects just "database/base/{db_name}/{table_name}.dat"
-    let heap_file_path =
-        PathBuf::from(format!("database/base/{}/{}.dat", db_name, "pages_test"));
+    let heap_file_path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, "pages_test"));
 
     let _ = fs::create_dir_all(heap_file_path.parent().unwrap());
 
@@ -88,14 +83,12 @@ fn test_fsm_page_allocation() {
     // Create CSV fixture for this test (header + 500 rows)
     let csv_path = format!("database/base/{}/gd.csv", db_name);
 
-    let mut csv_file =
-        std::fs::File::create(&csv_path).expect("Failed to create test CSV");
+    let mut csv_file = std::fs::File::create(&csv_path).expect("Failed to create test CSV");
 
     writeln!(csv_file, "id,name").expect("Failed to write CSV header");
 
     for id in 1..=500 {
-        writeln!(csv_file, "{},name{}", id, id)
-            .expect("Failed to write CSV row");
+        writeln!(csv_file, "{},name{}", id, id).expect("Failed to write CSV row");
     }
 
     // Load CSV - this should use HeapManager with FSM tree search
@@ -105,11 +98,7 @@ fn test_fsm_page_allocation() {
         Ok(count) => {
             println!("Inserted {} tuples", count);
 
-            assert!(
-                count == 500,
-                "Expected 500 tuples, got {}",
-                count
-            );
+            assert!(count == 500, "Expected 500 tuples, got {}", count);
 
             println!("✓ Correct number of tuples inserted: {}", count);
         }
@@ -124,16 +113,11 @@ fn test_fsm_page_allocation() {
 
     use storage_manager::page;
 
-    let heap_file_path =
-        format!("database/base/{}/{}.dat", db_name, "pages_test");
+    let heap_file_path = format!("database/base/{}/{}.dat", db_name, "pages_test");
 
-    match std::fs::OpenOptions::new()
-        .read(true)
-        .open(&heap_file_path)
-    {
+    match std::fs::OpenOptions::new().read(true).open(&heap_file_path) {
         Ok(mut file) => {
-            let pages =
-                read_all_pages(&mut file).expect("Failed to read pages");
+            let pages = read_all_pages(&mut file).expect("Failed to read pages");
 
             println!("\nPage Usage Summary:");
 
@@ -144,11 +128,9 @@ fn test_fsm_page_allocation() {
             for (idx, p) in pages.iter().skip(1).enumerate() {
                 // Skip page 0 (header)
 
-                let tuples_in_page: u32 =
-                    page::get_tuple_count(p).unwrap_or(0);
+                let tuples_in_page: u32 = page::get_tuple_count(p).unwrap_or(0);
 
-                let free_space: u32 =
-                    page::page_free_space(p).unwrap_or(0);
+                let free_space: u32 = page::page_free_space(p).unwrap_or(0);
 
                 if tuples_in_page > 0 {
                     pages_used += 1;

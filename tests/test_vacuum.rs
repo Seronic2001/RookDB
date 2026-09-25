@@ -11,11 +11,10 @@ mod common;
 use rook_ast::QueryPlan;
 use storage_manager::backend::executor::vacuum::vacuum_table;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-
 
 /// Parse a WHERE string with the real SQL grammar, select matching rows on
 /// the Volcano engine, then delete them by pointer.
@@ -25,9 +24,8 @@ fn exec_delete(
     table: &str,
     where_text: &str,
 ) -> storage_manager::backend::executor::DeleteResult {
-    let selection =
-        storage_manager::backend::executor::row_select::parse_where_text(where_text)
-            .expect("parse WHERE");
+    let selection = storage_manager::backend::executor::row_select::parse_where_text(where_text)
+        .expect("parse WHERE");
     let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
         catalog, db, table, selection,
     )
@@ -74,11 +72,17 @@ fn dead_count(db: &str, table: &str) -> u32 {
 fn parser_accepts_vacuum_statement() {
     match rook_parser::parse_sql("VACUUM events;") {
         Ok(QueryPlan::Vacuum(p)) => assert_eq!(p.table, "events"),
-        other => panic!("expected Vacuum plan, got {:?}", other.map(|p| p.statement_type().to_string())),
+        other => panic!(
+            "expected Vacuum plan, got {:?}",
+            other.map(|p| p.statement_type().to_string())
+        ),
     }
     match rook_parser::parse_sql("VACUUM TABLE my_t") {
         Ok(QueryPlan::Vacuum(p)) => assert_eq!(p.table, "my_t"),
-        other => panic!("expected Vacuum plan, got {:?}", other.map(|p| p.statement_type().to_string())),
+        other => panic!(
+            "expected Vacuum plan, got {:?}",
+            other.map(|p| p.statement_type().to_string())
+        ),
     }
     assert!(rook_parser::parse_sql("VACUUM ../evil").is_err());
     assert!(rook_parser::parse_sql("VACUUM").is_err());
@@ -91,8 +95,13 @@ fn vacuum_reclaims_dead_tuples_and_preserves_live_rows() {
 
     // Insert 40 rows.
     for i in 0..40 {
-        insert_single_tuple(&catalog, "vdb", "events", &[&i.to_string(), &format!("row{}", i)])
-            .unwrap();
+        insert_single_tuple(
+            &catalog,
+            "vdb",
+            "events",
+            &[&i.to_string(), &format!("row{}", i)],
+        )
+        .unwrap();
     }
 
     // Delete ids 0..10 and 20..30.
@@ -104,7 +113,10 @@ fn vacuum_reclaims_dead_tuples_and_preserves_live_rows() {
     );
     assert_eq!(result.deleted_count, 20);
 
-    assert!(dead_count("vdb", "events") >= 20, "dead counter must track deletes");
+    assert!(
+        dead_count("vdb", "events") >= 20,
+        "dead counter must track deletes"
+    );
 
     // VACUUM.
     let stats = vacuum_table(&catalog, "vdb", "events").expect("vacuum failed");
@@ -122,12 +134,15 @@ fn vacuum_reclaims_dead_tuples_and_preserves_live_rows() {
     for r in heap.scan() {
         if let Ok((_, _, raw)) = r
             && let Ok(row) = storage_manager::types::deserialize_nullable_row(&schema, &raw)
-                && let Some(Some(storage_manager::types::DataValue::Int(id))) = row.first() {
-                    live_ids.push(*id);
-                }
+            && let Some(Some(storage_manager::types::DataValue::Int(id))) = row.first()
+        {
+            live_ids.push(*id);
+        }
     }
     live_ids.sort();
-    let expected: Vec<i32> = (0..40).filter(|i| !((0..10).contains(i) || (20..30).contains(i))).collect();
+    let expected: Vec<i32> = (0..40)
+        .filter(|i| !((0..10).contains(i) || (20..30).contains(i)))
+        .collect();
     assert_eq!(live_ids, expected, "only live rows must survive VACUUM");
 }
 
@@ -137,8 +152,13 @@ fn vacuum_rebuilds_indexes_for_renumbered_slots() {
     let catalog = setup("idb");
 
     for i in 0..30 {
-        insert_single_tuple(&catalog, "idb", "events", &[&i.to_string(), &format!("row{}", i)])
-            .unwrap();
+        insert_single_tuple(
+            &catalog,
+            "idb",
+            "events",
+            &[&i.to_string(), &format!("row{}", i)],
+        )
+        .unwrap();
     }
 
     // Build an index over `id`.
@@ -207,8 +227,13 @@ fn vacuum_enables_space_reuse_without_page_growth() {
     let catalog = setup("sdb");
 
     for i in 0..25 {
-        insert_single_tuple(&catalog, "sdb", "events", &[&i.to_string(), &format!("row{}", i)])
-            .unwrap();
+        insert_single_tuple(
+            &catalog,
+            "sdb",
+            "events",
+            &[&i.to_string(), &format!("row{}", i)],
+        )
+        .unwrap();
     }
 
     fn page_count_of(db: &str, t: &str) -> u32 {
@@ -230,8 +255,13 @@ fn vacuum_enables_space_reuse_without_page_growth() {
     // Refill the same number of rows: pages must not grow.
     let fresh_catalog = load_catalog();
     for i in 100..125 {
-        insert_single_tuple(&fresh_catalog, "sdb", "events", &[&i.to_string(), &format!("n{}", i)])
-            .unwrap();
+        insert_single_tuple(
+            &fresh_catalog,
+            "sdb",
+            "events",
+            &[&i.to_string(), &format!("n{}", i)],
+        )
+        .unwrap();
     }
     let pages_after = page_count_of("sdb", "events");
     assert!(

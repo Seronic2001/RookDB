@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::backend::heap::HeapManager;
 use crate::catalog::types::Catalog;
 use crate::types::DataValue;
-use crate::types::validation::validate_value;
 use crate::types::row::serialize_nullable_row;
+use crate::types::validation::validate_value;
 
 /// Load CSV file with full validation and error handling using HeapManager.
 ///
@@ -99,9 +99,10 @@ pub fn load_csv(
         }
         let parsed = parse_csv_line(&line);
         let is_header = parsed.len() == columns.len()
-            && parsed.iter().zip(columns.iter()).all(|(v, col)| {
-                col.name.eq_ignore_ascii_case(v.trim().trim_matches('"'))
-            });
+            && parsed
+                .iter()
+                .zip(columns.iter())
+                .all(|(v, col)| col.name.eq_ignore_ascii_case(v.trim().trim_matches('"')));
         if is_header {
             log::info!(" Header detected: {}", line);
         } else {
@@ -195,7 +196,10 @@ pub fn load_csv(
 
         // Constraint validation: NOT NULL, UNIQUE, FK, CHECK
         if let Err(e) = crate::backend::constraint::validate_row_insert(
-            catalog, db_name, table_name, &values_ref,
+            catalog,
+            db_name,
+            table_name,
+            &values_ref,
         ) {
             log::warn!("Line {}: Constraint violation: {}", line_idx, e);
             failed += 1;
@@ -227,31 +231,27 @@ pub fn load_csv(
         }
 
         // Build datatype list
-        let data_types: Vec<_> = columns
-            .iter()
-            .map(|c| c.data_type.clone())
-            .collect();
+        let data_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
 
         // Build nullable value list
-        let nullable_values: Vec<Option<&str>> =
-            values_ref.iter().zip(columns.iter()).map(|(v, col)| {
+        let nullable_values: Vec<Option<&str>> = values_ref
+            .iter()
+            .zip(columns.iter())
+            .map(|(v, col)| {
                 let trimmed = v.trim();
                 if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
                     None
                 } else {
                     Some(*v)
                 }
-            }).collect();
+            })
+            .collect();
 
         // Serialize using tuple layout serializer
         let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {
             Ok(bytes) => bytes,
             Err(e) => {
-                log::error!(
-                    "Line {}: Failed to serialize row: {}",
-                    line_idx,
-                    e
-                );
+                log::error!("Line {}: Failed to serialize row: {}", line_idx, e);
                 failed += 1;
                 continue;
             }
@@ -262,7 +262,11 @@ pub fn load_csv(
             Ok((page_id, slot_id)) => {
                 // Update any existing B+ Tree index
                 if let Err(e) = crate::backend::executor::create_index::update_index_on_insert(
-                    db_name, table_name, &values_ref, page_id, slot_id,
+                    db_name,
+                    table_name,
+                    &values_ref,
+                    page_id,
+                    slot_id,
                 ) {
                     log::warn!("Failed to update index for row {}: {}", line_idx, e);
                 }
@@ -347,9 +351,9 @@ pub fn insert_single_tuple_with_location(
     }
 
     // Constraint validation: NOT NULL, UNIQUE, FK, CHECK
-    if let Err(e) = crate::backend::constraint::validate_row_insert(
-        catalog, db_name, table_name, values,
-    ) {
+    if let Err(e) =
+        crate::backend::constraint::validate_row_insert(catalog, db_name, table_name, values)
+    {
         log::info!("Constraint violation: {}", e);
         return Ok(None);
     }
@@ -379,21 +383,21 @@ pub fn insert_single_tuple_with_location(
     }
 
     // Build datatype list
-    let data_types: Vec<_> = columns
-        .iter()
-        .map(|c| c.data_type.clone())
-        .collect();
+    let data_types: Vec<_> = columns.iter().map(|c| c.data_type.clone()).collect();
 
     // Build nullable value list
-    let nullable_values: Vec<Option<&str>> =
-        values.iter().zip(columns.iter()).map(|(v, col)| {
+    let nullable_values: Vec<Option<&str>> = values
+        .iter()
+        .zip(columns.iter())
+        .map(|(v, col)| {
             let trimmed = v.trim();
             if col.nullable && (trimmed.eq_ignore_ascii_case("null") || trimmed.is_empty()) {
                 None
             } else {
                 Some(*v)
             }
-        }).collect();
+        })
+        .collect();
 
     // Serialize using tuple layout serializer
     let tuple_bytes = match serialize_nullable_row(&data_types, &nullable_values) {

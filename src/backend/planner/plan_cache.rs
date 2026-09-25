@@ -6,12 +6,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-use rook_ast::logical::LogicalPlan;
+use crate::backend::executor::insert_single_tuple;
+use crate::catalog::Catalog;
 use rook_ast::QueryPlan;
+use rook_ast::logical::LogicalPlan;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
-use crate::catalog::Catalog;
-use crate::backend::executor::insert_single_tuple;
 
 const DEFAULT_CACHE_CAPACITY: usize = 512;
 
@@ -72,8 +72,7 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
                 $tok,
                 Token::RParen | Token::Comma | Token::SemiColon | Token::Period
             ) || (matches!($tok, Token::LParen) && $prev_was_word);
-            let glue_after_prev =
-                normalized.ends_with('(') || normalized.ends_with('.');
+            let glue_after_prev = normalized.ends_with('(') || normalized.ends_with('.');
             if !normalized.is_empty() && !glue_after_prev && !glue_before {
                 normalized.push(' ');
             }
@@ -89,12 +88,9 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
             // Comments (`-- …` and `/* … */`) are whitespace tokens in
             // sqlparser 0.61 (struct variants) and carry no semantics —
             // skipped entirely (the fix).
-            Token::Whitespace(ws)
-                if matches!(
-                    ws,
-                    Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment { .. }
-                ) =>
-            {
+            Token::Whitespace(
+                Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment { .. },
+            ) => {
                 i += 1;
             }
 
@@ -110,7 +106,11 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
                     && matches!(tokens[i + 1], Token::Number(_, false))
                     && !prev_was_word =>
             {
-                let sign = if matches!(token, Token::Minus) { "-" } else { "" };
+                let sign = if matches!(token, Token::Minus) {
+                    "-"
+                } else {
+                    ""
+                };
                 if let Token::Number(value, _) = &tokens[i + 1] {
                     space_if_needed!(token, prev_was_word);
                     params.push(format!("{}{}", sign, value));
@@ -136,10 +136,7 @@ fn normalize_from_tokens(sql: &str, tokens: &[Token]) -> (String, Vec<String>) {
                             _ => break,
                         }
                     }
-                    match prev_word.as_deref() {
-                        Some("is") | Some("not") => true,
-                        _ => false,
-                    }
+                    matches!(prev_word.as_deref(), Some("is" | "not"))
                 };
 
                 if w.quote_style.is_none()
@@ -323,13 +320,14 @@ fn normalize_sql_legacy(sql: &str) -> (String, Vec<String>) {
                 num_str.push('-');
                 i += 1;
             }
-            while i < n && (chars[i].is_ascii_digit()
-                || chars[i] == '.'
-                || chars[i] == 'e'
-                || chars[i] == 'E'
-                || ((chars[i] == '+' || chars[i] == '-')
-                    && i > 0
-                    && (chars[i - 1] == 'e' || chars[i - 1] == 'E')))
+            while i < n
+                && (chars[i].is_ascii_digit()
+                    || chars[i] == '.'
+                    || chars[i] == 'e'
+                    || chars[i] == 'E'
+                    || ((chars[i] == '+' || chars[i] == '-')
+                        && i > 0
+                        && (chars[i - 1] == 'e' || chars[i - 1] == 'E')))
             {
                 num_str.push(chars[i]);
                 i += 1;
@@ -374,7 +372,12 @@ pub struct CachedInsert {
 
 impl CachedInsert {
     /// Execute the insert using the cached template and extracted parameter values.
-    pub fn execute(&self, catalog: &Catalog, db_name: &str, values: &[&str]) -> Result<usize, String> {
+    pub fn execute(
+        &self,
+        catalog: &Catalog,
+        db_name: &str,
+        values: &[&str],
+    ) -> Result<usize, String> {
         let db = catalog
             .databases
             .get(db_name)
@@ -399,7 +402,10 @@ impl CachedInsert {
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(col_name))
                     .ok_or_else(|| {
-                        format!("Column '{}' does not exist in table '{}'", col_name, self.table)
+                        format!(
+                            "Column '{}' does not exist in table '{}'",
+                            col_name, self.table
+                        )
                     })?;
                 col_positions.push(pos);
             }
@@ -427,17 +433,14 @@ impl CachedInsert {
                 if row_len != expected_row_len {
                     return Err(format!(
                         "INSERT row has {} value(s) but table '{}' has {} column(s)",
-                        row_len,
-                        self.table,
-                        expected_row_len
+                        row_len, self.table, expected_row_len
                     ));
                 }
             } else {
                 if row_len != expected_row_len {
                     return Err(format!(
                         "INSERT row has {} value(s) but {} column(s) listed",
-                        row_len,
-                        expected_row_len
+                        row_len, expected_row_len
                     ));
                 }
             }
@@ -522,15 +525,17 @@ impl PlanCache {
 
     pub fn insert(&mut self, db_name: &str, normalized_sql: &str, entry: PlanCacheEntry) {
         let key = (db_name.to_string(), normalized_sql.to_string());
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key, entry);
+        if let std::collections::hash_map::Entry::Occupied(mut occupied) =
+            self.entries.entry(key.clone())
+        {
+            occupied.insert(entry);
             return;
         }
 
-        if self.entries.len() >= self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
+        if self.entries.len() >= self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
         }
 
         self.order.push_back(key.clone());
@@ -550,19 +555,25 @@ fn global_plan_cache() -> &'static Mutex<PlanCache> {
 
 /// Invalidate all entries in the plan cache (called when DDL runs).
 pub fn invalidate_plan_cache() {
-    let mut cache = global_plan_cache().lock().unwrap_or_else(|p| p.into_inner());
+    let mut cache = global_plan_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     cache.clear();
 }
 
 /// Look up an entry in the plan cache.
 pub fn get_cached_plan(db_name: &str, normalized_sql: &str) -> Option<PlanCacheEntry> {
-    let cache = global_plan_cache().lock().unwrap_or_else(|p| p.into_inner());
+    let cache = global_plan_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     cache.get(db_name, normalized_sql)
 }
 
 /// Store an entry in the plan cache.
 pub fn store_cached_plan(db_name: &str, normalized_sql: &str, entry: PlanCacheEntry) {
-    let mut cache = global_plan_cache().lock().unwrap_or_else(|p| p.into_inner());
+    let mut cache = global_plan_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     cache.insert(db_name, normalized_sql, entry);
 }
 
@@ -570,7 +581,9 @@ pub fn store_cached_plan(db_name: &str, normalized_sql: &str, entry: PlanCacheEn
 type SqlParserFn = Box<dyn Fn(&str) -> Result<QueryPlan, String> + Send + Sync>;
 static SQL_PARSER: OnceLock<SqlParserFn> = OnceLock::new();
 
-pub fn register_sql_parser(parser: impl Fn(&str) -> Result<QueryPlan, String> + Send + Sync + 'static) {
+pub fn register_sql_parser(
+    parser: impl Fn(&str) -> Result<QueryPlan, String> + Send + Sync + 'static,
+) {
     let _ = SQL_PARSER.set(Box::new(parser));
 }
 
@@ -596,8 +609,8 @@ pub fn parse_insert_template(normalized_sql: &str, arity: usize) -> Option<Cache
 
     match (tokens[0], tokens[1]) {
         (Token::Word(w1), Token::Word(w2))
-            if w1.value.eq_ignore_ascii_case("insert")
-                && w2.value.eq_ignore_ascii_case("into") => {}
+            if w1.value.eq_ignore_ascii_case("insert") && w2.value.eq_ignore_ascii_case("into") => {
+        }
         _ => return None,
     }
 
@@ -733,19 +746,18 @@ pub fn execute_cached_insert(
     sql: &str,
 ) -> Result<Option<usize>, String> {
     let (normalized, params) = normalize_sql(sql);
-    let key_matched = normalized.starts_with("INSERT INTO") || normalized.starts_with("insert into");
+    let key_matched =
+        normalized.starts_with("INSERT INTO") || normalized.starts_with("insert into");
 
     if !key_matched {
         return Ok(None);
     }
 
-    if let Some(entry) = get_cached_plan(db_name, &normalized) {
-        if let PlanCacheEntry::Insert(cached_insert) = entry {
-            let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-            return cached_insert
-                .execute(catalog, db_name, &param_refs)
-                .map(Some);
-        }
+    if let Some(PlanCacheEntry::Insert(cached_insert)) = get_cached_plan(db_name, &normalized) {
+        let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
+        return cached_insert
+            .execute(catalog, db_name, &param_refs)
+            .map(Some);
     }
 
     // Cache miss: construct template
@@ -757,21 +769,19 @@ pub fn execute_cached_insert(
     }
 
     // If fast template failed (e.g. complex expression), fall back to SQL parser if registered
-    if let Ok(plan) = parse_sql(sql) {
-        if let QueryPlan::Insert(ref ip) = plan {
-            if ip.source_select.is_none() {
-                let cached_insert = CachedInsert {
-                    table: ip.table.clone(),
-                    columns: ip.columns.clone(),
-                    arity: params.len(),
-                    row_arities: ip.values.iter().map(|r| r.len()).collect(),
-                };
-                let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-                let res = cached_insert.execute(catalog, db_name, &param_refs)?;
-                store_cached_plan(db_name, &normalized, PlanCacheEntry::Insert(cached_insert));
-                return Ok(Some(res));
-            }
-        }
+    if let Ok(QueryPlan::Insert(ref ip)) = parse_sql(sql)
+        && ip.source_select.is_none()
+    {
+        let cached_insert = CachedInsert {
+            table: ip.table.clone(),
+            columns: ip.columns.clone(),
+            arity: params.len(),
+            row_arities: ip.values.iter().map(|r| r.len()).collect(),
+        };
+        let param_refs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
+        let res = cached_insert.execute(catalog, db_name, &param_refs)?;
+        store_cached_plan(db_name, &normalized, PlanCacheEntry::Insert(cached_insert));
+        return Ok(Some(res));
     }
 
     Ok(None)
@@ -892,18 +902,15 @@ mod tests {
     #[test]
     fn test_normalize_sql_strips_line_comment() {
         // Digits inside a line comment must NOT become parameters.
-        let (norm, params) = normalize_sql(
-            "SELECT id FROM staff -- lookup user 42\nWHERE id = 7",
-        );
+        let (norm, params) = normalize_sql("SELECT id FROM staff -- lookup user 42\nWHERE id = 7");
         assert_eq!(norm, "SELECT id FROM staff WHERE id = $1");
         assert_eq!(params, vec!["7"]);
     }
 
     #[test]
     fn test_normalize_sql_strips_block_comment() {
-        let (norm, params) = normalize_sql(
-            "SELECT /* version 2, tuning 'quotes' 123 */ id FROM staff WHERE id = 5",
-        );
+        let (norm, params) =
+            normalize_sql("SELECT /* version 2, tuning 'quotes' 123 */ id FROM staff WHERE id = 5");
         assert_eq!(norm, "SELECT id FROM staff WHERE id = $1");
         assert_eq!(params, vec!["5"]);
     }

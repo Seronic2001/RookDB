@@ -7,8 +7,14 @@ use storage_manager::types::{
 
 #[test]
 fn numeric_and_integer_comparisons_work() {
-    assert_eq!(DataValue::SmallInt(5).compare(&DataValue::Int(6)).unwrap(), Ordering::Less);
-    assert_eq!(DataValue::Int(6).compare(&DataValue::BigInt(6)).unwrap(), Ordering::Equal);
+    assert_eq!(
+        DataValue::SmallInt(5).compare(&DataValue::Int(6)).unwrap(),
+        Ordering::Less
+    );
+    assert_eq!(
+        DataValue::Int(6).compare(&DataValue::BigInt(6)).unwrap(),
+        Ordering::Equal
+    );
     assert_eq!(
         DataValue::Numeric(NumericValue {
             unscaled: 1234,
@@ -26,7 +32,9 @@ fn numeric_and_integer_comparisons_work() {
 #[test]
 fn floating_string_and_temporal_comparisons_work() {
     assert_eq!(
-        DataValue::Real(OrderedF32(1.0)).compare(&DataValue::Real(OrderedF32(2.0))).unwrap(),
+        DataValue::Real(OrderedF32(1.0))
+            .compare(&DataValue::Real(OrderedF32(2.0)))
+            .unwrap(),
         Ordering::Less
     );
     assert_eq!(
@@ -51,14 +59,18 @@ fn floating_string_and_temporal_comparisons_work() {
 
     assert_eq!(
         DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 25).unwrap())
-            .compare(&DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 26).unwrap()))
+            .compare(&DataValue::Date(
+                NaiveDate::from_ymd_opt(2026, 3, 26).unwrap()
+            ))
             .unwrap(),
         Ordering::Less
     );
 
     assert_eq!(
         DataValue::Time(NaiveTime::from_hms_opt(10, 0, 0).unwrap())
-            .compare(&DataValue::Time(NaiveTime::from_hms_opt(9, 59, 59).unwrap()))
+            .compare(&DataValue::Time(
+                NaiveTime::from_hms_opt(9, 59, 59).unwrap()
+            ))
             .unwrap(),
         Ordering::Greater
     );
@@ -90,7 +102,6 @@ fn nullable_comparison_returns_none_if_any_side_is_null() {
 
 #[test]
 fn team_robustness_edge_cases_comparison() {
-
     assert_eq!(
         DataValue::Char("abc".to_string())
             .compare(&DataValue::Char("abc  ".to_string()))
@@ -104,7 +115,7 @@ fn team_robustness_edge_cases_comparison() {
             .unwrap(),
         Ordering::Greater
     );
-    
+
     assert_eq!(
         DataValue::Real(OrderedF32(f32::NEG_INFINITY))
             .compare(&DataValue::Real(OrderedF32(-999999.99)))

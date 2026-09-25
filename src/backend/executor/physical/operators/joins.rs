@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use super::super::expr::{Expr, Predicate, evaluate_predicate};
+use super::super::tuple::{ColumnInfo, Tuple};
+use super::trait_::PhysicalOperator;
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
-use super::super::tuple::{Tuple, ColumnInfo};
-use super::super::expr::{Expr, Predicate, evaluate_predicate};
-use super::trait_::PhysicalOperator;
 
-use crate::types::value::{DataValue, NumericValue, OrderedF64};
 use crate::types::DataType;
+use crate::types::value::{DataValue, NumericValue, OrderedF64};
 
 // ── Join Type ─────────────────────────────────────────────────────────────────
 
@@ -119,10 +119,13 @@ impl NestedLoopJoinOperator {
         let mut joined = Tuple::empty();
 
         // Compute the join
-        if self.join_type != JoinType::Cross && let Some(pred) = &self.predicate {
+        if self.join_type != JoinType::Cross
+            && let Some(pred) = &self.predicate
+        {
             for l_idx in 0..num_left {
                 for r_idx in 0..num_right {
-                    self.left_tuples[l_idx].concatenate_into(&self.right_tuples[r_idx], &mut joined);
+                    self.left_tuples[l_idx]
+                        .concatenate_into(&self.right_tuples[r_idx], &mut joined);
                     if let Some(true) = evaluate_predicate(pred, &joined, &self.output_schema)? {
                         self.output_buffer.push(joined.clone());
                         self.left_matched[l_idx] = true;
@@ -134,7 +137,8 @@ impl NestedLoopJoinOperator {
             // CROSS JOIN (no predicate) or predicate is None
             for l_idx in 0..num_left {
                 for r_idx in 0..num_right {
-                    self.left_tuples[l_idx].concatenate_into(&self.right_tuples[r_idx], &mut joined);
+                    self.left_tuples[l_idx]
+                        .concatenate_into(&self.right_tuples[r_idx], &mut joined);
                     self.output_buffer.push(joined.clone());
                     self.left_matched[l_idx] = true;
                     self.right_matched[r_idx] = true;
@@ -391,8 +395,7 @@ fn write_tuple_values(
             Some(dv) => {
                 buf.push(1);
                 let bytes = if let Some(ty) = types.get(i) {
-                    dv.to_bytes_for_type(ty)
-                        .unwrap_or_else(|_| dv.to_bytes())
+                    dv.to_bytes_for_type(ty).unwrap_or_else(|_| dv.to_bytes())
                 } else {
                     dv.to_bytes()
                 };
@@ -491,13 +494,17 @@ impl HashJoinOperator {
     /// Compute the hash key values from a tuple using a set of key expressions.
     /// Returns `None` if any key is NULL (meaning this tuple cannot match in an
     /// INNER hash join, since SQL NULL != NULL).
-    fn make_hash_key(keys: &[Expr], tuple: &Tuple, schema: &[ColumnInfo]) -> RookResult<Option<Vec<DataValue>>> {
+    fn make_hash_key(
+        keys: &[Expr],
+        tuple: &Tuple,
+        schema: &[ColumnInfo],
+    ) -> RookResult<Option<Vec<DataValue>>> {
         let mut parts = Vec::with_capacity(keys.len());
         for expr in keys {
             let val = expr.evaluate(tuple, schema)?;
             match val {
                 Some(dv) => parts.push(Self::canonicalize_hash_key(dv)),
-                None => return Ok(None),  // NULL key → can never match (NULL != NULL)
+                None => return Ok(None), // NULL key → can never match (NULL != NULL)
             }
         }
         Ok(Some(parts))
@@ -505,9 +512,18 @@ impl HashJoinOperator {
 
     fn canonicalize_hash_key(dv: DataValue) -> DataValue {
         match dv {
-            DataValue::SmallInt(v) => DataValue::Numeric(NumericValue { unscaled: v as i128, scale: 0 }),
-            DataValue::Int(v) => DataValue::Numeric(NumericValue { unscaled: v as i128, scale: 0 }),
-            DataValue::BigInt(v) => DataValue::Numeric(NumericValue { unscaled: v as i128, scale: 0 }),
+            DataValue::SmallInt(v) => DataValue::Numeric(NumericValue {
+                unscaled: v as i128,
+                scale: 0,
+            }),
+            DataValue::Int(v) => DataValue::Numeric(NumericValue {
+                unscaled: v as i128,
+                scale: 0,
+            }),
+            DataValue::BigInt(v) => DataValue::Numeric(NumericValue {
+                unscaled: v as i128,
+                scale: 0,
+            }),
             DataValue::Numeric(num) => DataValue::Numeric(normalize_numeric(num)),
             DataValue::Real(v) => DataValue::DoublePrecision(OrderedF64(v.0 as f64)),
             DataValue::DoublePrecision(v) => DataValue::DoublePrecision(v),
@@ -523,7 +539,10 @@ impl HashJoinOperator {
 
 fn normalize_numeric(mut num: NumericValue) -> NumericValue {
     if num.unscaled == 0 {
-        return NumericValue { unscaled: 0, scale: 0 };
+        return NumericValue {
+            unscaled: 0,
+            scale: 0,
+        };
     }
     while num.scale > 0 && num.unscaled % 10 == 0 {
         num.unscaled /= 10;
@@ -533,7 +552,6 @@ fn normalize_numeric(mut num: NumericValue) -> NumericValue {
 }
 
 impl HashJoinOperator {
-
     /// Build the hash table from the build side.
     /// Tuples with NULL join keys are skipped (they can never match in SQL).
     fn build_hash_table(&mut self) -> RookResult<()> {
@@ -543,7 +561,8 @@ impl HashJoinOperator {
         while self.build.next_batch(&mut child_batch)? > 0 {
             for tuple in child_batch.drain(..) {
                 // NULL-keyed tuples are skipped — they can never match (NULL != NULL)
-                let Some(key) = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)? else {
+                let Some(key) = Self::make_hash_key(&self.build_keys, &tuple, &build_schema)?
+                else {
                     continue;
                 };
 
@@ -574,11 +593,19 @@ impl HashJoinOperator {
 
     /// Data types of the build side (cached once for the spill codec).
     fn build_type_cache(&mut self) -> Vec<DataType> {
-        self.build.schema().iter().map(|c| c.data_type.clone()).collect()
+        self.build
+            .schema()
+            .iter()
+            .map(|c| c.data_type.clone())
+            .collect()
     }
 
     fn probe_type_cache(&mut self) -> Vec<DataType> {
-        self.probe.schema().iter().map(|c| c.data_type.clone()).collect()
+        self.probe
+            .schema()
+            .iter()
+            .map(|c| c.data_type.clone())
+            .collect()
     }
 
     /// The in-memory build side exceeded the budget: hash-partition
@@ -630,12 +657,13 @@ impl HashJoinOperator {
         let mut child_batch = Vec::with_capacity(super::trait_::DEFAULT_BATCH_SIZE);
         while self.probe.next_batch(&mut child_batch)? > 0 {
             if !spilling {
-                self.probe_tuples.extend(child_batch.drain(..));
+                self.probe_tuples.append(&mut child_batch);
                 continue;
             }
             for tuple in child_batch.drain(..) {
                 // Spill mode: NULL-keyed probe tuples can never match — skip.
-                let Some(key) = Self::make_hash_key(&self.probe_keys, &tuple, &probe_schema)? else {
+                let Some(key) = Self::make_hash_key(&self.probe_keys, &tuple, &probe_schema)?
+                else {
                     continue;
                 };
                 let p = partition_of(&key);
@@ -646,13 +674,12 @@ impl HashJoinOperator {
                 }
             }
         }
-        if spilling
-            && let Some(spill) = &mut self.spill {
-                for w in spill.probe_writers.drain(..) {
-                    w.into_inner()
-                        .map_err(|e| format!("hash join spill flush failed: {}", e))?;
-                }
+        if spilling && let Some(spill) = &mut self.spill {
+            for w in spill.probe_writers.drain(..) {
+                w.into_inner()
+                    .map_err(|e| format!("hash join spill flush failed: {}", e))?;
             }
+        }
         Ok(())
     }
 
@@ -676,8 +703,10 @@ impl HashJoinOperator {
         let probe_info = self.probe.schema().to_vec();
         let build_schema = self.build.schema().to_vec();
 
-        let mut br = std::io::BufReader::new(std::fs::File::open(&build_path)
-            .map_err(|e| format!("hash join spill read failed: {}", e))?);
+        let mut br = std::io::BufReader::new(
+            std::fs::File::open(&build_path)
+                .map_err(|e| format!("hash join spill read failed: {}", e))?,
+        );
         while let Some(tuple) = read_tuple_values(&mut br, &build_types, &build_info)
             .map_err(|e| format!("hash join spill read failed: {}", e))?
         {
@@ -687,8 +716,10 @@ impl HashJoinOperator {
             }
         }
 
-        let mut pr = std::io::BufReader::new(std::fs::File::open(&probe_path)
-            .map_err(|e| format!("hash join spill read failed: {}", e))?);
+        let mut pr = std::io::BufReader::new(
+            std::fs::File::open(&probe_path)
+                .map_err(|e| format!("hash join spill read failed: {}", e))?,
+        );
         while let Some(tuple) = read_tuple_values(&mut pr, &probe_types, &probe_info)
             .map_err(|e| format!("hash join spill read failed: {}", e))?
         {
@@ -727,7 +758,7 @@ impl PhysicalOperator for HashJoinOperator {
 
                 let key = match Self::make_hash_key(&self.probe_keys, probe_tuple, &probe_schema)? {
                     Some(k) => k,
-                    None => continue,  // NULL probe key → skip (NULL != NULL)
+                    None => continue, // NULL probe key → skip (NULL != NULL)
                 };
 
                 if let Some(build_matches) = self.hash_table.get(&key) {
@@ -736,7 +767,11 @@ impl PhysicalOperator for HashJoinOperator {
                     for build_tuple in build_matches {
                         if let Some(ref remaining) = self.remaining_predicate {
                             let joined = build_tuple.concatenate(probe_tuple);
-                            if let Some(true) = evaluate_predicate(remaining, &joined, &self.output_schema)? { self.current_matches.push(build_tuple.clone()) }
+                            if let Some(true) =
+                                evaluate_predicate(remaining, &joined, &self.output_schema)?
+                            {
+                                self.current_matches.push(build_tuple.clone())
+                            }
                         } else {
                             self.current_matches.push(build_tuple.clone());
                         }
@@ -818,7 +853,9 @@ impl PhysicalOperator for HashJoinOperator {
                     for build_tuple in build_matches {
                         if let Some(ref remaining) = self.remaining_predicate {
                             build_tuple.concatenate_into(probe_tuple, &mut scratch_joined);
-                            if let Some(true) = evaluate_predicate(remaining, &scratch_joined, &self.output_schema)? {
+                            if let Some(true) =
+                                evaluate_predicate(remaining, &scratch_joined, &self.output_schema)?
+                            {
                                 self.current_matches.push(build_tuple.clone());
                             }
                         } else {
@@ -926,7 +963,8 @@ impl IndexNestedLoopJoinOperator {
     ) -> Self {
         let mut output_schema = outer.schema().to_vec();
         output_schema.extend(inner_schema.iter().cloned());
-        let inner_schema_types: Vec<DataType> = inner_schema.iter().map(|c| c.data_type.clone()).collect();
+        let inner_schema_types: Vec<DataType> =
+            inner_schema.iter().map(|c| c.data_type.clone()).collect();
 
         Self {
             outer,
@@ -960,17 +998,28 @@ impl PhysicalOperator for IndexNestedLoopJoinOperator {
                     let (page_id, slot_id) = self.inner_matches[self.match_pos];
                     self.match_pos += 1;
 
-                    let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id)
-                        .map_err(|e| RookError::Internal(format!("Failed to fetch heap tuple (page={}, slot={}): {}", page_id, slot_id, e)))?;
-                    let inner_values = crate::types::deserialize_nullable_row(&self.inner_schema_types, &raw_bytes)
-                        .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
+                    let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id).map_err(|e| {
+                        RookError::Internal(format!(
+                            "Failed to fetch heap tuple (page={}, slot={}): {}",
+                            page_id, slot_id, e
+                        ))
+                    })?;
+                    let inner_values = crate::types::deserialize_nullable_row(
+                        &self.inner_schema_types,
+                        &raw_bytes,
+                    )
+                    .map_err(|e| {
+                        RookError::Internal(format!("Failed to deserialise tuple: {}", e))
+                    })?;
 
                     let mut joined_values = outer_tuple.values.clone();
                     joined_values.extend(inner_values);
                     let candidate = Tuple::new(joined_values);
 
                     if let Some(ref pred) = self.residual_predicate {
-                        if let Some(true) = evaluate_predicate(pred, &candidate, &self.output_schema)? {
+                        if let Some(true) =
+                            evaluate_predicate(pred, &candidate, &self.output_schema)?
+                        {
                             self.had_match = true;
                             return Ok(Some(candidate));
                         } else {
@@ -998,11 +1047,19 @@ impl PhysicalOperator for IndexNestedLoopJoinOperator {
             // Pull next outer tuple
             match self.outer.next()? {
                 Some(outer_tuple) => {
-                    let key_opt = outer_tuple.values.get(self.outer_key_idx).and_then(|v| v.clone());
+                    let key_opt = outer_tuple
+                        .values
+                        .get(self.outer_key_idx)
+                        .and_then(|v| v.clone());
                     match key_opt {
                         Some(key_val) => {
-                            let tids = self.btree.search_range(&key_val, &key_val)
-                                .map_err(|e| RookError::Internal(format!("Index lookup failed in INLJ: {}", e)))?;
+                            let tids =
+                                self.btree.search_range(&key_val, &key_val).map_err(|e| {
+                                    RookError::Internal(format!(
+                                        "Index lookup failed in INLJ: {}",
+                                        e
+                                    ))
+                                })?;
                             self.current_outer = Some(outer_tuple);
                             self.inner_matches = tids;
                             self.match_pos = 0;
@@ -1066,7 +1123,6 @@ impl PhysicalOperator for IndexNestedLoopJoinOperator {
         self.outer.ordering()
     }
 }
-
 
 // ── Spill tests ──────────────────────────────────────────────────────────────
 
@@ -1149,7 +1205,10 @@ mod spill_tests {
     /// would leak into another's join.
     static BUDGET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct BudgetGuard(usize, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    struct BudgetGuard(
+        usize,
+        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    );
     impl BudgetGuard {
         /// Locks the budget mutex, sets the budget, and returns a guard
         /// that restores the previous value on drop (lock released after
@@ -1237,7 +1296,10 @@ mod spill_tests {
         assert!(!spilled_a);
         let (spilled, spilled_b) = run(true);
         assert!(spilled_b);
-        assert_eq!(in_memory, spilled, "spill path diverged from in-memory path");
+        assert_eq!(
+            in_memory, spilled,
+            "spill path diverged from in-memory path"
+        );
     }
 
     #[test]

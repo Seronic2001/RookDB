@@ -34,9 +34,7 @@ use std::sync::Mutex;
 
 use storage_manager::backend::system_table::insert_constraint_metadata;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
@@ -111,7 +109,11 @@ fn tuples_to_strings(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -158,7 +160,11 @@ fn set_operation_order_by_and_limit_apply_to_union_result() {
     );
     assert_eq!(
         rows,
-        vec![vec!["5".to_string()], vec!["10".to_string()], vec!["20".to_string()]],
+        vec![
+            vec!["5".to_string()],
+            vec!["10".to_string()],
+            vec!["20".to_string()]
+        ],
         "BUG W: ORDER BY/LIMIT must apply to the union result (got {:?}) — \
          parser likely attached them to the left branch only",
         rows
@@ -225,8 +231,9 @@ fn on_delete_set_null_applies_to_unflushed_child_rows() {
     )
     .unwrap();
     assert_eq!(pointers.len(), 1, "parent row must be found");
-    let result = storage_manager::executor::delete_by_pointers(&catalog, "db7", "parent", &pointers)
-        .unwrap();
+    let result =
+        storage_manager::executor::delete_by_pointers(&catalog, "db7", "parent", &pointers)
+            .unwrap();
     assert_eq!(result.deleted_count, 1, "parent row must be deleted");
 
     // The child row survives — but its FK column must now be NULL.
@@ -247,8 +254,10 @@ fn on_delete_set_null_applies_to_unflushed_child_rows() {
     // top of the pre-cascade image, marks it dirty. The next checkpoint
     // flush then writes the stale image back — silently reverting the
     // SET NULL on row 100.
-    assert!(insert_single_tuple(&catalog, "db7", "child", &["101", "NULL"]).unwrap(),
-        "child insert after delete must succeed");
+    assert!(
+        insert_single_tuple(&catalog, "db7", "child", &["101", "NULL"]).unwrap(),
+        "child insert after delete must succeed"
+    );
 
     let rows_after = run_select(&catalog, "db7", "SELECT id, pid FROM child ORDER BY id");
     assert_eq!(
@@ -288,7 +297,11 @@ fn control_limit_offset_with_order_by_returns_window() {
     }
 
     // ORDER BY v LIMIT 2 OFFSET 2 → rows 3 and 4 of [1,2,3,4,5] = [3, 4].
-    let rows = run_select(&catalog, "db7", "SELECT v FROM t ORDER BY v LIMIT 2 OFFSET 2");
+    let rows = run_select(
+        &catalog,
+        "db7",
+        "SELECT v FROM t ORDER BY v LIMIT 2 OFFSET 2",
+    );
     assert_eq!(
         rows,
         vec![vec!["3".to_string()], vec!["4".to_string()]],
@@ -311,10 +324,7 @@ fn control_insert_column_list_reorder() {
         &mut catalog,
         "db7",
         "t",
-        vec![
-            col("a", DataType::Int, true),
-            col("b", DataType::Int, true),
-        ],
+        vec![col("a", DataType::Int, true), col("b", DataType::Int, true)],
     );
     save_catalog(&catalog).unwrap();
 

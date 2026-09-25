@@ -3,16 +3,16 @@
 //! Supports SQL-style three-valued logic (True / False / UNKNOWN) and
 //! correlated subqueries via `CorrelatedExists` and `CorrelatedInSubquery`.
 
-use std::cmp::Ordering;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::rc::Rc;
 
-use crate::types::value::DataValue;
 use crate::types::comparison::compare_nullable;
+use crate::types::value::DataValue;
 
-use super::Expr;
-use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::operators::PhysicalOperator;
+use super::super::tuple::{ColumnInfo, Tuple};
+use super::Expr;
 
 // ── Boolean test variants ────────────────────────────────────────────────────
 
@@ -103,26 +103,31 @@ pub enum Predicate {
 impl std::fmt::Debug for Predicate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Predicate::Compare(l, op, r) => {
-                f.debug_tuple("Compare").field(l).field(op).field(r).finish()
-            }
+            Predicate::Compare(l, op, r) => f
+                .debug_tuple("Compare")
+                .field(l)
+                .field(op)
+                .field(r)
+                .finish(),
             Predicate::And(l, r) => f.debug_tuple("And").field(l).field(r).finish(),
             Predicate::Or(l, r) => f.debug_tuple("Or").field(l).field(r).finish(),
             Predicate::Not(inner) => f.debug_tuple("Not").field(inner).finish(),
             Predicate::IsNull(e) => f.debug_tuple("IsNull").field(e).finish(),
             Predicate::IsNotNull(e) => f.debug_tuple("IsNotNull").field(e).finish(),
-            Predicate::Like(e, pat, esc) => {
-                f.debug_tuple("Like").field(e).field(pat).field(esc).finish()
-            }
+            Predicate::Like(e, pat, esc) => f
+                .debug_tuple("Like")
+                .field(e)
+                .field(pat)
+                .field(esc)
+                .finish(),
             Predicate::AlwaysTrue => f.write_str("AlwaysTrue"),
             Predicate::ExistsResult(v) => f.debug_tuple("ExistsResult").field(v).finish(),
-            Predicate::InSubqueryResult(e, vals, neg) => {
-                f.debug_tuple("InSubqueryResult")
-                    .field(e)
-                    .field(&format!("{} values", vals.len()))
-                    .field(neg)
-                    .finish()
-            }
+            Predicate::InSubqueryResult(e, vals, neg) => f
+                .debug_tuple("InSubqueryResult")
+                .field(e)
+                .field(&format!("{} values", vals.len()))
+                .field(neg)
+                .finish(),
             Predicate::CorrelatedExists {
                 inner_plan: _,
                 params,
@@ -192,7 +197,11 @@ impl Predicate {
 ///
 /// Returns `None` for UNKNOWN (NULL involved), `Some(true)` for True,
 /// `Some(false)` for False.
-pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<bool>, String> {
+pub fn evaluate_predicate(
+    pred: &Predicate,
+    tuple: &Tuple,
+    schema: &[ColumnInfo],
+) -> Result<Option<bool>, String> {
     match pred {
         Predicate::AlwaysTrue => Ok(Some(true)),
 
@@ -268,9 +277,7 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
             let val = expr.evaluate(tuple, schema)?;
             match val {
                 None => Ok(None), // NULL LIKE anything → UNKNOWN
-                Some(DataValue::Varchar(s)) => {
-                    Ok(Some(like_match(&s, pattern, *escape_char)))
-                }
+                Some(DataValue::Varchar(s)) => Ok(Some(like_match(&s, pattern, *escape_char))),
                 Some(DataValue::Char(s)) => {
                     Ok(Some(like_match(s.trim_end(), pattern, *escape_char)))
                 }
@@ -301,11 +308,11 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
                         // x != NULL → UNKNOWN, so if any value is NULL, the AND
                         // with UNKNOWN produces UNKNOWN unless we found a match.
                         if found {
-                            Ok(Some(false))  // NOT IN failed because match found
+                            Ok(Some(false)) // NOT IN failed because match found
                         } else if has_nulls {
-                            Ok(None)  // UNKNOWN because NULL in list
+                            Ok(None) // UNKNOWN because NULL in list
                         } else {
-                            Ok(Some(true))  // definitely not in list
+                            Ok(Some(true)) // definitely not in list
                         }
                     } else if found {
                         Ok(Some(true))
@@ -325,17 +332,19 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
         } => {
             // Extract all outer column values from the current tuple
             for (param, idx) in params.iter().zip(outer_col_indices.iter()) {
-                let outer_val = tuple
-                    .values
-                    .get(*idx)
-                    .and_then(|v| v.clone());
+                let outer_val = tuple.values.get(*idx).and_then(|v| v.clone());
                 *param.borrow_mut() = outer_val;
             }
 
             // Execute the inner plan — if any tuple passes, EXISTS is true
             let mut plan_ref = inner_plan.borrow_mut();
-            plan_ref.reset().map_err(|e| format!("Correlated EXISTS reset error: {}", e))?;
-            let exists = plan_ref.next().map_err(|e| format!("Correlated EXISTS error: {}", e))?.is_some();
+            plan_ref
+                .reset()
+                .map_err(|e| format!("Correlated EXISTS reset error: {}", e))?;
+            let exists = plan_ref
+                .next()
+                .map_err(|e| format!("Correlated EXISTS error: {}", e))?
+                .is_some();
             Ok(Some(exists))
         }
 
@@ -353,21 +362,21 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
                 Some(lhs_dv) => {
                     // Set all correlated parameters from the outer tuple
                     for (param, idx) in params.iter().zip(outer_col_indices.iter()) {
-                        let outer_val = tuple
-                            .values
-                            .get(*idx)
-                            .and_then(|v| v.clone());
+                        let outer_val = tuple.values.get(*idx).and_then(|v| v.clone());
                         *param.borrow_mut() = outer_val;
                     }
 
                     // Execute the inner plan and check if any value matches
                     let mut plan_ref = inner_plan.borrow_mut();
-                    plan_ref.reset().map_err(|e| format!("Correlated IN reset error: {}", e))?;
+                    plan_ref
+                        .reset()
+                        .map_err(|e| format!("Correlated IN reset error: {}", e))?;
 
                     let mut found = false;
                     let mut saw_null = false;
-                    while let Some(inner_tuple) =
-                        plan_ref.next().map_err(|e| format!("Correlated IN error: {}", e))?
+                    while let Some(inner_tuple) = plan_ref
+                        .next()
+                        .map_err(|e| format!("Correlated IN error: {}", e))?
                     {
                         match inner_tuple.values.into_iter().next().flatten() {
                             Some(val) => {
@@ -414,8 +423,8 @@ pub fn evaluate_predicate(pred: &Predicate, tuple: &Tuple, schema: &[ColumnInfo]
             // IS DISTINCT FROM: true if values differ OR one is NULL
             // (NULL IS DISTINCT FROM NULL → false; NULL IS DISTINCT FROM 5 → true)
             match (lv, rv) {
-                (None, None) => Ok(Some(false)),  // both NULL → not distinct
-                (None, Some(_)) | (Some(_), None) => Ok(Some(true)),  // one NULL → distinct
+                (None, None) => Ok(Some(false)), // both NULL → not distinct
+                (None, Some(_)) | (Some(_), None) => Ok(Some(true)), // one NULL → distinct
                 (Some(a), Some(b)) => {
                     let ordering = compare_nullable(Some(&a), Some(&b))
                         .map_err(|e| e.to_string())?

@@ -26,8 +26,8 @@ use rook_ast::{ExprNode, JoinType, PredicateNode};
 
 use std::collections::{HashMap, HashSet};
 
-use crate::statistics::TableStatistics;
 use crate::planner::helpers::derive_schema;
+use crate::statistics::TableStatistics;
 
 use self::helpers::*;
 
@@ -387,13 +387,15 @@ impl Optimizer {
                 // Get column names from each side of the join
                 let left_schema = derive_schema(&j.left);
                 let right_schema = derive_schema(&j.right);
-                let left_cols: HashSet<String> = left_schema.columns.iter()
-                    .map(|c| c.name.clone()).collect();
-                let right_cols: HashSet<String> = right_schema.columns.iter()
-                    .map(|c| c.name.clone()).collect();
+                let left_cols: HashSet<String> =
+                    left_schema.columns.iter().map(|c| c.name.clone()).collect();
+                let right_cols: HashSet<String> = right_schema
+                    .columns
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect();
 
-                let pred_cols: HashSet<String> = extract_column_names(&pred)
-                    .into_iter().collect();
+                let pred_cols: HashSet<String> = extract_column_names(&pred).into_iter().collect();
 
                 let on_left = pred_cols.iter().all(|c| left_cols.contains(c));
                 let on_right = pred_cols.iter().all(|c| right_cols.contains(c));
@@ -424,7 +426,10 @@ impl Optimizer {
                         condition: j.condition,
                     })
                 } else if !pred_cols.is_empty()
-                    && matches!(j.join_type, JoinType::Inner | JoinType::Cross | JoinType::Natural)
+                    && matches!(
+                        j.join_type,
+                        JoinType::Inner | JoinType::Cross | JoinType::Natural
+                    )
                 {
                     // Predicate references columns from BOTH sides of an INNER/CROSS join
                     // (or columns exist on both sides). The earlier branches already ruled
@@ -497,7 +502,9 @@ impl Optimizer {
                 LogicalPlan::TableScan(LogicalTableScan {
                     table: t.table,
                     alias: t.alias,
-                    schema: ColumnSchema { columns: kept_columns },
+                    schema: ColumnSchema {
+                        columns: kept_columns,
+                    },
                     system_table_name: t.system_table_name,
                 })
             }
@@ -574,11 +581,8 @@ impl Optimizer {
                             .unwrap_or_default(),
                     )
                     .collect();
-                let gb_cols: HashSet<String> = a
-                    .group_by
-                    .iter()
-                    .flat_map(extract_expr_columns)
-                    .collect();
+                let gb_cols: HashSet<String> =
+                    a.group_by.iter().flat_map(extract_expr_columns).collect();
                 let child_needed: HashSet<String> = agg_cols
                     .into_iter()
                     .chain(gb_cols)
@@ -678,7 +682,10 @@ impl Optimizer {
 
                 // Only reorder commutative join types (Inner, Cross, Natural).
                 // Left, Right, and Full outer joins are NOT commutative.
-                let can_reorder = matches!(j.join_type, JoinType::Inner | JoinType::Cross | JoinType::Natural);
+                let can_reorder = matches!(
+                    j.join_type,
+                    JoinType::Inner | JoinType::Cross | JoinType::Natural
+                );
 
                 if can_reorder {
                     let (left_size, right_size) = (
@@ -815,7 +822,11 @@ impl Optimizer {
                 SetOpType::Union => {
                     let left = self.estimate_cardinality(&s.left);
                     let right = self.estimate_cardinality(&s.right);
-                    if s.all { left + right } else { (left + right) * 0.7 }
+                    if s.all {
+                        left + right
+                    } else {
+                        (left + right) * 0.7
+                    }
                 }
                 _ => {
                     let left = self.estimate_cardinality(&s.left);
@@ -860,12 +871,11 @@ impl Optimizer {
             LogicalPlan::Sort(s) => match *s.child {
                 LogicalPlan::Project(p) => {
                     let input_schema = derive_schema(&p.child);
-                    let all_keys_resolve = s.order_by.iter().all(|ob| {
-                        match sort_key_column(&ob.expr) {
+                    let all_keys_resolve =
+                        s.order_by.iter().all(|ob| match sort_key_column(&ob.expr) {
                             Some(col) => input_schema.contains(&col),
                             None => false,
-                        }
-                    });
+                        });
                     if all_keys_resolve {
                         let inner_sort = LogicalPlan::Sort(LogicalSort {
                             order_by: s.order_by,
@@ -910,57 +920,55 @@ impl Optimizer {
 
     fn limit_pushdown(&self, plan: LogicalPlan) -> LogicalPlan {
         match plan {
-            LogicalPlan::Limit(l) if l.offset == 0 => {
-                match *l.child {
-                    LogicalPlan::Sort(s) => {
-                        let existing_limit = s.limit.unwrap_or(l.limit);
-                        let new_limit = existing_limit.min(l.limit);
-                        let child = self.limit_pushdown(*s.child);
-                        LogicalPlan::Sort(LogicalSort {
-                            order_by: s.order_by,
-                            child: Box::new(child),
-                            limit: Some(new_limit),
-                        })
-                    }
-                    LogicalPlan::Project(p) => {
-                        let LogicalProject {
-                            expressions: p_exprs,
-                            child: p_child,
-                        } = p;
-                        let inner = self.limit_pushdown(*p_child);
-                        match inner {
-                            LogicalPlan::Sort(s) => {
-                                let existing_limit = s.limit.unwrap_or(l.limit);
-                                let new_limit = existing_limit.min(l.limit);
-                                LogicalPlan::Project(LogicalProject {
-                                    expressions: p_exprs,
-                                    child: Box::new(LogicalPlan::Sort(LogicalSort {
-                                        order_by: s.order_by,
-                                        child: s.child,
-                                        limit: Some(new_limit),
-                                    })),
-                                })
-                            }
-                            _ => LogicalPlan::Limit(LogicalLimit {
-                                limit: l.limit,
-                                offset: l.offset,
-                                child: Box::new(LogicalPlan::Project(LogicalProject {
-                                    expressions: p_exprs,
-                                    child: Box::new(inner),
+            LogicalPlan::Limit(l) if l.offset == 0 => match *l.child {
+                LogicalPlan::Sort(s) => {
+                    let existing_limit = s.limit.unwrap_or(l.limit);
+                    let new_limit = existing_limit.min(l.limit);
+                    let child = self.limit_pushdown(*s.child);
+                    LogicalPlan::Sort(LogicalSort {
+                        order_by: s.order_by,
+                        child: Box::new(child),
+                        limit: Some(new_limit),
+                    })
+                }
+                LogicalPlan::Project(p) => {
+                    let LogicalProject {
+                        expressions: p_exprs,
+                        child: p_child,
+                    } = p;
+                    let inner = self.limit_pushdown(*p_child);
+                    match inner {
+                        LogicalPlan::Sort(s) => {
+                            let existing_limit = s.limit.unwrap_or(l.limit);
+                            let new_limit = existing_limit.min(l.limit);
+                            LogicalPlan::Project(LogicalProject {
+                                expressions: p_exprs,
+                                child: Box::new(LogicalPlan::Sort(LogicalSort {
+                                    order_by: s.order_by,
+                                    child: s.child,
+                                    limit: Some(new_limit),
                                 })),
-                            }),
+                            })
                         }
-                    }
-                    other => {
-                        let child = self.limit_pushdown(other);
-                        LogicalPlan::Limit(LogicalLimit {
+                        _ => LogicalPlan::Limit(LogicalLimit {
                             limit: l.limit,
                             offset: l.offset,
-                            child: Box::new(child),
-                        })
+                            child: Box::new(LogicalPlan::Project(LogicalProject {
+                                expressions: p_exprs,
+                                child: Box::new(inner),
+                            })),
+                        }),
                     }
                 }
-            }
+                other => {
+                    let child = self.limit_pushdown(other);
+                    LogicalPlan::Limit(LogicalLimit {
+                        limit: l.limit,
+                        offset: l.offset,
+                        child: Box::new(child),
+                    })
+                }
+            },
             LogicalPlan::Limit(l) => {
                 let child = self.limit_pushdown(*l.child);
                 // With an OFFSET the sort cannot absorb this node (it has no

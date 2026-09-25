@@ -1,5 +1,5 @@
+use super::super::tuple::{ColumnInfo, Tuple};
 use crate::backend::error::{RookError, RookResult};
-use super::super::tuple::{Tuple, ColumnInfo};
 
 /// Default batch size for vectorized execution.
 pub const DEFAULT_BATCH_SIZE: usize = 1024;
@@ -37,7 +37,9 @@ pub trait PhysicalOperator {
     }
 
     /// Estimate how many tuples this operator will produce (0 = unknown).
-    fn estimate_cardinality(&self) -> usize { 0 }
+    fn estimate_cardinality(&self) -> usize {
+        0
+    }
 
     /// A human-readable name for the operator (for debug printing).
     fn name(&self) -> &'static str;
@@ -48,4 +50,3 @@ pub trait PhysicalOperator {
         None
     }
 }
-

@@ -34,9 +34,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use crate::backend::error::{RookError, RookResult};
 use super::operators::PhysicalOperator;
-use super::tuple::{Tuple, ColumnInfo, serialize_tuple_to_bytes, deserialize_tuple_from_bytes};
+use super::tuple::{ColumnInfo, Tuple, deserialize_tuple_from_bytes, serialize_tuple_to_bytes};
+use crate::backend::error::{RookError, RookResult};
 use crate::types::comparison::compare_nullable;
 
 // ── Global temp-file counter ──────────────────────────────────────────────────
@@ -153,11 +153,7 @@ impl Drop for TempFileManager {
 ///
 /// Returns `Ordering::Less` if `a` should sort before `b` according to the
 /// sort key specifications.
-fn compare_tuples_by_keys(
-    a: &Tuple,
-    b: &Tuple,
-    sort_keys: &[(usize, bool)],
-) -> Ordering {
+fn compare_tuples_by_keys(a: &Tuple, b: &Tuple, sort_keys: &[(usize, bool)]) -> Ordering {
     for &(key_idx, descending) in sort_keys {
         let av = a.values.get(key_idx).and_then(|v| v.as_ref());
         let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
@@ -166,10 +162,14 @@ fn compare_tuples_by_keys(
                 .unwrap_or(None)
                 .unwrap_or(Ordering::Equal),
             (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,  // NULLs first
+            (None, Some(_)) => Ordering::Less, // NULLs first
             (Some(_), None) => Ordering::Greater,
         };
-        let ordering = if descending { ordering.reverse() } else { ordering };
+        let ordering = if descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
         if ordering != Ordering::Equal {
             return ordering;
         }
@@ -211,16 +211,13 @@ impl SortedRunWriter {
 
     /// Append one tuple to the sorted run.
     fn write_tuple(&mut self, tuple: &Tuple) -> RookResult<()> {
-        let bytes = serialize_tuple_to_bytes(tuple, &self.schema)
-            .map_err(|e| RookError::Internal(e))?;
+        let bytes = serialize_tuple_to_bytes(tuple, &self.schema).map_err(RookError::Internal)?;
         let len = bytes.len() as u32;
 
         self.file
             .write_all(&len.to_le_bytes())
-            .map_err(|e| RookError::Io(e))?;
-        self.file
-            .write_all(&bytes)
-            .map_err(|e| RookError::Io(e))?;
+            .map_err(RookError::Io)?;
+        self.file.write_all(&bytes).map_err(RookError::Io)?;
 
         self.tuple_count += 1;
         Ok(())
@@ -228,15 +225,11 @@ impl SortedRunWriter {
 
     /// Finalize the run by writing the tuple count at the start of the file.
     fn finalize(&mut self) -> RookResult<()> {
-        self.file
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| RookError::Io(e))?;
+        self.file.seek(SeekFrom::Start(0)).map_err(RookError::Io)?;
         self.file
             .write_all(&self.tuple_count.to_le_bytes())
-            .map_err(|e| RookError::Io(e))?;
-        self.file
-            .flush()
-            .map_err(|e| RookError::Io(e))?;
+            .map_err(RookError::Io)?;
+        self.file.flush().map_err(RookError::Io)?;
         Ok(())
     }
 
@@ -269,12 +262,11 @@ impl SortedRunReader {
         let mut file = OpenOptions::new()
             .read(true)
             .open(path)
-            .map_err(|e| RookError::Io(e))?;
+            .map_err(RookError::Io)?;
 
         // Read tuple count
         let mut count_buf = [0u8; 4];
-        file.read_exact(&mut count_buf)
-            .map_err(|e| RookError::Io(e))?;
+        file.read_exact(&mut count_buf).map_err(RookError::Io)?;
         let tuple_count = u32::from_le_bytes(count_buf);
         log::info!(
             "[ExternalSort] Opened run {} with {} tuples",
@@ -309,9 +301,7 @@ impl SortedRunReader {
 
         // Read tuple data
         let mut data_buf = vec![0u8; data_len];
-        self.file
-            .read_exact(&mut data_buf)
-            .map_err(|e| RookError::Io(e))?;
+        self.file.read_exact(&mut data_buf).map_err(RookError::Io)?;
 
         self.tuples_read += 1;
         if self.tuples_read >= self.tuple_count {
@@ -349,8 +339,7 @@ impl HeapEntry {
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
         self.run_index == other.run_index
-            && compare_tuples_by_keys(&self.tuple, &other.tuple, &self.sort_keys)
-                == Ordering::Equal
+            && compare_tuples_by_keys(&self.tuple, &other.tuple, &self.sort_keys) == Ordering::Equal
     }
 }
 
@@ -366,8 +355,7 @@ impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max-heap; we reverse to get ascending (min-heap)
         // behavior for the sort key.
-        let key_ordering =
-            compare_tuples_by_keys(&self.tuple, &other.tuple, &self.sort_keys);
+        let key_ordering = compare_tuples_by_keys(&self.tuple, &other.tuple, &self.sort_keys);
         // Reverse: smaller tuple should be popped FIRST from max-heap
         key_ordering
             .reverse()
@@ -460,21 +448,16 @@ impl ExternalSortOperator {
         buffer.sort_by(|a, b| compare_tuples_by_keys(a, b, &sort_keys));
 
         // Write to temp file
-        let path = self
-            .temp_files
-            .create_file()
-            .map_err(|e| RookError::Io(e))?;
+        let path = self.temp_files.create_file().map_err(RookError::Io)?;
 
-        let mut writer = SortedRunWriter::new(path.clone(), self.run_schema.clone())
-            .map_err(|e| RookError::Io(e))?;
+        let mut writer =
+            SortedRunWriter::new(path.clone(), self.run_schema.clone()).map_err(RookError::Io)?;
 
         for tuple in buffer.drain(..) {
-            writer
-                .write_tuple(&tuple)?;
+            writer.write_tuple(&tuple)?;
         }
 
-        writer
-            .finalize()?;
+        writer.finalize()?;
 
         self.sorted_runs.push(path);
         Ok(())
@@ -496,10 +479,10 @@ impl ExternalSortOperator {
         let schema = self.run_schema.clone();
 
         for (idx, path) in self.sorted_runs.iter().enumerate() {
-            let mut reader =
-                SortedRunReader::open(path, schema.clone(), idx)?;
+            let mut reader = SortedRunReader::open(path, schema.clone(), idx)?;
             if let Some(tuple) = reader.next_tuple()? {
-                self.heap.push(HeapEntry::new(tuple, idx, sort_keys.clone()));
+                self.heap
+                    .push(HeapEntry::new(tuple, idx, sort_keys.clone()));
             }
             self.readers.push(reader);
         }
@@ -569,8 +552,8 @@ impl PhysicalOperator for ExternalSortOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::executor::physical::tuple::Tuple;
     use crate::backend::executor::physical::operators::PhysicalOperator;
+    use crate::backend::executor::physical::tuple::Tuple;
     use crate::types::datatype::DataType;
     use crate::types::value::DataValue;
 
@@ -583,7 +566,11 @@ mod tests {
 
     impl MockOperator {
         fn new(tuples: Vec<Tuple>, schema: Vec<ColumnInfo>) -> Self {
-            Self { tuples, pos: 0, schema }
+            Self {
+                tuples,
+                pos: 0,
+                schema,
+            }
         }
     }
 
@@ -617,10 +604,14 @@ mod tests {
         vec![
             ColumnInfo {
                 name: "a".into(),
-                data_type: DataType::Int, table: None },
+                data_type: DataType::Int,
+                table: None,
+            },
             ColumnInfo {
                 name: "b".into(),
-                data_type: DataType::Int, table: None },
+                data_type: DataType::Int,
+                table: None,
+            },
         ]
     }
 
@@ -628,44 +619,26 @@ mod tests {
         let schema = int_schema();
         let tuples = data
             .into_iter()
-            .map(|(a, b)| {
-                Tuple::new(
-                    vec![a.map(DataValue::Int), b.map(DataValue::Int)],
-                )
-            })
+            .map(|(a, b)| Tuple::new(vec![a.map(DataValue::Int), b.map(DataValue::Int)]))
             .collect();
         (tuples, schema)
     }
 
     #[test]
     fn test_compare_tuples_by_keys_asc() {
-        let a = Tuple::new(
-            vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))],
-        );
-        let b = Tuple::new(
-            vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))],
-        );
+        let a = Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]);
+        let b = Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))]);
 
         let keys = vec![(0, false)]; // sort by col 0 ascending
-        assert_eq!(
-            compare_tuples_by_keys(&a, &b, &keys),
-            Ordering::Less
-        );
-        assert_eq!(
-            compare_tuples_by_keys(&b, &a, &keys),
-            Ordering::Greater
-        );
+        assert_eq!(compare_tuples_by_keys(&a, &b, &keys), Ordering::Less);
+        assert_eq!(compare_tuples_by_keys(&b, &a, &keys), Ordering::Greater);
         assert_eq!(compare_tuples_by_keys(&a, &a, &keys), Ordering::Equal);
     }
 
     #[test]
     fn test_compare_tuples_by_keys_desc() {
-        let a = Tuple::new(
-            vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))],
-        );
-        let b = Tuple::new(
-            vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))],
-        );
+        let a = Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]);
+        let b = Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(20))]);
 
         let keys = vec![(0, true)]; // sort by col 0 descending
         assert_eq!(
@@ -676,12 +649,8 @@ mod tests {
 
     #[test]
     fn test_compare_tuples_by_keys_nulls_first() {
-        let a = Tuple::new(
-            vec![None, Some(DataValue::Int(10))],
-        );
-        let b = Tuple::new(
-            vec![Some(DataValue::Int(5)), Some(DataValue::Int(20))],
-        );
+        let a = Tuple::new(vec![None, Some(DataValue::Int(10))]);
+        let b = Tuple::new(vec![Some(DataValue::Int(5)), Some(DataValue::Int(20))]);
 
         let keys = vec![(0, false)]; // NULLs first
         assert_eq!(compare_tuples_by_keys(&a, &b, &keys), Ordering::Less);
@@ -782,8 +751,7 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![]);
         let child = MockOperator::new(tuples, schema);
         let config = ExternalSortConfig::default();
-        let mut sorter =
-            ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
+        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
         assert!(sorter.next().unwrap().is_none());
     }
 
@@ -792,8 +760,7 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![(Some(42), Some(100))]);
         let child = MockOperator::new(tuples, schema);
         let config = ExternalSortConfig::default();
-        let mut sorter =
-            ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
+        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
         let t = sorter.next().unwrap().unwrap();
         assert_eq!(t.values[0], Some(DataValue::Int(42)));
         assert!(sorter.next().unwrap().is_none());
@@ -804,21 +771,19 @@ mod tests {
         let schema = vec![
             ColumnInfo {
                 name: "x".into(),
-                data_type: DataType::Int, table: None },
+                data_type: DataType::Int,
+                table: None,
+            },
             ColumnInfo {
                 name: "y".into(),
-                data_type: DataType::Int, table: None },
+                data_type: DataType::Int,
+                table: None,
+            },
         ];
         let tuples = vec![
-            Tuple::new(
-                vec![Some(DataValue::Int(1)), Some(DataValue::Int(20))],
-            ),
-            Tuple::new(
-                vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))],
-            ),
-            Tuple::new(
-                vec![Some(DataValue::Int(2)), Some(DataValue::Int(5))],
-            ),
+            Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(20))]),
+            Tuple::new(vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]),
+            Tuple::new(vec![Some(DataValue::Int(2)), Some(DataValue::Int(5))]),
         ];
 
         let child = MockOperator::new(tuples, schema);
@@ -833,11 +798,20 @@ mod tests {
         );
 
         let t1 = sorter.next().unwrap().unwrap();
-        assert_eq!(t1.values, vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]);
+        assert_eq!(
+            t1.values,
+            vec![Some(DataValue::Int(1)), Some(DataValue::Int(10))]
+        );
         let t2 = sorter.next().unwrap().unwrap();
-        assert_eq!(t2.values, vec![Some(DataValue::Int(1)), Some(DataValue::Int(20))]);
+        assert_eq!(
+            t2.values,
+            vec![Some(DataValue::Int(1)), Some(DataValue::Int(20))]
+        );
         let t3 = sorter.next().unwrap().unwrap();
-        assert_eq!(t3.values, vec![Some(DataValue::Int(2)), Some(DataValue::Int(5))]);
+        assert_eq!(
+            t3.values,
+            vec![Some(DataValue::Int(2)), Some(DataValue::Int(5))]
+        );
         assert!(sorter.next().unwrap().is_none());
     }
 
@@ -849,8 +823,7 @@ mod tests {
             max_tuples_per_run: 1, // force separate runs
             ..Default::default()
         };
-        let mut sorter =
-            ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
+        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
 
         // First pass
         let t1 = sorter.next().unwrap().unwrap();
@@ -882,8 +855,7 @@ mod tests {
             max_tuples_per_run: 2,
             ..Default::default()
         };
-        let mut sorter =
-            ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
+        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
 
         let results: Vec<Tuple> = std::iter::from_fn(|| sorter.next().transpose())
             .collect::<Result<Vec<_>, _>>()
@@ -910,8 +882,7 @@ mod tests {
             max_tuples_per_run: 2,
             ..Default::default()
         };
-        let mut sorter =
-            ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
+        let mut sorter = ExternalSortOperator::new(Box::new(child), vec![(0, false)], config);
 
         let results: Vec<Tuple> = std::iter::from_fn(|| sorter.next().transpose())
             .collect::<Result<Vec<_>, _>>()

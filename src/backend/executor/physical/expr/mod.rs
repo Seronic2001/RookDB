@@ -3,22 +3,22 @@
 //! Expressions evaluate against deserialised tuples and produce values.
 //! This module also re-exports the predicate sub-module.
 
-pub mod predicate;
 pub mod convert;
+pub mod predicate;
 
 #[cfg(test)]
 pub mod tests;
 
-pub use predicate::{Predicate, evaluate_predicate, ComparisonOp, BooleanTest};
 pub use convert::{expr_from_ast, predicate_from_ast};
+pub use predicate::{BooleanTest, ComparisonOp, Predicate, evaluate_predicate};
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::types::value::DataValue;
 
-use super::tuple::{Tuple, ColumnInfo};
 use super::operators::PhysicalOperator;
+use super::tuple::{ColumnInfo, Tuple};
 
 // ── Expressions ───────────────────────────────────────────────────────────────
 
@@ -134,7 +134,11 @@ impl std::fmt::Debug for Expr {
 impl Expr {
     /// Evaluate this expression against a tuple and schema, returning the resulting value
     /// (or `None` for NULL).
-    pub fn evaluate(&self, tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Option<DataValue>, String> {
+    pub fn evaluate(
+        &self,
+        tuple: &Tuple,
+        schema: &[ColumnInfo],
+    ) -> Result<Option<DataValue>, String> {
         match self {
             Expr::CorrelatedScalarSubquery {
                 inner_plan,
@@ -146,12 +150,21 @@ impl Expr {
                     *param.borrow_mut() = outer_val;
                 }
                 let mut plan_ref = inner_plan.borrow_mut();
-                plan_ref.reset().map_err(|e| format!("Correlated scalar subquery reset error: {}", e))?;
-                match plan_ref.next().map_err(|e| format!("Correlated scalar subquery error: {}", e))? {
+                plan_ref
+                    .reset()
+                    .map_err(|e| format!("Correlated scalar subquery reset error: {}", e))?;
+                match plan_ref
+                    .next()
+                    .map_err(|e| format!("Correlated scalar subquery error: {}", e))?
+                {
                     None => Ok(None),
                     Some(mut t) => {
                         let val = t.values.drain(..).next().flatten();
-                        if plan_ref.next().map_err(|e| format!("Correlated scalar subquery error: {}", e))?.is_some() {
+                        if plan_ref
+                            .next()
+                            .map_err(|e| format!("Correlated scalar subquery error: {}", e))?
+                            .is_some()
+                        {
                             return Err("Scalar subquery returned more than one row".to_string());
                         }
                         Ok(val)
@@ -173,30 +186,52 @@ impl Expr {
                 let idx = match table {
                     Some(t) => {
                         // Table-qualified: match both table and column name
-                        schema.iter().position(|ci| {
-                            ci.name.eq_ignore_ascii_case(column)
-                                && ci.table.as_ref()
-                                    .map(|ct| ct.eq_ignore_ascii_case(t))
-                                    .unwrap_or(false)
-                        }).or_else(|| {
-                            // Fallback if table name not present in child schema (e.g. intermediate operator)
-                            schema.iter().position(|ci| ci.name.eq_ignore_ascii_case(column))
-                        })
+                        schema
+                            .iter()
+                            .position(|ci| {
+                                ci.name.eq_ignore_ascii_case(column)
+                                    && ci
+                                        .table
+                                        .as_ref()
+                                        .map(|ct| ct.eq_ignore_ascii_case(t))
+                                        .unwrap_or(false)
+                            })
+                            .or_else(|| {
+                                // Fallback if table name not present in child schema (e.g. intermediate operator)
+                                schema
+                                    .iter()
+                                    .position(|ci| ci.name.eq_ignore_ascii_case(column))
+                            })
                     }
                     None => {
                         // Unqualified: match first column by name only
-                        schema.iter()
+                        schema
+                            .iter()
                             .position(|ci| ci.name.eq_ignore_ascii_case(column))
                     }
                 }
-                .ok_or_else(|| format!(
-                    "Column '{}' not found in tuple schema ({:?})",
-                    column,
-                    schema.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>()
-                ))?;
-                Ok(tuple.values.get(idx).ok_or_else(|| {
-                    format!("Column '{}' index {} out of bounds (arity {})", column, idx, tuple.arity())
-                })?.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "Column '{}' not found in tuple schema ({:?})",
+                        column,
+                        schema
+                            .iter()
+                            .map(|c| format!("{:?}", c))
+                            .collect::<Vec<_>>()
+                    )
+                })?;
+                Ok(tuple
+                    .values
+                    .get(idx)
+                    .ok_or_else(|| {
+                        format!(
+                            "Column '{}' index {} out of bounds (arity {})",
+                            column,
+                            idx,
+                            tuple.arity()
+                        )
+                    })?
+                    .clone())
             }
             Expr::Constant(dv) => Ok(Some(dv.clone())),
             Expr::Null => Ok(None),
@@ -204,10 +239,20 @@ impl Expr {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(
-                    lv, rv,
-                    |a, b| a.checked_add(b).ok_or_else(|| "Integer addition overflow".to_string()),
-                    |a, b| a.checked_add(b).ok_or_else(|| "BigInt addition overflow".to_string()),
-                    |a, b| a.checked_add(b).ok_or_else(|| "SmallInt addition overflow".to_string()),
+                    lv,
+                    rv,
+                    |a, b| {
+                        a.checked_add(b)
+                            .ok_or_else(|| "Integer addition overflow".to_string())
+                    },
+                    |a, b| {
+                        a.checked_add(b)
+                            .ok_or_else(|| "BigInt addition overflow".to_string())
+                    },
+                    |a, b| {
+                        a.checked_add(b)
+                            .ok_or_else(|| "SmallInt addition overflow".to_string())
+                    },
                     |a, b| Ok(a + b),
                     |a, b| Ok(a + b),
                     numeric_add,
@@ -217,10 +262,20 @@ impl Expr {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(
-                    lv, rv,
-                    |a, b| a.checked_sub(b).ok_or_else(|| "Integer subtraction overflow".to_string()),
-                    |a, b| a.checked_sub(b).ok_or_else(|| "BigInt subtraction overflow".to_string()),
-                    |a, b| a.checked_sub(b).ok_or_else(|| "SmallInt subtraction overflow".to_string()),
+                    lv,
+                    rv,
+                    |a, b| {
+                        a.checked_sub(b)
+                            .ok_or_else(|| "Integer subtraction overflow".to_string())
+                    },
+                    |a, b| {
+                        a.checked_sub(b)
+                            .ok_or_else(|| "BigInt subtraction overflow".to_string())
+                    },
+                    |a, b| {
+                        a.checked_sub(b)
+                            .ok_or_else(|| "SmallInt subtraction overflow".to_string())
+                    },
                     |a, b| Ok(a - b),
                     |a, b| Ok(a - b),
                     numeric_sub,
@@ -230,10 +285,20 @@ impl Expr {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(
-                    lv, rv,
-                    |a, b| a.checked_mul(b).ok_or_else(|| "Integer multiplication overflow".to_string()),
-                    |a, b| a.checked_mul(b).ok_or_else(|| "BigInt multiplication overflow".to_string()),
-                    |a, b| a.checked_mul(b).ok_or_else(|| "SmallInt multiplication overflow".to_string()),
+                    lv,
+                    rv,
+                    |a, b| {
+                        a.checked_mul(b)
+                            .ok_or_else(|| "Integer multiplication overflow".to_string())
+                    },
+                    |a, b| {
+                        a.checked_mul(b)
+                            .ok_or_else(|| "BigInt multiplication overflow".to_string())
+                    },
+                    |a, b| {
+                        a.checked_mul(b)
+                            .ok_or_else(|| "SmallInt multiplication overflow".to_string())
+                    },
                     |a, b| Ok(a * b),
                     |a, b| Ok(a * b),
                     numeric_mul,
@@ -243,12 +308,46 @@ impl Expr {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
                 arithmetic_op(
-                    lv, rv,
-                    |a, b| if b == 0 { Err("Division by zero".into()) } else { a.checked_div(b).ok_or_else(|| "Integer division overflow".into()) },
-                    |a, b| if b == 0 { Err("Division by zero".into()) } else { a.checked_div(b).ok_or_else(|| "BigInt division overflow".into()) },
-                    |a, b| if b == 0 { Err("Division by zero".into()) } else { a.checked_div(b).ok_or_else(|| "SmallInt division overflow".into()) },
-                    |a, b| if b == 0.0 { Err("Division by zero".into()) } else { Ok(a / b) },
-                    |a, b| if b == 0.0 { Err("Division by zero".into()) } else { Ok(a / b) },
+                    lv,
+                    rv,
+                    |a, b| {
+                        if b == 0 {
+                            Err("Division by zero".into())
+                        } else {
+                            a.checked_div(b)
+                                .ok_or_else(|| "Integer division overflow".into())
+                        }
+                    },
+                    |a, b| {
+                        if b == 0 {
+                            Err("Division by zero".into())
+                        } else {
+                            a.checked_div(b)
+                                .ok_or_else(|| "BigInt division overflow".into())
+                        }
+                    },
+                    |a, b| {
+                        if b == 0 {
+                            Err("Division by zero".into())
+                        } else {
+                            a.checked_div(b)
+                                .ok_or_else(|| "SmallInt division overflow".into())
+                        }
+                    },
+                    |a, b| {
+                        if b == 0.0 {
+                            Err("Division by zero".into())
+                        } else {
+                            Ok(a / b)
+                        }
+                    },
+                    |a, b| {
+                        if b == 0.0 {
+                            Err("Division by zero".into())
+                        } else {
+                            Ok(a / b)
+                        }
+                    },
                     numeric_div,
                 )
             }
@@ -263,9 +362,7 @@ impl Expr {
                     }
                 }
             }
-            Expr::CorrelatedParam(param_cell) => {
-                Ok(param_cell.borrow().clone())
-            }
+            Expr::CorrelatedParam(param_cell) => Ok(param_cell.borrow().clone()),
             Expr::Case {
                 when_then_pairs,
                 else_result,
@@ -283,9 +380,7 @@ impl Expr {
                     None => Ok(None),
                 }
             }
-            Expr::Function { name, args } => {
-                evaluate_scalar_function(name, args, tuple, schema)
-            }
+            Expr::Function { name, args } => evaluate_scalar_function(name, args, tuple, schema),
             Expr::Eq(l, r) => {
                 let lv = l.evaluate(tuple, schema)?;
                 let rv = r.evaluate(tuple, schema)?;
@@ -425,10 +520,8 @@ fn evaluate_scalar_function(
     schema: &[ColumnInfo],
 ) -> Result<Option<DataValue>, String> {
     // Evaluate all argument expressions against the tuple
-    let evaluated: Result<Vec<Option<DataValue>>, String> = args
-        .iter()
-        .map(|arg| arg.evaluate(tuple, schema))
-        .collect();
+    let evaluated: Result<Vec<Option<DataValue>>, String> =
+        args.iter().map(|arg| arg.evaluate(tuple, schema)).collect();
     let evaluated = evaluated?;
 
     let upper = name.to_ascii_uppercase();
@@ -441,7 +534,9 @@ fn evaluate_scalar_function(
 
         // ── 1-argument string functions ─────────────────────────────────
         "UPPER" | "UCASE" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "UPPER requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -451,7 +546,9 @@ fn evaluate_scalar_function(
             }
         }
         "LOWER" | "LCASE" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "LOWER requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -461,7 +558,9 @@ fn evaluate_scalar_function(
             }
         }
         "LENGTH" | "LEN" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "LENGTH requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -489,7 +588,9 @@ fn evaluate_scalar_function(
             Ok(Some(DataValue::Int(pos)))
         }
         "TRIM" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "TRIM requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -499,7 +600,9 @@ fn evaluate_scalar_function(
             }
         }
         "LTRIM" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "LTRIM requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -509,7 +612,9 @@ fn evaluate_scalar_function(
             }
         }
         "RTRIM" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "RTRIM requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -519,7 +624,9 @@ fn evaluate_scalar_function(
             }
         }
         "ABS" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "ABS requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -585,18 +692,49 @@ fn evaluate_scalar_function(
             let right = iter.next().flatten();
             match (left, right) {
                 (None, _) | (_, None) => Ok(None),
-                (Some(lv), Some(rv)) => {
-                    arithmetic_op(
-                        Some(lv),
-                        Some(rv),
-                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { a.checked_rem(b).ok_or_else(|| "Integer modulo overflow".to_string()) },
-                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { a.checked_rem(b).ok_or_else(|| "BigInt modulo overflow".to_string()) },
-                        |a, b| if b == 0 { Err("Division by zero".to_string()) } else { a.checked_rem(b).ok_or_else(|| "SmallInt modulo overflow".to_string()) },
-                        |a, b| if b == 0.0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
-                        |a, b| if b == 0.0 { Err("Division by zero".to_string()) } else { Ok(a % b) },
-                        numeric_rem,
-                    )
-                }
+                (Some(lv), Some(rv)) => arithmetic_op(
+                    Some(lv),
+                    Some(rv),
+                    |a, b| {
+                        if b == 0 {
+                            Err("Division by zero".to_string())
+                        } else {
+                            a.checked_rem(b)
+                                .ok_or_else(|| "Integer modulo overflow".to_string())
+                        }
+                    },
+                    |a, b| {
+                        if b == 0 {
+                            Err("Division by zero".to_string())
+                        } else {
+                            a.checked_rem(b)
+                                .ok_or_else(|| "BigInt modulo overflow".to_string())
+                        }
+                    },
+                    |a, b| {
+                        if b == 0 {
+                            Err("Division by zero".to_string())
+                        } else {
+                            a.checked_rem(b)
+                                .ok_or_else(|| "SmallInt modulo overflow".to_string())
+                        }
+                    },
+                    |a, b| {
+                        if b == 0.0 {
+                            Err("Division by zero".to_string())
+                        } else {
+                            Ok(a % b)
+                        }
+                    },
+                    |a, b| {
+                        if b == 0.0 {
+                            Err("Division by zero".to_string())
+                        } else {
+                            Ok(a % b)
+                        }
+                    },
+                    numeric_rem,
+                ),
             }
         }
 
@@ -626,13 +764,17 @@ fn evaluate_scalar_function(
                         _ => return Err("POWER requires numeric arguments".to_string()),
                     };
                     let res = b_f64.powf(e_f64);
-                    Ok(Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(res))))
+                    Ok(Some(DataValue::DoublePrecision(
+                        crate::types::value::OrderedF64(res),
+                    )))
                 }
             }
         }
 
         "SQRT" => {
-            let val = evaluated.into_iter().next()
+            let val = evaluated
+                .into_iter()
+                .next()
                 .ok_or_else(|| "SQRT requires 1 argument".to_string())?;
             match val {
                 None => Ok(None),
@@ -650,7 +792,9 @@ fn evaluate_scalar_function(
                         return Err("cannot take square root of a negative number".to_string());
                     }
                     let res = num.sqrt();
-                    Ok(Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(res))))
+                    Ok(Some(DataValue::DoublePrecision(
+                        crate::types::value::OrderedF64(res),
+                    )))
                 }
             }
         }
@@ -694,12 +838,10 @@ fn evaluate_scalar_function(
                 }
                 Some(None) => return Ok(None),
                 // Default: rest of string (use string length via evaluating the value first)
-                None => {
-                    match &val {
-                        DataValue::Varchar(s) | DataValue::Char(s) => s.chars().count(),
-                        _ => return Err("SUBSTRING requires a string value".to_string()),
-                    }
-                }
+                None => match &val {
+                    DataValue::Varchar(s) | DataValue::Char(s) => s.chars().count(),
+                    _ => return Err("SUBSTRING requires a string value".to_string()),
+                },
                 _ => return Err("SUBSTRING requires integer length".to_string()),
             };
             crate::types::functions::substring(&val, start, len)
@@ -736,9 +878,15 @@ fn evaluate_scalar_function(
             }
             let mut iter = evaluated.into_iter();
             let part_str = match iter.next() {
-                Some(Some(DataValue::Varchar(s))) | Some(Some(DataValue::Char(s))) => s.to_uppercase(),
+                Some(Some(DataValue::Varchar(s))) | Some(Some(DataValue::Char(s))) => {
+                    s.to_uppercase()
+                }
                 Some(None) => return Ok(None),
-                _ => return Err("EXTRACT first argument must be a string (YEAR/MONTH/DAY/etc.)".to_string()),
+                _ => {
+                    return Err(
+                        "EXTRACT first argument must be a string (YEAR/MONTH/DAY/etc.)".to_string(),
+                    );
+                }
             };
             let val = match iter.next() {
                 Some(Some(dv)) => dv,
@@ -770,12 +918,10 @@ fn evaluate_scalar_function(
             // If expr1 is NULL, then expr1 = expr2 is UNKNOWN, so the ELSE
             // branch fires and returns expr1 (which is NULL).
             match (left, right) {
-                (None, _) => Ok(None),  // NULLIF(NULL, anything) → NULL
-                (Some(l), None) => Ok(Some(l)),  // NULLIF(val, NULL) → val (val = NULL is UNKNOWN → ELSE val)
-                (Some(l), Some(r)) => {
-                    crate::types::functions::nullif(l, r)
-                        .map_err(|e| format!("NULLIF error: {}", e))
-                }
+                (None, _) => Ok(None),          // NULLIF(NULL, anything) → NULL
+                (Some(l), None) => Ok(Some(l)), // NULLIF(val, NULL) → val (val = NULL is UNKNOWN → ELSE val)
+                (Some(l), Some(r)) => crate::types::functions::nullif(l, r)
+                    .map_err(|e| format!("NULLIF error: {}", e)),
             }
         }
 
@@ -785,72 +931,133 @@ fn evaluate_scalar_function(
 
 /// Helper: apply a binary arithmetic operation to two nullable values.
 /// Supports INT, BIGINT, SMALLINT, DOUBLE PRECISION, and cross-type promotion.
-fn scale_numeric_unscaled(unscaled: i128, current_scale: u8, target_scale: u8) -> Result<i128, String> {
+fn scale_numeric_unscaled(
+    unscaled: i128,
+    current_scale: u8,
+    target_scale: u8,
+) -> Result<i128, String> {
     if current_scale == target_scale {
         Ok(unscaled)
     } else if target_scale > current_scale {
         let diff = (target_scale - current_scale) as u32;
-        let factor = 10_i128.checked_pow(diff).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
-        unscaled.checked_mul(factor).ok_or_else(|| "Numeric scaling overflow".to_string())
+        let factor = 10_i128
+            .checked_pow(diff)
+            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        unscaled
+            .checked_mul(factor)
+            .ok_or_else(|| "Numeric scaling overflow".to_string())
     } else {
         let diff = (current_scale - target_scale) as u32;
-        let factor = 10_i128.checked_pow(diff).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        let factor = 10_i128
+            .checked_pow(diff)
+            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
         Ok(unscaled / factor)
     }
 }
 
-fn numeric_add(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+fn numeric_add(
+    a: crate::types::value::NumericValue,
+    b: crate::types::value::NumericValue,
+) -> Result<crate::types::value::NumericValue, String> {
     let target_scale = a.scale.max(b.scale);
     let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
     let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
-    let unscaled = a_unscaled.checked_add(b_unscaled).ok_or_else(|| "Numeric addition overflow".to_string())?;
-    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+    let unscaled = a_unscaled
+        .checked_add(b_unscaled)
+        .ok_or_else(|| "Numeric addition overflow".to_string())?;
+    Ok(crate::types::value::NumericValue {
+        unscaled,
+        scale: target_scale,
+    })
 }
 
-fn numeric_sub(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+fn numeric_sub(
+    a: crate::types::value::NumericValue,
+    b: crate::types::value::NumericValue,
+) -> Result<crate::types::value::NumericValue, String> {
     let target_scale = a.scale.max(b.scale);
     let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
     let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
-    let unscaled = a_unscaled.checked_sub(b_unscaled).ok_or_else(|| "Numeric subtraction overflow".to_string())?;
-    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+    let unscaled = a_unscaled
+        .checked_sub(b_unscaled)
+        .ok_or_else(|| "Numeric subtraction overflow".to_string())?;
+    Ok(crate::types::value::NumericValue {
+        unscaled,
+        scale: target_scale,
+    })
 }
 
-fn numeric_mul(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
-    let target_scale = a.scale.checked_add(b.scale).ok_or_else(|| "Numeric scale overflow".to_string())?;
-    let unscaled = a.unscaled.checked_mul(b.unscaled).ok_or_else(|| "Numeric multiplication overflow".to_string())?;
-    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+fn numeric_mul(
+    a: crate::types::value::NumericValue,
+    b: crate::types::value::NumericValue,
+) -> Result<crate::types::value::NumericValue, String> {
+    let target_scale = a
+        .scale
+        .checked_add(b.scale)
+        .ok_or_else(|| "Numeric scale overflow".to_string())?;
+    let unscaled = a
+        .unscaled
+        .checked_mul(b.unscaled)
+        .ok_or_else(|| "Numeric multiplication overflow".to_string())?;
+    Ok(crate::types::value::NumericValue {
+        unscaled,
+        scale: target_scale,
+    })
 }
 
-fn numeric_div(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+fn numeric_div(
+    a: crate::types::value::NumericValue,
+    b: crate::types::value::NumericValue,
+) -> Result<crate::types::value::NumericValue, String> {
     if b.unscaled == 0 {
         return Err("Division by zero".to_string());
     }
     let target_scale = a.scale.max(b.scale);
     let shift = target_scale as i32 + b.scale as i32 - a.scale as i32;
     let a_shifted = if shift >= 0 {
-        let factor = 10_i128.checked_pow(shift as u32).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
-        a.unscaled.checked_mul(factor).ok_or_else(|| "Numeric division overflow".to_string())?
+        let factor = 10_i128
+            .checked_pow(shift as u32)
+            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        a.unscaled
+            .checked_mul(factor)
+            .ok_or_else(|| "Numeric division overflow".to_string())?
     } else {
-        let factor = 10_i128.checked_pow((-shift) as u32).ok_or_else(|| "Numeric scale factor overflow".to_string())?;
+        let factor = 10_i128
+            .checked_pow((-shift) as u32)
+            .ok_or_else(|| "Numeric scale factor overflow".to_string())?;
         a.unscaled / factor
     };
-    let unscaled = a_shifted.checked_div(b.unscaled).ok_or_else(|| "Numeric division overflow".to_string())?;
-    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+    let unscaled = a_shifted
+        .checked_div(b.unscaled)
+        .ok_or_else(|| "Numeric division overflow".to_string())?;
+    Ok(crate::types::value::NumericValue {
+        unscaled,
+        scale: target_scale,
+    })
 }
 
-fn numeric_rem(a: crate::types::value::NumericValue, b: crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String> {
+fn numeric_rem(
+    a: crate::types::value::NumericValue,
+    b: crate::types::value::NumericValue,
+) -> Result<crate::types::value::NumericValue, String> {
     if b.unscaled == 0 {
         return Err("Division by zero".to_string());
     }
     let target_scale = a.scale.max(b.scale);
     let a_unscaled = scale_numeric_unscaled(a.unscaled, a.scale, target_scale)?;
     let b_unscaled = scale_numeric_unscaled(b.unscaled, b.scale, target_scale)?;
-    let unscaled = a_unscaled.checked_rem(b_unscaled).ok_or_else(|| "Numeric modulo overflow".to_string())?;
-    Ok(crate::types::value::NumericValue { unscaled, scale: target_scale })
+    let unscaled = a_unscaled
+        .checked_rem(b_unscaled)
+        .ok_or_else(|| "Numeric modulo overflow".to_string())?;
+    Ok(crate::types::value::NumericValue {
+        unscaled,
+        scale: target_scale,
+    })
 }
 
 /// Helper: apply a binary arithmetic operation to two nullable values.
 /// Supports INT, BIGINT, SMALLINT, DOUBLE PRECISION, NUMERIC, and cross-type promotion.
+#[allow(clippy::too_many_arguments)]
 fn arithmetic_op<FI, FB, FD, FF, FDbl, FN>(
     left: Option<DataValue>,
     right: Option<DataValue>,
@@ -867,7 +1074,10 @@ where
     FD: FnOnce(i16, i16) -> Result<i16, String>,
     FF: FnOnce(f64, f64) -> Result<f64, String>,
     FDbl: FnOnce(f64, f64) -> Result<f64, String>,
-    FN: FnOnce(crate::types::value::NumericValue, crate::types::value::NumericValue) -> Result<crate::types::value::NumericValue, String>,
+    FN: FnOnce(
+        crate::types::value::NumericValue,
+        crate::types::value::NumericValue,
+    ) -> Result<crate::types::value::NumericValue, String>,
 {
     match (left, right) {
         (None, _) | (_, None) => Ok(None),
@@ -880,37 +1090,42 @@ where
         (Some(DataValue::SmallInt(a)), Some(DataValue::SmallInt(b))) => {
             smallint_op(a, b).map(|v| Some(DataValue::SmallInt(v)))
         }
-        (Some(DataValue::Real(a)), Some(DataValue::Real(b))) => {
-            float_op(a.0 as f64, b.0 as f64).map(|v| Some(DataValue::Real(
-                crate::types::value::OrderedF32(v as f32)
-            )))
-        }
+        (Some(DataValue::Real(a)), Some(DataValue::Real(b))) => float_op(a.0 as f64, b.0 as f64)
+            .map(|v| Some(DataValue::Real(crate::types::value::OrderedF32(v as f32)))),
         (Some(DataValue::DoublePrecision(a)), Some(DataValue::DoublePrecision(b))) => {
-            double_op(a.0, b.0).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0, b.0).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         // Cross-type promotion
         (Some(DataValue::Real(a)), Some(DataValue::DoublePrecision(b))) => {
-            double_op(a.0 as f64, b.0).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0 as f64, b.0).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::DoublePrecision(a)), Some(DataValue::Real(b))) => {
-            double_op(a.0, b.0 as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0, b.0 as f64).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
-        (Some(DataValue::Int(a)), Some(DataValue::DoublePrecision(b))) => {
-            double_op(a as f64, b.0).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
-        }
-        (Some(DataValue::DoublePrecision(a)), Some(DataValue::Int(b))) => {
-            double_op(a.0, b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
-        }
+        (Some(DataValue::Int(a)), Some(DataValue::DoublePrecision(b))) => double_op(a as f64, b.0)
+            .map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            }),
+        (Some(DataValue::DoublePrecision(a)), Some(DataValue::Int(b))) => double_op(a.0, b as f64)
+            .map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            }),
         (Some(DataValue::SmallInt(a)), Some(DataValue::Int(b))) => {
             int_op(a as i32, b).map(|v| Some(DataValue::Int(v)))
         }
@@ -930,105 +1145,153 @@ where
             bigint_op(a, b as i64).map(|v| Some(DataValue::BigInt(v)))
         }
         (Some(DataValue::SmallInt(a)), Some(DataValue::DoublePrecision(b))) => {
-            double_op(a as f64, b.0).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a as f64, b.0).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::DoublePrecision(a)), Some(DataValue::SmallInt(b))) => {
-            double_op(a.0, b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0, b as f64).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::BigInt(a)), Some(DataValue::DoublePrecision(b))) => {
-            double_op(a as f64, b.0).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a as f64, b.0).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::DoublePrecision(a)), Some(DataValue::BigInt(b))) => {
-            double_op(a.0, b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0, b as f64).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         // Cross-type REAL ↔ INTEGER arithmetic (widen both to DoublePrecision)
         (Some(DataValue::Real(a)), Some(DataValue::Int(b))) => {
-            double_op(a.0 as f64, b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0 as f64, b as f64).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::Int(a)), Some(DataValue::Real(b))) => {
-            double_op(a as f64, b.0 as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a as f64, b.0 as f64).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
-        (Some(DataValue::Real(a)), Some(DataValue::SmallInt(b))) => {
-            double_op(a.0 as f64, b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
-        }
-        (Some(DataValue::SmallInt(a)), Some(DataValue::Real(b))) => {
-            double_op(a as f64, b.0 as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
-        }
-        (Some(DataValue::Real(a)), Some(DataValue::BigInt(b))) => {
-            double_op(a.0 as f64, b as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
-        }
-        (Some(DataValue::BigInt(a)), Some(DataValue::Real(b))) => {
-            double_op(a as f64, b.0 as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
-        }
+        (Some(DataValue::Real(a)), Some(DataValue::SmallInt(b))) => double_op(a.0 as f64, b as f64)
+            .map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            }),
+        (Some(DataValue::SmallInt(a)), Some(DataValue::Real(b))) => double_op(a as f64, b.0 as f64)
+            .map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            }),
+        (Some(DataValue::Real(a)), Some(DataValue::BigInt(b))) => double_op(a.0 as f64, b as f64)
+            .map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            }),
+        (Some(DataValue::BigInt(a)), Some(DataValue::Real(b))) => double_op(a as f64, b.0 as f64)
+            .map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            }),
         // Exact NUMERIC ↔ NUMERIC arithmetic
         (Some(DataValue::Numeric(a)), Some(DataValue::Numeric(b))) => {
             numeric_op(a, b).map(|v| Some(DataValue::Numeric(v)))
         }
         // Cross-type NUMERIC ↔ INTEGER: exact promotion to NumericValue (scale 0)
-        (Some(DataValue::Numeric(a)), Some(DataValue::SmallInt(b))) => {
-            numeric_op(a, crate::types::value::NumericValue { unscaled: b as i128, scale: 0 })
-                .map(|v| Some(DataValue::Numeric(v)))
-        }
-        (Some(DataValue::SmallInt(a)), Some(DataValue::Numeric(b))) => {
-            numeric_op(crate::types::value::NumericValue { unscaled: a as i128, scale: 0 }, b)
-                .map(|v| Some(DataValue::Numeric(v)))
-        }
-        (Some(DataValue::Numeric(a)), Some(DataValue::Int(b))) => {
-            numeric_op(a, crate::types::value::NumericValue { unscaled: b as i128, scale: 0 })
-                .map(|v| Some(DataValue::Numeric(v)))
-        }
-        (Some(DataValue::Int(a)), Some(DataValue::Numeric(b))) => {
-            numeric_op(crate::types::value::NumericValue { unscaled: a as i128, scale: 0 }, b)
-                .map(|v| Some(DataValue::Numeric(v)))
-        }
-        (Some(DataValue::Numeric(a)), Some(DataValue::BigInt(b))) => {
-            numeric_op(a, crate::types::value::NumericValue { unscaled: b as i128, scale: 0 })
-                .map(|v| Some(DataValue::Numeric(v)))
-        }
-        (Some(DataValue::BigInt(a)), Some(DataValue::Numeric(b))) => {
-            numeric_op(crate::types::value::NumericValue { unscaled: a as i128, scale: 0 }, b)
-                .map(|v| Some(DataValue::Numeric(v)))
-        }
+        (Some(DataValue::Numeric(a)), Some(DataValue::SmallInt(b))) => numeric_op(
+            a,
+            crate::types::value::NumericValue {
+                unscaled: b as i128,
+                scale: 0,
+            },
+        )
+        .map(|v| Some(DataValue::Numeric(v))),
+        (Some(DataValue::SmallInt(a)), Some(DataValue::Numeric(b))) => numeric_op(
+            crate::types::value::NumericValue {
+                unscaled: a as i128,
+                scale: 0,
+            },
+            b,
+        )
+        .map(|v| Some(DataValue::Numeric(v))),
+        (Some(DataValue::Numeric(a)), Some(DataValue::Int(b))) => numeric_op(
+            a,
+            crate::types::value::NumericValue {
+                unscaled: b as i128,
+                scale: 0,
+            },
+        )
+        .map(|v| Some(DataValue::Numeric(v))),
+        (Some(DataValue::Int(a)), Some(DataValue::Numeric(b))) => numeric_op(
+            crate::types::value::NumericValue {
+                unscaled: a as i128,
+                scale: 0,
+            },
+            b,
+        )
+        .map(|v| Some(DataValue::Numeric(v))),
+        (Some(DataValue::Numeric(a)), Some(DataValue::BigInt(b))) => numeric_op(
+            a,
+            crate::types::value::NumericValue {
+                unscaled: b as i128,
+                scale: 0,
+            },
+        )
+        .map(|v| Some(DataValue::Numeric(v))),
+        (Some(DataValue::BigInt(a)), Some(DataValue::Numeric(b))) => numeric_op(
+            crate::types::value::NumericValue {
+                unscaled: a as i128,
+                scale: 0,
+            },
+            b,
+        )
+        .map(|v| Some(DataValue::Numeric(v))),
         // Cross-type NUMERIC ↔ FLOAT: convert both to f64, use double_op
         (Some(DataValue::Numeric(a)), Some(DataValue::Real(b))) => {
-            double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b.0 as f64).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b.0 as f64).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::Real(a)), Some(DataValue::Numeric(b))) => {
-            double_op(a.0 as f64, b.unscaled as f64 / 10_f64.powi(b.scale as i32)).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0 as f64, b.unscaled as f64 / 10_f64.powi(b.scale as i32)).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::Numeric(a)), Some(DataValue::DoublePrecision(b))) => {
-            double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b.0).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.unscaled as f64 / 10_f64.powi(a.scale as i32), b.0).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(DataValue::DoublePrecision(a)), Some(DataValue::Numeric(b))) => {
-            double_op(a.0, b.unscaled as f64 / 10_f64.powi(b.scale as i32)).map(|v| Some(DataValue::DoublePrecision(
-                crate::types::value::OrderedF64(v)
-            )))
+            double_op(a.0, b.unscaled as f64 / 10_f64.powi(b.scale as i32)).map(|v| {
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    v,
+                )))
+            })
         }
         (Some(l), Some(r)) => Err(format!(
             "Arithmetic not supported between {:?} and {:?}",

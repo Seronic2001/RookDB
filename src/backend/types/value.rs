@@ -68,13 +68,13 @@ impl std::hash::Hash for OrderedF32 {
 
 impl Ord for OrderedF32 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or_else(|| {
-            match (self.0.is_nan(), other.0.is_nan()) {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
                 (true, true) => std::cmp::Ordering::Equal,
                 (true, false) => std::cmp::Ordering::Greater,
                 _ => std::cmp::Ordering::Less,
-            }
-        })
+            })
     }
 }
 
@@ -104,13 +104,13 @@ impl std::hash::Hash for OrderedF64 {
 
 impl Ord for OrderedF64 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or_else(|| {
-            match (self.0.is_nan(), other.0.is_nan()) {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
                 (true, true) => std::cmp::Ordering::Equal,
                 (true, false) => std::cmp::Ordering::Greater,
                 _ => std::cmp::Ordering::Less,
-            }
-        })
+            })
     }
 }
 
@@ -161,7 +161,10 @@ impl DataValue {
             DataValue::BigInt(_) => DataType::BigInt,
             DataValue::Real(_) => DataType::Real,
             DataValue::DoublePrecision(_) => DataType::DoublePrecision,
-            DataValue::Numeric(v) => DataType::Numeric { precision: 38, scale: v.scale },
+            DataValue::Numeric(v) => DataType::Numeric {
+                precision: 38,
+                scale: v.scale,
+            },
             DataValue::Bool(_) => DataType::Bool,
             DataValue::Char(s) => DataType::Char(s.len().min(u16::MAX as usize) as u16),
             DataValue::Varchar(s) => DataType::Varchar(s.len().min(u16::MAX as usize) as u16),
@@ -206,7 +209,11 @@ impl fmt::Display for DataValue {
     }
 }
 
-pub fn parse_numeric_literal(input: &str, precision: u8, scale: u8) -> Result<NumericValue, String> {
+pub fn parse_numeric_literal(
+    input: &str,
+    precision: u8,
+    scale: u8,
+) -> Result<NumericValue, String> {
     let raw = crate::types::validation::strip_enclosing_quotes(input);
     if raw.is_empty() {
         return Err("NUMERIC value cannot be empty".to_string());
@@ -224,14 +231,23 @@ pub fn parse_numeric_literal(input: &str, precision: u8, scale: u8) -> Result<Nu
     let int_part = parts.next().unwrap_or("");
     let frac_part = parts.next();
     if parts.next().is_some() {
-        return Err(format!("Invalid NUMERIC value '{}': too many decimal points", raw));
+        return Err(format!(
+            "Invalid NUMERIC value '{}': too many decimal points",
+            raw
+        ));
     }
     if !int_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("Invalid NUMERIC value '{}': invalid integer digits", raw));
+        return Err(format!(
+            "Invalid NUMERIC value '{}': invalid integer digits",
+            raw
+        ));
     }
     let frac = frac_part.unwrap_or("");
     if !frac.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("Invalid NUMERIC value '{}': invalid fractional digits", raw));
+        return Err(format!(
+            "Invalid NUMERIC value '{}': invalid fractional digits",
+            raw
+        ));
     }
     if frac.len() > scale as usize {
         return Err(format!(
@@ -250,7 +266,11 @@ pub fn parse_numeric_literal(input: &str, precision: u8, scale: u8) -> Result<Nu
     combined.push_str(&"0".repeat(scale as usize - frac.len()));
 
     let normalized = combined.trim_start_matches('0');
-    let effective_digits = if normalized.is_empty() { 1 } else { normalized.len() };
+    let effective_digits = if normalized.is_empty() {
+        1
+    } else {
+        normalized.len()
+    };
     if effective_digits > precision as usize {
         return Err(format!(
             "NUMERIC({}, {}) value '{}' exceeds precision {}",
@@ -276,7 +296,11 @@ fn encode_numeric_bcd(value: &NumericValue, precision: u8) -> Result<Vec<u8>, St
         ));
     }
     if digits.len() < precision as usize {
-        digits = format!("{}{}", "0".repeat(precision as usize - digits.len()), digits);
+        digits = format!(
+            "{}{}",
+            "0".repeat(precision as usize - digits.len()),
+            digits
+        );
     }
 
     let mut nibbles: Vec<u8> = Vec::with_capacity(precision as usize + 2);
@@ -300,7 +324,10 @@ fn encode_numeric_bcd(value: &NumericValue, precision: u8) -> Result<Vec<u8>, St
 fn decode_numeric_bcd(bytes: &[u8], precision: u8, scale: u8) -> Result<NumericValue, String> {
     let expected = ((precision as usize) + 1).div_ceil(2);
     if bytes.len() < expected {
-        return Err(format!("NUMERIC({}, {}) requires {} bytes", precision, scale, expected));
+        return Err(format!(
+            "NUMERIC({}, {}) requires {} bytes",
+            precision, scale, expected
+        ));
     }
 
     let mut nibbles = Vec::with_capacity(expected * 2);
@@ -367,16 +394,18 @@ impl DataValue {
                 micros.to_le_bytes().to_vec()
             }
             DataValue::Bit(v) => pack_bit_string(v),
-                    DataValue::Timestamp(v) => {
-                        // microseconds since Unix epoch
-                        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
-                            .unwrap()
-                            .and_hms_opt(0, 0, 0)
-                            .unwrap();
-                        let micros = v.signed_duration_since(epoch).num_microseconds()
-                            .unwrap_or(i64::MAX);
-                        micros.to_le_bytes().to_vec()
-                    }
+            DataValue::Timestamp(v) => {
+                // microseconds since Unix epoch
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap();
+                let micros = v
+                    .signed_duration_since(epoch)
+                    .num_microseconds()
+                    .unwrap_or(i64::MAX);
+                micros.to_le_bytes().to_vec()
+            }
         }
     }
 
@@ -407,8 +436,7 @@ impl DataValue {
                     return Err("BIGINT requires 8 bytes".to_string());
                 }
                 Ok(DataValue::BigInt(i64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ])))
             }
             DataType::Real => {
@@ -423,24 +451,32 @@ impl DataValue {
                 if bytes.len() < 8 {
                     return Err("DOUBLE PRECISION requires 8 bytes".to_string());
                 }
-                Ok(DataValue::DoublePrecision(OrderedF64(f64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
-                ]))))
+                Ok(DataValue::DoublePrecision(OrderedF64(f64::from_le_bytes(
+                    [
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                        bytes[7],
+                    ],
+                ))))
             }
             DataType::Numeric { precision, scale } => {
                 let expected = ((*precision as usize) + 1).div_ceil(2);
                 if bytes.len() == 17 && bytes.len() != expected {
                     let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                     let scale_byte = bytes[16];
-                    Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                    Ok(DataValue::Numeric(NumericValue {
+                        unscaled,
+                        scale: scale_byte,
+                    }))
                 } else if bytes.len() == 17 && expected == 17 {
                     match decode_numeric_bcd(bytes, *precision, *scale) {
                         Ok(decoded) => Ok(DataValue::Numeric(decoded)),
                         Err(_) => {
                             let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                             let scale_byte = bytes[16];
-                            Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                            Ok(DataValue::Numeric(NumericValue {
+                                unscaled,
+                                scale: scale_byte,
+                            }))
                         }
                     }
                 } else {
@@ -453,14 +489,20 @@ impl DataValue {
                 if bytes.len() == 17 && bytes.len() != expected {
                     let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                     let scale_byte = bytes[16];
-                    Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                    Ok(DataValue::Numeric(NumericValue {
+                        unscaled,
+                        scale: scale_byte,
+                    }))
                 } else if bytes.len() == 17 && expected == 17 {
                     match decode_numeric_bcd(bytes, *precision, *scale) {
                         Ok(decoded) => Ok(DataValue::Numeric(decoded)),
                         Err(_) => {
                             let unscaled = i128::from_le_bytes(bytes[0..16].try_into().unwrap());
                             let scale_byte = bytes[16];
-                            Ok(DataValue::Numeric(NumericValue { unscaled, scale: scale_byte }))
+                            Ok(DataValue::Numeric(NumericValue {
+                                unscaled,
+                                scale: scale_byte,
+                            }))
                         }
                     }
                 } else {
@@ -520,8 +562,7 @@ impl DataValue {
                     return Err("TIME requires 8 bytes".to_string());
                 }
                 let micros = i64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]);
                 let secs = (micros / 1_000_000) as u32;
                 let nanos = ((micros % 1_000_000) * 1_000) as u32;
@@ -534,8 +575,7 @@ impl DataValue {
                     return Err("TIMESTAMP requires 8 bytes".to_string());
                 }
                 let micros = i64::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ]);
                 let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
                     .unwrap()
@@ -551,7 +591,10 @@ impl DataValue {
                 if bytes.len() < needed {
                     return Err(format!("BIT({}) requires {} bytes", n, needed));
                 }
-                Ok(DataValue::Bit(unpack_bit_string(&bytes[..needed], *n as usize)))
+                Ok(DataValue::Bit(unpack_bit_string(
+                    &bytes[..needed],
+                    *n as usize,
+                )))
             }
         }
     }
@@ -602,16 +645,16 @@ impl DataValue {
             DataType::Bool => match input.to_ascii_lowercase().as_str() {
                 "true" | "t" | "1" => Ok(DataValue::Bool(true).to_bytes()),
                 "false" | "f" | "0" => Ok(DataValue::Bool(false).to_bytes()),
-                _ => Err(format!("Invalid BOOLEAN value '{}': expected true/false", input)),
+                _ => Err(format!(
+                    "Invalid BOOLEAN value '{}': expected true/false",
+                    input
+                )),
             },
             DataType::Char(n) => {
                 let value = crate::types::validation::strip_enclosing_quotes(input);
                 let mut bytes = value.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
-                    return Err(format!(
-                        "CHAR({}) value exceeds maximum length {}",
-                        n, n
-                    ));
+                    return Err(format!("CHAR({}) value exceeds maximum length {}", n, n));
                 }
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
@@ -633,8 +676,11 @@ impl DataValue {
                 Ok(DataValue::Varchar(value.to_string()).to_bytes())
             }
             DataType::Date => {
-                let date = NaiveDate::parse_from_str(crate::types::validation::strip_enclosing_quotes(input), "%Y-%m-%d")
-                    .map_err(|e| e.to_string())?;
+                let date = NaiveDate::parse_from_str(
+                    crate::types::validation::strip_enclosing_quotes(input),
+                    "%Y-%m-%d",
+                )
+                .map_err(|e| e.to_string())?;
                 Ok(DataValue::Date(date).to_bytes())
             }
             DataType::Time => {
@@ -696,14 +742,21 @@ impl DataValue {
             (DataType::Character(n), DataValue::Char(v)) => {
                 let mut bytes = v.as_bytes().to_vec();
                 if bytes.len() > *n as usize {
-                    return Err(format!("CHARACTER({}) value exceeds maximum length {}", n, n));
+                    return Err(format!(
+                        "CHARACTER({}) value exceeds maximum length {}",
+                        n, n
+                    ));
                 }
                 bytes.resize(*n as usize, b' ');
                 Ok(bytes)
             }
             (DataType::Varchar(max_len), DataValue::Varchar(v)) => {
                 if v.len() > *max_len as usize {
-                    return Err(format!("VARCHAR payload length {} exceeds declared limit {}", v.len(), max_len));
+                    return Err(format!(
+                        "VARCHAR payload length {} exceeds declared limit {}",
+                        v.len(),
+                        max_len
+                    ));
                 }
                 Ok(self.to_bytes())
             }
@@ -720,8 +773,12 @@ impl DataValue {
             DataType::BigInt => DataValue::BigInt(i64::MIN),
             DataType::Real => DataValue::Real(OrderedF32(f32::MIN)),
             DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::MIN)),
-            DataType::Date => DataValue::Date(NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap_or_default()),
-            DataType::Time => DataValue::Time(NaiveTime::from_num_seconds_from_midnight_opt(0, 0).unwrap_or_default()),
+            DataType::Date => {
+                DataValue::Date(NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap_or_default())
+            }
+            DataType::Time => DataValue::Time(
+                NaiveTime::from_num_seconds_from_midnight_opt(0, 0).unwrap_or_default(),
+            ),
             DataType::Timestamp => DataValue::Timestamp(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap_or_default(),
                 NaiveTime::from_num_seconds_from_midnight_opt(0, 0).unwrap_or_default(),
@@ -730,7 +787,10 @@ impl DataValue {
             DataType::Char(_) | DataType::Character(_) => DataValue::Char(String::new()),
             DataType::Bool => DataValue::Bool(false),
             DataType::Numeric { .. } | DataType::Decimal { .. } => {
-                DataValue::Numeric(NumericValue { unscaled: i128::MIN, scale: 0 })
+                DataValue::Numeric(NumericValue {
+                    unscaled: i128::MIN,
+                    scale: 0,
+                })
             }
             DataType::Bit(_) => DataValue::Bit("0".to_string()),
         }
@@ -745,19 +805,26 @@ impl DataValue {
             DataType::BigInt => DataValue::BigInt(i64::MAX),
             DataType::Real => DataValue::Real(OrderedF32(f32::MAX)),
             DataType::DoublePrecision => DataValue::DoublePrecision(OrderedF64(f64::MAX)),
-            DataType::Date => DataValue::Date(NaiveDate::from_ymd_opt(9999, 12, 31).unwrap_or_default()),
+            DataType::Date => {
+                DataValue::Date(NaiveDate::from_ymd_opt(9999, 12, 31).unwrap_or_default())
+            }
             DataType::Time => DataValue::Time(
-                NaiveTime::from_num_seconds_from_midnight_opt(86399, 999_999_000).unwrap_or_default(),
+                NaiveTime::from_num_seconds_from_midnight_opt(86399, 999_999_000)
+                    .unwrap_or_default(),
             ),
             DataType::Timestamp => DataValue::Timestamp(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(9999, 12, 31).unwrap_or_default(),
-                NaiveTime::from_num_seconds_from_midnight_opt(86399, 999_999_000).unwrap_or_default(),
+                NaiveTime::from_num_seconds_from_midnight_opt(86399, 999_999_000)
+                    .unwrap_or_default(),
             )),
             DataType::Varchar(_) => DataValue::Varchar("\u{10FFFF}".to_string()),
             DataType::Char(_) | DataType::Character(_) => DataValue::Char("\u{10FFFF}".to_string()),
             DataType::Bool => DataValue::Bool(true),
             DataType::Numeric { .. } | DataType::Decimal { .. } => {
-                DataValue::Numeric(NumericValue { unscaled: i128::MAX, scale: 0 })
+                DataValue::Numeric(NumericValue {
+                    unscaled: i128::MAX,
+                    scale: 0,
+                })
             }
             DataType::Bit(_) => DataValue::Bit("1".to_string()),
         }
@@ -772,9 +839,14 @@ impl DataValue {
             DataValue::Int(v) => v.checked_add(1).map(DataValue::Int),
             DataValue::BigInt(v) => v.checked_add(1).map(DataValue::BigInt),
             DataValue::Real(v) => Some(DataValue::Real(OrderedF32(v.0.next_up()))),
-            DataValue::DoublePrecision(v) => Some(DataValue::DoublePrecision(OrderedF64(v.0.next_up()))),
+            DataValue::DoublePrecision(v) => {
+                Some(DataValue::DoublePrecision(OrderedF64(v.0.next_up())))
+            }
             DataValue::Numeric(v) => v.unscaled.checked_add(1).map(|unscaled| {
-                DataValue::Numeric(NumericValue { unscaled, scale: v.scale })
+                DataValue::Numeric(NumericValue {
+                    unscaled,
+                    scale: v.scale,
+                })
             }),
             DataValue::Date(v) => v.succ_opt().map(DataValue::Date),
             _ => None,
@@ -790,9 +862,14 @@ impl DataValue {
             DataValue::Int(v) => v.checked_sub(1).map(DataValue::Int),
             DataValue::BigInt(v) => v.checked_sub(1).map(DataValue::BigInt),
             DataValue::Real(v) => Some(DataValue::Real(OrderedF32(v.0.next_down()))),
-            DataValue::DoublePrecision(v) => Some(DataValue::DoublePrecision(OrderedF64(v.0.next_down()))),
+            DataValue::DoublePrecision(v) => {
+                Some(DataValue::DoublePrecision(OrderedF64(v.0.next_down())))
+            }
             DataValue::Numeric(v) => v.unscaled.checked_sub(1).map(|unscaled| {
-                DataValue::Numeric(NumericValue { unscaled, scale: v.scale })
+                DataValue::Numeric(NumericValue {
+                    unscaled,
+                    scale: v.scale,
+                })
             }),
             DataValue::Date(v) => v.pred_opt().map(DataValue::Date),
             _ => None,

@@ -54,7 +54,10 @@ pub fn build_table_or_cte_scan(
     if let Some(cte_name) = tref.name.strip_prefix(CTE_PREFIX) {
         let key = cte_name.to_ascii_lowercase();
         let (_inner, schema) = cte_registry.get(&key).ok_or_else(|| PlanError {
-            message: format!("CTE '{}' is referenced but not defined in WITH clause", cte_name),
+            message: format!(
+                "CTE '{}' is referenced but not defined in WITH clause",
+                cte_name
+            ),
         })?;
         Ok(LogicalPlan::CteScan(LogicalCteScan {
             name: cte_name.to_string(),
@@ -88,7 +91,8 @@ pub fn build_table_or_cte_scan(
         let table_schema = db.tables.get(&resolved_name).ok_or_else(|| PlanError {
             message: format!("Table '{}' not found in database", resolved_name),
         })?;
-        let column_schema = crate::planner::semantic::catalog_columns_to_schema(&table_schema.columns);
+        let column_schema =
+            crate::planner::semantic::catalog_columns_to_schema(&table_schema.columns);
         Ok(LogicalPlan::TableScan(LogicalTableScan {
             table: resolved_name,
             alias,
@@ -127,7 +131,12 @@ pub fn expand_projections(
                 for (table, col) in &qualified_schema {
                     let is_match = match table {
                         Some(tbl) => tbl.eq_ignore_ascii_case(prefix),
-                        None => col.name.split('.').next().map(|p| p.eq_ignore_ascii_case(prefix)).unwrap_or(false),
+                        None => col
+                            .name
+                            .split('.')
+                            .next()
+                            .map(|p| p.eq_ignore_ascii_case(prefix))
+                            .unwrap_or(false),
                     };
                     if is_match {
                         matched = true;
@@ -170,7 +179,10 @@ pub fn expand_projections(
                         _ => expr.clone(),
                     }
                 };
-                result.push(NamedExpr { name, expr: resolved_expr });
+                result.push(NamedExpr {
+                    name,
+                    expr: resolved_expr,
+                });
             }
             SelectExpr::ExprWithAlias { expr, alias } => {
                 // A top-level aliased aggregate (`COUNT(*) AS n`) computes a
@@ -185,7 +197,10 @@ pub fn expand_projections(
                     _ if contains_aggregate_expr(expr) => replace_aggregates_in_expr(expr),
                     _ => expr.clone(),
                 };
-                result.push(NamedExpr { name: alias.clone(), expr: resolved_expr });
+                result.push(NamedExpr {
+                    name: alias.clone(),
+                    expr: resolved_expr,
+                });
             }
         }
     }
@@ -205,7 +220,8 @@ pub fn derive_schema(plan: &LogicalPlan) -> ColumnSchema {
                 cols.push(ColumnInfo {
                     name: expr.name.clone(),
                     data_type: "UNKNOWN".to_string(),
-                    nullable: true });
+                    nullable: true,
+                });
             }
             ColumnSchema { columns: cols }
         }
@@ -224,15 +240,28 @@ pub fn derive_schema(plan: &LogicalPlan) -> ColumnSchema {
             let mut cols = Vec::new();
             for expr in &a.group_by {
                 let name = expr_to_name(expr);
-                cols.push(ColumnInfo { name, data_type: "UNKNOWN".to_string(), nullable: true });
+                cols.push(ColumnInfo {
+                    name,
+                    data_type: "UNKNOWN".to_string(),
+                    nullable: true,
+                });
             }
             for agg in &a.aggregates {
-                let name = agg.alias.clone().unwrap_or_else(|| {
-                    format!("{:?}({})", agg.function, agg.args.len())
+                let name = agg
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}({})", agg.function, agg.args.len()));
+                cols.push(ColumnInfo {
+                    name,
+                    data_type: "UNKNOWN".to_string(),
+                    nullable: true,
                 });
-                cols.push(ColumnInfo { name, data_type: "UNKNOWN".to_string(), nullable: true });
             }
-            if cols.is_empty() { child_schema } else { ColumnSchema { columns: cols } }
+            if cols.is_empty() {
+                child_schema
+            } else {
+                ColumnSchema { columns: cols }
+            }
         }
         LogicalPlan::SetOp(s) => derive_schema(&s.left),
         LogicalPlan::Subquery(sq) => derive_schema(&sq.subquery),
@@ -248,24 +277,33 @@ pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, Colum
     match plan {
         LogicalPlan::TableScan(t) => {
             let tbl = t.alias.clone().unwrap_or_else(|| t.table.clone());
-            t.schema.columns.iter().map(|c| (Some(tbl.clone()), c.clone())).collect()
+            t.schema
+                .columns
+                .iter()
+                .map(|c| (Some(tbl.clone()), c.clone()))
+                .collect()
         }
         LogicalPlan::Filter(f) => derive_qualified_schema(&f.child),
-        LogicalPlan::Project(p) => {
-            p.expressions.iter().map(|expr| {
+        LogicalPlan::Project(p) => p
+            .expressions
+            .iter()
+            .map(|expr| {
                 let table = match &expr.expr {
                     ExprNode::Compound(parts) if parts.len() >= 2 => {
                         Some(parts[parts.len() - 2].clone())
                     }
                     _ => None,
                 };
-                (table, ColumnInfo {
-                    name: expr.name.clone(),
-                    data_type: "UNKNOWN".to_string(),
-                    nullable: true,
-                })
-            }).collect()
-        }
+                (
+                    table,
+                    ColumnInfo {
+                        name: expr.name.clone(),
+                        data_type: "UNKNOWN".to_string(),
+                        nullable: true,
+                    },
+                )
+            })
+            .collect(),
         LogicalPlan::Join(j) => {
             let mut cols = derive_qualified_schema(&j.left);
             cols.extend(derive_qualified_schema(&j.right));
@@ -278,13 +316,28 @@ pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, Colum
             let mut cols = Vec::new();
             for expr in &a.group_by {
                 let name = expr_to_name(expr);
-                cols.push((None, ColumnInfo { name, data_type: "UNKNOWN".to_string(), nullable: true }));
+                cols.push((
+                    None,
+                    ColumnInfo {
+                        name,
+                        data_type: "UNKNOWN".to_string(),
+                        nullable: true,
+                    },
+                ));
             }
             for agg in &a.aggregates {
-                let name = agg.alias.clone().unwrap_or_else(|| {
-                    format!("{:?}({})", agg.function, agg.args.len())
-                });
-                cols.push((None, ColumnInfo { name, data_type: "UNKNOWN".to_string(), nullable: true }));
+                let name = agg
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}({})", agg.function, agg.args.len()));
+                cols.push((
+                    None,
+                    ColumnInfo {
+                        name,
+                        data_type: "UNKNOWN".to_string(),
+                        nullable: true,
+                    },
+                ));
             }
             if cols.is_empty() {
                 derive_qualified_schema(&a.child)
@@ -296,9 +349,12 @@ pub fn derive_qualified_schema(plan: &LogicalPlan) -> Vec<(Option<String>, Colum
         LogicalPlan::Subquery(sq) => derive_qualified_schema(&sq.subquery),
         LogicalPlan::Cte(c) => derive_qualified_schema(&c.outer),
         LogicalPlan::RecursiveCte(rc) => derive_qualified_schema(&rc.outer),
-        LogicalPlan::CteScan(cs) => {
-            cs.schema.columns.iter().map(|c| (None, c.clone())).collect()
-        }
+        LogicalPlan::CteScan(cs) => cs
+            .schema
+            .columns
+            .iter()
+            .map(|c| (None, c.clone()))
+            .collect(),
         LogicalPlan::Insert(inp) => derive_qualified_schema(&inp.child),
     }
 }
@@ -349,7 +405,11 @@ fn contains_aggregate_expr(expr: &ExprNode) -> bool {
         ExprNode::Cast { expr: inner, .. } => contains_aggregate_expr(inner),
         ExprNode::ScalarSubquery(_) => false,
         ExprNode::Function { name, .. } => is_aggregate_function(&name.to_ascii_uppercase()),
-        ExprNode::Case { when_then_pairs, else_result, .. } => {
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+            ..
+        } => {
             for (cond, res) in when_then_pairs {
                 if contains_aggregate_expr(cond) || contains_aggregate_expr(res) {
                     return true;
@@ -372,7 +432,11 @@ fn contains_aggregate_expr(expr: &ExprNode) -> bool {
 /// Non-aggregate function calls (e.g. UPPER, LENGTH) are left untouched.
 pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
     match expr {
-        ExprNode::Function { name, args, distinct } => {
+        ExprNode::Function {
+            name,
+            args,
+            distinct,
+        } => {
             let upper = name.to_ascii_uppercase();
             if is_aggregate_function(&upper) {
                 // Replace the aggregate function call with a column reference
@@ -385,9 +449,7 @@ pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
                     .map(|a| match a {
                         rook_ast::FunctionArg::Star => rook_ast::FunctionArg::Star,
                         rook_ast::FunctionArg::Expr(e) => {
-                            rook_ast::FunctionArg::Expr(Box::new(
-                                replace_aggregates_in_expr(e),
-                            ))
+                            rook_ast::FunctionArg::Expr(Box::new(replace_aggregates_in_expr(e)))
                         }
                     })
                     .collect();
@@ -403,7 +465,10 @@ pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
             op: *op,
             right: Box::new(replace_aggregates_in_expr(right)),
         },
-        ExprNode::Cast { expr: inner, data_type } => ExprNode::Cast {
+        ExprNode::Cast {
+            expr: inner,
+            data_type,
+        } => ExprNode::Cast {
             expr: Box::new(replace_aggregates_in_expr(inner)),
             data_type: data_type.clone(),
         },
@@ -440,7 +505,11 @@ pub fn replace_aggregates_in_expr(expr: &ExprNode) -> ExprNode {
 /// a binary arithmetic expression.
 fn extract_aggregates_from_expr(expr: &ExprNode) -> Vec<AggregateExpr> {
     match expr {
-        ExprNode::Function { name, args, distinct } => {
+        ExprNode::Function {
+            name,
+            args,
+            distinct,
+        } => {
             let upper = name.to_ascii_uppercase();
             let function = match upper.as_str() {
                 "COUNT" => Some(AggregateFunction::Count),
@@ -482,7 +551,11 @@ fn extract_aggregates_from_expr(expr: &ExprNode) -> Vec<AggregateExpr> {
         }
         ExprNode::Cast { expr: inner, .. } => extract_aggregates_from_expr(inner),
         ExprNode::ScalarSubquery(_) => Vec::new(),
-        ExprNode::Case { when_then_pairs, else_result, .. } => {
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+            ..
+        } => {
             let mut result = Vec::new();
             for (cond, res) in when_then_pairs {
                 result.extend(extract_aggregates_from_expr(cond));
@@ -516,10 +589,12 @@ pub fn extract_aggregates(projections: &[SelectExpr]) -> Vec<AggregateExpr> {
         // For top-level aggregates with an explicit alias (e.g. `SUM(price) AS total`),
         // apply the alias to the aggregate. For nested aggregates (e.g. inside Binary),
         // the function name remains as the alias.
-        if found.len() == 1 && matches!(item, SelectExpr::ExprWithAlias { .. })
-            && let SelectExpr::ExprWithAlias { alias, .. } = item {
-                found[0].alias = Some(alias.clone());
-            }
+        if found.len() == 1
+            && matches!(item, SelectExpr::ExprWithAlias { .. })
+            && let SelectExpr::ExprWithAlias { alias, .. } = item
+        {
+            found[0].alias = Some(alias.clone());
+        }
 
         aggregates.extend(found);
     }
@@ -578,7 +653,11 @@ pub fn aggregate_identity(agg: &AggregateExpr) -> String {
     format!(
         "{:?}({})",
         agg.function,
-        agg.args.iter().map(expr_to_name).collect::<Vec<_>>().join(",")
+        agg.args
+            .iter()
+            .map(expr_to_name)
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 

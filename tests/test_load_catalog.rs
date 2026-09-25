@@ -22,5 +22,4 @@ fn test_load_catalog() {
         matches!(catalog, Catalog { .. }),
         "load_catalog did not return a valid Catalog struct"
     );
-
 }

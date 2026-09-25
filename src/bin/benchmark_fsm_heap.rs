@@ -351,8 +351,16 @@ Latest run is injected automatically by `cargo run --bin benchmark_fsm_heap ...`
         lookup_ops = latest.lookup_ops,
         scan_tps = latest.scan_tps,
         rebuild = latest.fsm_rebuild_seconds,
-        correct = if latest.scan_matches_insert_count { "✅" } else { "❌" },
-        oversized = if latest.oversized_tuple_rejected { "✅" } else { "❌" },
+        correct = if latest.scan_matches_insert_count {
+            "✅"
+        } else {
+            "❌"
+        },
+        oversized = if latest.oversized_tuple_rejected {
+            "✅"
+        } else {
+            "❌"
+        },
     );
 
     let mut content = if docs_file.exists() {
@@ -386,10 +394,7 @@ fn main() -> io::Result<()> {
         .unwrap_or_default()
         .as_secs();
 
-    let heap_path = PathBuf::from(format!(
-        "benchmark_runs/fsm_heap_bench_{}.dat",
-        run_id_unix
-    ));
+    let heap_path = PathBuf::from(format!("benchmark_runs/fsm_heap_bench_{}.dat", run_id_unix));
     let fsm_path = heap_path.with_extension("dat.fsm");
 
     if heap_path.exists() {
@@ -463,10 +468,7 @@ fn main() -> io::Result<()> {
 
     manager.flush()?;
 
-    let mut heap_file_for_header = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&heap_path)?;
+    let mut heap_file_for_header = OpenOptions::new().read(true).write(true).open(&heap_path)?;
     let header = read_header_page(&mut heap_file_for_header)?;
 
     let mut heap_file_for_pages = OpenOptions::new().read(true).open(&heap_path)?;
@@ -550,9 +552,11 @@ fn main() -> io::Result<()> {
         performance,
         scalability,
         notes: vec![
-            "This benchmark is single-process and focuses on FSM/Heap manager behavior.".to_string(),
+            "This benchmark is single-process and focuses on FSM/Heap manager behavior."
+                .to_string(),
             "Use repeated runs and median values for stable reporting.".to_string(),
-            "sysinfo memory unit depends on crate behavior/version; record as raw value in report.".to_string(),
+            "sysinfo memory unit depends on crate behavior/version; record as raw value in report."
+                .to_string(),
         ],
     };
 
@@ -588,7 +592,10 @@ fn main() -> io::Result<()> {
     println!("[BENCH] Report saved to {}", config.output.display());
     println!("[BENCH] History JSONL: {}", history_jsonl.display());
     println!("[BENCH] History CSV: {}", history_csv.display());
-    println!("[BENCH] Docs benchmark log refreshed: {}", docs_report.display());
+    println!(
+        "[BENCH] Docs benchmark log refreshed: {}",
+        docs_report.display()
+    );
     println!("[BENCH] Inserted total: {}", inserted_total);
     println!(
         "[BENCH] Small insert TPS: {:.2}, Large insert TPS: {:.2}",
@@ -597,8 +604,7 @@ fn main() -> io::Result<()> {
     );
     println!(
         "[BENCH] Lookup OPS: {:.2}, Scan TPS: {:.2}",
-        report.performance.point_lookup_ops_per_sec,
-        report.performance.seq_scan_tuples_per_sec
+        report.performance.point_lookup_ops_per_sec, report.performance.seq_scan_tuples_per_sec
     );
 
     if heap_path.exists() {

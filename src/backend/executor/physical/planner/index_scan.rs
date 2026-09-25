@@ -9,13 +9,13 @@ use std::path::PathBuf;
 
 use rook_ast::logical::LogicalTableScan;
 
-use super::super::operators::{IndexScanOperator, IndexScanMode, PhysicalOperator};
-use crate::types::Comparable;
+use super::super::operators::{IndexScanMode, IndexScanOperator, PhysicalOperator};
 use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::HeapManager;
 use crate::backend::index::BTree;
+use crate::types::Comparable;
 use crate::types::{DataType, DataValue};
 
 impl PhysicalPlanner {
@@ -41,25 +41,26 @@ impl PhysicalPlanner {
 
         // Build column_info for the table
         let table_name = ts.table.clone();
-        let column_info: Vec<ColumnInfo> = table_schema.iter().map(|c| {
-            ColumnInfo {
+        let column_info: Vec<ColumnInfo> = table_schema
+            .iter()
+            .map(|c| ColumnInfo {
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
                 table: Some(table_name.clone()),
-            }
-        }).collect();
+            })
+            .collect();
 
-        let heap_path = PathBuf::from(format!(
-            "database/base/{}/{}.dat", self.db_name, ts.table
-        ));
+        let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", self.db_name, ts.table));
         if !heap_path.exists() {
             return Ok(None);
         }
 
         // Load indexes (both named and legacy), preserving composite layouts
         let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
-            &self.db_name, &ts.table,
-        ).unwrap_or_default();
+            &self.db_name,
+            &ts.table,
+        )
+        .unwrap_or_default();
 
         // Try named indexes first (dynamic selection — M2)
         let mut best_idx_name: Option<String> = None;
@@ -71,13 +72,19 @@ impl PhysicalPlanner {
         for (idx_name, col_names, _is_unique) in &named_indexes {
             // Composite index: equality on ALL key columns → exact lookup.
             if col_names.len() > 1 {
-                let current_key_types: Vec<DataType> = col_names.iter()
-                    .map(|cn| table_schema.iter()
-                        .find(|c| c.name.eq_ignore_ascii_case(cn))
-                        .map(|c| c.data_type.clone())
-                        .unwrap_or(DataType::Int))
+                let current_key_types: Vec<DataType> = col_names
+                    .iter()
+                    .map(|cn| {
+                        table_schema
+                            .iter()
+                            .find(|c| c.name.eq_ignore_ascii_case(cn))
+                            .map(|c| c.data_type.clone())
+                            .unwrap_or(DataType::Int)
+                    })
                     .collect();
-                if let Some(key_values) = self.extract_composite_point_key(pred_node, col_names, &current_key_types) {
+                if let Some(key_values) =
+                    self.extract_composite_point_key(pred_node, col_names, &current_key_types)
+                {
                     let priority = 0; // most selective
                     let should_replace = match &best_mode {
                         Some(existing) => priority < Self::scan_mode_priority(existing),
@@ -96,11 +103,14 @@ impl PhysicalPlanner {
 
             let col_name = &col_names[0];
             // Look up the indexed column's DataType for sentinel bounds
-            let col_type = table_schema.iter()
+            let col_type = table_schema
+                .iter()
                 .find(|c| c.name.eq_ignore_ascii_case(col_name))
                 .map(|c| &c.data_type)
                 .unwrap_or_else(|| &DataType::Int);
-            if let Some(mode) = self.extract_index_mode_from_predicate(pred_node, col_name, col_type) {
+            if let Some(mode) =
+                self.extract_index_mode_from_predicate(pred_node, col_name, col_type)
+            {
                 let priority = Self::scan_mode_priority(&mode);
                 let should_replace = match &best_mode {
                     Some(existing) => priority < Self::scan_mode_priority(existing),
@@ -118,34 +128,44 @@ impl PhysicalPlanner {
 
         // Try legacy index if no named index matched
         if best_mode.is_none() {
-            let legacy_idx_path = PathBuf::from(format!(
-                "database/base/{}/{}.idx", self.db_name, ts.table
-            ));
+            let legacy_idx_path =
+                PathBuf::from(format!("database/base/{}/{}.idx", self.db_name, ts.table));
             let meta_path = format!("database/base/{}/{}.idx.meta", self.db_name, ts.table);
             if legacy_idx_path.exists()
-                && let Ok(meta_json) = std::fs::read_to_string(&meta_path) {
-                    #[derive(serde::Deserialize)]
-                    struct IndexMeta { column_name: String }
-                    if let Ok(meta) = serde_json::from_str::<IndexMeta>(&meta_json) {
-                        let col_type = table_schema.iter()
-                            .find(|c| c.name.eq_ignore_ascii_case(&meta.column_name))
-                            .map(|c| &c.data_type)
-                            .unwrap_or_else(|| &DataType::Int);
-                        if let Some(mode) = self.extract_index_mode_from_predicate(pred_node, &meta.column_name, col_type) {
-                            let col_name = meta.column_name.clone();
-                            best_mode = Some(mode);
-                            best_col_name = Some(col_name.clone());
-                            best_col_names = vec![col_name];
-                            best_idx_name = Some(format!("idx_{}_{}", ts.table, meta.column_name));
-                        }
+                && let Ok(meta_json) = std::fs::read_to_string(&meta_path)
+            {
+                #[derive(serde::Deserialize)]
+                struct IndexMeta {
+                    column_name: String,
+                }
+                if let Ok(meta) = serde_json::from_str::<IndexMeta>(&meta_json) {
+                    let col_type = table_schema
+                        .iter()
+                        .find(|c| c.name.eq_ignore_ascii_case(&meta.column_name))
+                        .map(|c| &c.data_type)
+                        .unwrap_or_else(|| &DataType::Int);
+                    if let Some(mode) = self.extract_index_mode_from_predicate(
+                        pred_node,
+                        &meta.column_name,
+                        col_type,
+                    ) {
+                        let col_name = meta.column_name.clone();
+                        best_mode = Some(mode);
+                        best_col_name = Some(col_name.clone());
+                        best_col_names = vec![col_name];
+                        best_idx_name = Some(format!("idx_{}_{}", ts.table, meta.column_name));
                     }
                 }
+            }
         }
 
         // Build the index scan operator if a matching index was found
-        if let (Some(idx_name), Some(ref col_name), Some(mode)) = (best_idx_name, best_col_name, best_mode) {
+        if let (Some(idx_name), Some(ref col_name), Some(mode)) =
+            (best_idx_name, best_col_name, best_mode)
+        {
             let idx_path = PathBuf::from(format!(
-                "database/base/{}/{}.{}.idx", self.db_name, ts.table, idx_name
+                "database/base/{}/{}.{}.idx",
+                self.db_name, ts.table, idx_name
             ));
             if !idx_path.exists() {
                 return Ok(None);
@@ -153,34 +173,53 @@ impl PhysicalPlanner {
 
             log::info!(
                 "[Volcano] Index-accelerated scan: mode={:?}, table='{}'",
-                mode, ts.table
+                mode,
+                ts.table
             );
 
             crate::backend::cache::checkpoint();
-            let mut btree = BTree::open(idx_path.clone())
-                .map_err(|e| RookError::Io(e).with_context(format!(
-                    "opening index {} for table '{}'", idx_path.display(), ts.table
-                )))?;
+            let mut btree = BTree::open(idx_path.clone()).map_err(|e| {
+                RookError::Io(e).with_context(format!(
+                    "opening index {} for table '{}'",
+                    idx_path.display(),
+                    ts.table
+                ))
+            })?;
             // Set key type(s) from the INDEXED column(s) (NOT the first table column)
             if !best_key_types.is_empty() {
                 btree.set_key_types(best_key_types.clone());
-            } else if let Some(idx_col) = table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(col_name.as_str())) {
+            } else if let Some(idx_col) = table_schema
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(col_name.as_str()))
+            {
                 btree.set_key_type(idx_col.data_type.clone());
             } else if let Some(first_col) = table_schema.first() {
                 btree.set_key_type(first_col.data_type.clone());
             }
 
-            let heap_manager = HeapManager::open(heap_path.clone())
-                .map_err(|e| RookError::Io(e).with_context(format!(
-                    "opening heap {} for table '{}'", heap_path.display(), ts.table
-                )))?;
+            let heap_manager = HeapManager::open(heap_path.clone()).map_err(|e| {
+                RookError::Io(e).with_context(format!(
+                    "opening heap {} for table '{}'",
+                    heap_path.display(),
+                    ts.table
+                ))
+            })?;
 
-            let indexed_cols: Vec<usize> = best_col_names.iter()
-                .filter_map(|cn| column_info.iter().position(|ci| ci.name.eq_ignore_ascii_case(cn)))
+            let indexed_cols: Vec<usize> = best_col_names
+                .iter()
+                .filter_map(|cn| {
+                    column_info
+                        .iter()
+                        .position(|ci| ci.name.eq_ignore_ascii_case(cn))
+                })
                 .collect();
 
             return Ok(Some(Box::new(IndexScanOperator::new(
-                btree, heap_manager, mode, column_info, indexed_cols,
+                btree,
+                heap_manager,
+                mode,
+                column_info,
+                indexed_cols,
             ))));
         }
 
@@ -199,7 +238,10 @@ impl PhysicalPlanner {
         key_types: &[DataType],
     ) -> Option<Vec<DataValue>> {
         // Flatten the conjunction into individual comparison predicates.
-        fn flatten<'p>(pred: &'p rook_ast::PredicateNode, out: &mut Vec<&'p rook_ast::PredicateNode>) {
+        fn flatten<'p>(
+            pred: &'p rook_ast::PredicateNode,
+            out: &mut Vec<&'p rook_ast::PredicateNode>,
+        ) {
             match pred {
                 rook_ast::PredicateNode::BinaryOp {
                     left,
@@ -221,7 +263,12 @@ impl PhysicalPlanner {
             let col_type = key_types.get(col_idx).unwrap_or(&DataType::Int);
             let mut found: Option<DataValue> = None;
             for c in &conjuncts {
-                if let rook_ast::PredicateNode::Compare { left, op: rook_ast::ComparisonOp::Eq, right } = c {
+                if let rook_ast::PredicateNode::Compare {
+                    left,
+                    op: rook_ast::ComparisonOp::Eq,
+                    right,
+                } = c
+                {
                     let (col_expr, const_val) = match (left.as_ref(), right.as_ref()) {
                         (rook_ast::ExprNode::Column(_), rook_ast::ExprNode::Constant(cv))
                         | (rook_ast::ExprNode::Compound(_), rook_ast::ExprNode::Constant(cv))
@@ -389,11 +436,12 @@ impl PhysicalPlanner {
 
                 // Single-element IN list: col IN (val) → PointLookup(val)
                 if list.len() == 1
-                    && let rook_ast::ExprNode::Constant(cv) = &list[0] {
-                        let dv = Self::ast_constant_to_data_value(cv)?;
-                        let dv = Self::coerce_to_key_type(dv, col_type)?;
-                        return Some(IndexScanMode::PointLookup(dv));
-                    }
+                    && let rook_ast::ExprNode::Constant(cv) = &list[0]
+                {
+                    let dv = Self::ast_constant_to_data_value(cv)?;
+                    let dv = Self::coerce_to_key_type(dv, col_type)?;
+                    return Some(IndexScanMode::PointLookup(dv));
+                }
 
                 // Multi-element IN lists are not directly accelerated.
                 // They fall through to SeqScan + FilterOperator which
@@ -403,10 +451,13 @@ impl PhysicalPlanner {
 
             // ── AND predicates: try both sides and combine if both match ──
             rook_ast::PredicateNode::BinaryOp {
-                left, op: rook_ast::BinaryOp::And, right,
+                left,
+                op: rook_ast::BinaryOp::And,
+                right,
             } => {
                 let left_mode = self.extract_index_mode_from_predicate(left, indexed_col, col_type);
-                let right_mode = self.extract_index_mode_from_predicate(right, indexed_col, col_type);
+                let right_mode =
+                    self.extract_index_mode_from_predicate(right, indexed_col, col_type);
 
                 match (left_mode, right_mode) {
                     // Both sides match on the same column → combine into tightest range
@@ -431,7 +482,10 @@ impl PhysicalPlanner {
     fn combine_index_modes(a: IndexScanMode, b: IndexScanMode) -> IndexScanMode {
         match (&a, &b) {
             // Two RangeLookups on the same column: intersect the intervals
-            (IndexScanMode::RangeLookup(low_a, high_a), IndexScanMode::RangeLookup(low_b, high_b)) => {
+            (
+                IndexScanMode::RangeLookup(low_a, high_a),
+                IndexScanMode::RangeLookup(low_b, high_b),
+            ) => {
                 let low = if low_a.compare(low_b).ok() == Some(std::cmp::Ordering::Greater) {
                     low_a.clone()
                 } else {
@@ -508,16 +562,26 @@ impl PhysicalPlanner {
                 _ => None,
             },
             DataType::DoublePrecision => match dv {
-                DataValue::Real(r) => Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(r.0 as f64))),
+                DataValue::Real(r) => Some(DataValue::DoublePrecision(
+                    crate::types::value::OrderedF64(r.0 as f64),
+                )),
                 DataValue::DoublePrecision(d) => Some(DataValue::DoublePrecision(d)),
-                DataValue::Int(i) => Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(i as f64))),
-                DataValue::BigInt(i) => Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(i as f64))),
+                DataValue::Int(i) => Some(DataValue::DoublePrecision(
+                    crate::types::value::OrderedF64(i as f64),
+                )),
+                DataValue::BigInt(i) => Some(DataValue::DoublePrecision(
+                    crate::types::value::OrderedF64(i as f64),
+                )),
                 _ => None,
             },
             DataType::Real => match dv {
                 DataValue::Real(r) => Some(DataValue::Real(r)),
-                DataValue::DoublePrecision(d) => Some(DataValue::Real(crate::types::value::OrderedF32(d.0 as f32))),
-                DataValue::Int(i) => Some(DataValue::Real(crate::types::value::OrderedF32(i as f32))),
+                DataValue::DoublePrecision(d) => {
+                    Some(DataValue::Real(crate::types::value::OrderedF32(d.0 as f32)))
+                }
+                DataValue::Int(i) => {
+                    Some(DataValue::Real(crate::types::value::OrderedF32(i as f32)))
+                }
                 _ => None,
             },
             DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
@@ -529,27 +593,42 @@ impl PhysicalPlanner {
                             let diff = (*scale - num.scale) as u32;
                             let factor = 10_i128.checked_pow(diff)?;
                             let unscaled = num.unscaled.checked_mul(factor)?;
-                            Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                            Some(DataValue::Numeric(crate::types::value::NumericValue {
+                                unscaled,
+                                scale: *scale,
+                            }))
                         } else {
                             let diff = (num.scale - *scale) as u32;
                             let factor = 10_i128.checked_pow(diff)?;
-                            Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled: num.unscaled / factor, scale: *scale }))
+                            Some(DataValue::Numeric(crate::types::value::NumericValue {
+                                unscaled: num.unscaled / factor,
+                                scale: *scale,
+                            }))
                         }
                     }
                     DataValue::SmallInt(i) => {
                         let factor = 10_i128.checked_pow(*scale as u32)?;
                         let unscaled = (i as i128).checked_mul(factor)?;
-                        Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                        Some(DataValue::Numeric(crate::types::value::NumericValue {
+                            unscaled,
+                            scale: *scale,
+                        }))
                     }
                     DataValue::Int(i) => {
                         let factor = 10_i128.checked_pow(*scale as u32)?;
                         let unscaled = (i as i128).checked_mul(factor)?;
-                        Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                        Some(DataValue::Numeric(crate::types::value::NumericValue {
+                            unscaled,
+                            scale: *scale,
+                        }))
                     }
                     DataValue::BigInt(i) => {
                         let factor = 10_i128.checked_pow(*scale as u32)?;
                         let unscaled = (i as i128).checked_mul(factor)?;
-                        Some(DataValue::Numeric(crate::types::value::NumericValue { unscaled, scale: *scale }))
+                        Some(DataValue::Numeric(crate::types::value::NumericValue {
+                            unscaled,
+                            scale: *scale,
+                        }))
                     }
                     DataValue::DoublePrecision(d) => {
                         let s = format!("{}", d.0);
@@ -594,7 +673,9 @@ impl PhysicalPlanner {
                 DataValue::Varchar(s) | DataValue::Char(s) => {
                     let trimmed = s.trim();
                     chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f")
-                        .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S"))
+                        .or_else(|_| {
+                            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
+                        })
                         .or_else(|_| {
                             chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
                                 .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
@@ -620,7 +701,9 @@ impl PhysicalPlanner {
     }
 
     /// Convert an AST ConstantValue to a DataValue (None for Null).
-    pub(crate) fn ast_constant_to_data_value(cv: &rook_ast::ConstantValue) -> Option<crate::types::value::DataValue> {
+    pub(crate) fn ast_constant_to_data_value(
+        cv: &rook_ast::ConstantValue,
+    ) -> Option<crate::types::value::DataValue> {
         match cv {
             rook_ast::ConstantValue::Null => None,
             rook_ast::ConstantValue::Int(i) => {
@@ -635,7 +718,9 @@ impl PhysicalPlanner {
                     crate::types::value::OrderedF64(*f),
                 ))
             }
-            rook_ast::ConstantValue::Text(s) => Some(crate::types::value::DataValue::Varchar(s.clone())),
+            rook_ast::ConstantValue::Text(s) => {
+                Some(crate::types::value::DataValue::Varchar(s.clone()))
+            }
             rook_ast::ConstantValue::Boolean(b) => Some(crate::types::value::DataValue::Bool(*b)),
         }
     }

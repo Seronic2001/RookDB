@@ -83,9 +83,13 @@ pub fn info_schema_column_schema(view_name: &str) -> ColumnSchema {
         }
     };
     ColumnSchema {
-        columns: cols.into_iter().map(|(name, dt)| ColumnInfo {
-            name: name.to_string(),
-            data_type: dt.to_string(),
-            nullable: true }).collect(),
+        columns: cols
+            .into_iter()
+            .map(|(name, dt)| ColumnInfo {
+                name: name.to_string(),
+                data_type: dt.to_string(),
+                nullable: true,
+            })
+            .collect(),
     }
 }

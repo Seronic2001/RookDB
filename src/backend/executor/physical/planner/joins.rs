@@ -2,23 +2,17 @@
 
 use rook_ast::logical::*;
 
-use super::super::tuple::ColumnInfo;
-use super::super::expr::{Predicate, Expr, ComparisonOp, expr_from_ast, predicate_from_ast};
+use super::super::expr::{ComparisonOp, Expr, Predicate, expr_from_ast, predicate_from_ast};
 use super::super::operators::{
-    PhysicalOperator,
-    NestedLoopJoinOperator,
-    HashJoinOperator,
-    IndexNestedLoopJoinOperator,
-    JoinType as PhysicalJoinType,
-    AggregateOperator,
-    AggregateInfo,
-    AggregateFunction,
-    infer_aggregate_output_type,
+    AggregateFunction, AggregateInfo, AggregateOperator, HashJoinOperator,
+    IndexNestedLoopJoinOperator, JoinType as PhysicalJoinType, NestedLoopJoinOperator,
+    PhysicalOperator, infer_aggregate_output_type,
 };
-use crate::backend::error::{RookError, RookResult};
-use crate::types::datatype::DataType;
+use super::super::tuple::ColumnInfo;
 use super::PhysicalPlanner;
 use super::helpers::{ast_expr_to_output_name, infer_expr_type_from_ast};
+use crate::backend::error::{RookError, RookResult};
+use crate::types::datatype::DataType;
 
 impl PhysicalPlanner {
     /// Plan a join logical node into a physical operator.
@@ -42,7 +36,9 @@ impl PhysicalPlanner {
         // ColumnInfo.table is populated with actual table names from each operator's
         // schema (set during plan_table_scan), so table-qualified references like
         // `t1.id` and `t2.id` resolve correctly without sentinel markers.
-        let combined_schema: Vec<ColumnInfo> = left.schema().iter()
+        let combined_schema: Vec<ColumnInfo> = left
+            .schema()
+            .iter()
             .cloned()
             .chain(right.schema().iter().cloned())
             .collect();
@@ -59,14 +55,23 @@ impl PhysicalPlanner {
                 let right_schema = right.schema();
                 let mut equality_preds = Vec::new();
                 for r_col in right_schema.iter() {
-                    if left_schema.iter().any(|l| l.name.eq_ignore_ascii_case(&r_col.name)) {
+                    if left_schema
+                        .iter()
+                        .any(|l| l.name.eq_ignore_ascii_case(&r_col.name))
+                    {
                         let col_name = r_col.name.clone();
                         // Use the right column's actual table qualifier for the rhs
                         let right_table = r_col.table.clone();
                         equality_preds.push(Predicate::Compare(
-                            Expr::Column { table: None, column: col_name.clone() },
+                            Expr::Column {
+                                table: None,
+                                column: col_name.clone(),
+                            },
                             ComparisonOp::Equals,
-                            Expr::Column { table: right_table, column: col_name },
+                            Expr::Column {
+                                table: right_table,
+                                column: col_name,
+                            },
                         ));
                     }
                 }
@@ -78,9 +83,8 @@ impl PhysicalPlanner {
             }
             _ => match &j.condition {
                 Some(pred_node) => {
-                    let column_names: Vec<String> = combined_schema.iter()
-                        .map(|c| c.name.clone())
-                        .collect();
+                    let column_names: Vec<String> =
+                        combined_schema.iter().map(|c| c.name.clone()).collect();
                     Some(predicate_from_ast(pred_node, &column_names)?)
                 }
                 None => None,
@@ -105,104 +109,136 @@ impl PhysicalPlanner {
         // 1. Try IndexNestedLoopJoin when inner side is a single-table scan with an index on the join key
         // and outer side is small.
         if matches!(join_type, PhysicalJoinType::Inner | PhysicalJoinType::Left)
-            && let Some(pred) = &predicate {
-                let left_schema = left.schema().to_vec();
-                let right_schema = right.schema().to_vec();
-                if let Some((build_keys, probe_keys, residual)) =
-                    extract_equi_join_keys(pred, &left_schema, &right_schema)
-                    && build_keys.len() == 1 && probe_keys.len() == 1
-                    && let Expr::Column { column: ref outer_col, .. } = build_keys[0]
-                    && let Expr::Column { column: ref inner_col, .. } = probe_keys[0]
+            && let Some(pred) = &predicate
+        {
+            let left_schema = left.schema().to_vec();
+            let right_schema = right.schema().to_vec();
+            if let Some((build_keys, probe_keys, residual)) =
+                extract_equi_join_keys(pred, &left_schema, &right_schema)
+                && build_keys.len() == 1
+                && probe_keys.len() == 1
+                && let Expr::Column {
+                    column: ref outer_col,
+                    ..
+                } = build_keys[0]
+                && let Expr::Column {
+                    column: ref inner_col,
+                    ..
+                } = probe_keys[0]
+                && let LogicalPlan::TableScan(ref inner_ts) = *j.right
+            {
+                let named_indexes =
+                    crate::backend::executor::create_index::load_table_indexes_multi(
+                        &self.db_name,
+                        &inner_ts.table,
+                    )
+                    .unwrap_or_default();
+
+                let matched_idx = named_indexes.iter().find(|(_, cols, _)| {
+                    cols.len() == 1
+                        && cols
+                            .first()
+                            .map(|c| c.eq_ignore_ascii_case(inner_col))
+                            .unwrap_or(false)
+                });
+
+                let outer_card = left.estimate_cardinality();
+                let is_outer_small = outer_card <= 5000
+                    || matches!(
+                        j.left.as_ref(),
+                        LogicalPlan::Limit(_) | LogicalPlan::Filter(_)
+                    );
+
+                if let Some((idx_name, _, _)) = matched_idx
+                    && is_outer_small
                 {
-                    if let LogicalPlan::TableScan(ref inner_ts) = *j.right {
-                        let named_indexes = crate::backend::executor::create_index::load_table_indexes_multi(
-                            &self.db_name, &inner_ts.table
-                        ).unwrap_or_default();
-
-                        let matched_idx = named_indexes.iter().find(|(_, cols, _)| {
-                            cols.len() == 1 && cols.first().map(|c| c.eq_ignore_ascii_case(inner_col)).unwrap_or(false)
-                        });
-
-                        let outer_card = left.estimate_cardinality();
-                        let is_outer_small = outer_card <= 5000
-                            || matches!(j.left.as_ref(), LogicalPlan::Limit(_) | LogicalPlan::Filter(_));
-
-                        if let Some((idx_name, _, _)) = matched_idx {
-                            if is_outer_small {
-                                let idx_path = std::path::PathBuf::from(format!(
-                                    "database/base/{}/{}.{}.idx", self.db_name, inner_ts.table, idx_name
-                                ));
-                                let heap_path = std::path::PathBuf::from(format!(
-                                    "database/base/{}/{}.dat", self.db_name, inner_ts.table
-                                ));
-                                if idx_path.exists() && heap_path.exists() {
-                                    if let Some(outer_key_idx) = left_schema.iter().position(|c| c.name.eq_ignore_ascii_case(outer_col)) {
-                                        crate::backend::cache::checkpoint();
-                                        let mut btree = crate::backend::index::btree::BTree::open(idx_path.clone())
-                                            .map_err(|e| RookError::Io(e).with_context(format!(
-                                                "opening index {} for table '{}'", idx_path.display(), inner_ts.table
-                                            )))?;
-                                        if let Some(idx_col) = right_schema.iter().find(|c| c.name.eq_ignore_ascii_case(inner_col)) {
-                                            btree.set_key_type(idx_col.data_type.clone());
-                                        }
-                                        let heap_manager = crate::backend::heap::heap_manager::HeapManager::open(heap_path.clone())
-                                            .map_err(|e| RookError::Io(e).with_context(format!(
-                                                "opening heap {} for table '{}'", heap_path.display(), inner_ts.table
-                                            )))?;
-
-                                        log::info!(
-                                            "[Volcano] Using IndexNestedLoopJoin: outer_card={}, inner table '{}', index '{}'",
-                                            outer_card, inner_ts.table, idx_name
-                                        );
-                                        return Ok(Box::new(IndexNestedLoopJoinOperator::new(
-                                            left,
-                                            btree,
-                                            heap_manager,
-                                            outer_key_idx,
-                                            right_schema,
-                                            residual,
-                                            join_type,
-                                        )));
-                                    }
-                                }
-                            }
+                    let idx_path = std::path::PathBuf::from(format!(
+                        "database/base/{}/{}.{}.idx",
+                        self.db_name, inner_ts.table, idx_name
+                    ));
+                    let heap_path = std::path::PathBuf::from(format!(
+                        "database/base/{}/{}.dat",
+                        self.db_name, inner_ts.table
+                    ));
+                    if idx_path.exists()
+                        && heap_path.exists()
+                        && let Some(outer_key_idx) = left_schema
+                            .iter()
+                            .position(|c| c.name.eq_ignore_ascii_case(outer_col))
+                    {
+                        crate::backend::cache::checkpoint();
+                        let mut btree = crate::backend::index::btree::BTree::open(idx_path.clone())
+                            .map_err(|e| {
+                                RookError::Io(e).with_context(format!(
+                                    "opening index {} for table '{}'",
+                                    idx_path.display(),
+                                    inner_ts.table
+                                ))
+                            })?;
+                        if let Some(idx_col) = right_schema
+                            .iter()
+                            .find(|c| c.name.eq_ignore_ascii_case(inner_col))
+                        {
+                            btree.set_key_type(idx_col.data_type.clone());
                         }
+                        let heap_manager = crate::backend::heap::heap_manager::HeapManager::open(
+                            heap_path.clone(),
+                        )
+                        .map_err(|e| {
+                            RookError::Io(e).with_context(format!(
+                                "opening heap {} for table '{}'",
+                                heap_path.display(),
+                                inner_ts.table
+                            ))
+                        })?;
+
+                        log::info!(
+                            "[Volcano] Using IndexNestedLoopJoin: outer_card={}, inner table '{}', index '{}'",
+                            outer_card,
+                            inner_ts.table,
+                            idx_name
+                        );
+                        return Ok(Box::new(IndexNestedLoopJoinOperator::new(
+                            left,
+                            btree,
+                            heap_manager,
+                            outer_key_idx,
+                            right_schema,
+                            residual,
+                            join_type,
+                        )));
                     }
                 }
             }
+        }
 
         // 2. Use a hash join when the condition contains at least one
         // cross-side equality conjunct (INNER joins only) — turns O(n·m)
         // nested-loop joins into O(n+m). Remaining non-equality conjuncts are
         // evaluated as a post-join filter by HashJoinOperator.
         if matches!(join_type, PhysicalJoinType::Inner)
-            && let Some(pred) = &predicate {
-                let left_schema = left.schema().to_vec();
-                let right_schema = right.schema().to_vec();
-                if let Some((build_keys, probe_keys, residual)) =
-                    extract_equi_join_keys(pred, &left_schema, &right_schema)
-                    && !build_keys.is_empty() {
-                        log::info!(
-                            "[Volcano] Using HashJoin: {} equi-key pair(s), residual predicate: {}",
-                            build_keys.len(),
-                            residual.is_some()
-                        );
-                        return Ok(Box::new(HashJoinOperator::new(
-                            left,
-                            right,
-                            build_keys,
-                            probe_keys,
-                            residual,
-                        )));
-                    }
+            && let Some(pred) = &predicate
+        {
+            let left_schema = left.schema().to_vec();
+            let right_schema = right.schema().to_vec();
+            if let Some((build_keys, probe_keys, residual)) =
+                extract_equi_join_keys(pred, &left_schema, &right_schema)
+                && !build_keys.is_empty()
+            {
+                log::info!(
+                    "[Volcano] Using HashJoin: {} equi-key pair(s), residual predicate: {}",
+                    build_keys.len(),
+                    residual.is_some()
+                );
+                return Ok(Box::new(HashJoinOperator::new(
+                    left, right, build_keys, probe_keys, residual,
+                )));
             }
+        }
 
         // 3. Fallback: NestedLoopJoin for all join types
         Ok(Box::new(NestedLoopJoinOperator::new(
-            left,
-            right,
-            predicate,
-            join_type,
+            left, right, predicate, join_type,
         )))
     }
 
@@ -235,32 +271,40 @@ impl PhysicalPlanner {
             let name = ast_expr_to_output_name(expr_node);
             let data_type = match expr_node {
                 rook_ast::ExprNode::Column(name) => {
-                    let idx = column_names.iter().position(|c| c == name)
-                        .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
+                    let idx = column_names.iter().position(|c| c == name).ok_or_else(|| {
+                        RookError::NotFound {
+                            entity: "Column",
+                            name: name.clone(),
+                        }
+                    })?;
                     child_types[idx].clone()
                 }
                 rook_ast::ExprNode::Compound(parts) => {
                     let name = parts.last().ok_or_else(|| {
                         RookError::Internal("Empty compound identifier".to_string())
                     })?;
-                    let idx = column_names.iter().position(|c| c == name)
-                        .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
+                    let idx = column_names.iter().position(|c| c == name).ok_or_else(|| {
+                        RookError::NotFound {
+                            entity: "Column",
+                            name: name.clone(),
+                        }
+                    })?;
                     child_types[idx].clone()
                 }
-                rook_ast::ExprNode::Constant(cv) => {
-                    match cv {
-                        rook_ast::ConstantValue::Null => DataType::Int,
-                        rook_ast::ConstantValue::Int(_) => DataType::Int,
-                        rook_ast::ConstantValue::Float(_) => DataType::DoublePrecision,
-                        rook_ast::ConstantValue::Text(_) => DataType::Varchar(u16::MAX),
-                        rook_ast::ConstantValue::Boolean(_) => DataType::Bool,
-                    }
-                }
+                rook_ast::ExprNode::Constant(cv) => match cv {
+                    rook_ast::ConstantValue::Null => DataType::Int,
+                    rook_ast::ConstantValue::Int(_) => DataType::Int,
+                    rook_ast::ConstantValue::Float(_) => DataType::DoublePrecision,
+                    rook_ast::ConstantValue::Text(_) => DataType::Varchar(u16::MAX),
+                    rook_ast::ConstantValue::Boolean(_) => DataType::Bool,
+                },
                 rook_ast::ExprNode::Cast { data_type, .. } => {
-                    data_type.parse::<DataType>()
-                        .map_err(|e| RookError::TypeMismatch(format!(
-                            "Invalid CAST target type '{}': {}", data_type, e
-                        )))?
+                    data_type.parse::<DataType>().map_err(|e| {
+                        RookError::TypeMismatch(format!(
+                            "Invalid CAST target type '{}': {}",
+                            data_type, e
+                        ))
+                    })?
                 }
                 rook_ast::ExprNode::Binary { .. } => DataType::Int,
                 // Scalar subqueries are not expected in GROUP BY expressions
@@ -302,9 +346,10 @@ impl PhysicalPlanner {
             };
 
             // Determine output name
-            let output_name = agg_expr.alias.clone().unwrap_or_else(|| {
-                format!("{:?}({})", agg_expr.function, agg_expr.args.len())
-            });
+            let output_name = agg_expr
+                .alias
+                .clone()
+                .unwrap_or_else(|| format!("{:?}({})", agg_expr.function, agg_expr.args.len()));
 
             // Infer input type for output type calculation
             let function = match agg_expr.function {
@@ -337,20 +382,29 @@ impl PhysicalPlanner {
             // Aggregate calls inside HAVING (`HAVING COUNT(*) >= 2`) are rewritten
             // into references to the corresponding computed output column so the
             // predicate evaluates against the post-aggregation tuple.
-            let having_node =
-                rewrite_having_aggregates(having_node, &a.aggregates, &aggregates);
-            let mut having_schema: Vec<ColumnInfo> = group_by_names.iter().zip(group_by_types.iter())
+            let having_node = rewrite_having_aggregates(having_node, &a.aggregates, &aggregates);
+            let mut having_schema: Vec<ColumnInfo> = group_by_names
+                .iter()
+                .zip(group_by_types.iter())
                 .map(|(name, dt)| ColumnInfo {
                     name: name.clone(),
-                    data_type: dt.clone(), table: None })
+                    data_type: dt.clone(),
+                    table: None,
+                })
                 .collect();
             for agg in &aggregates {
                 having_schema.push(ColumnInfo {
                     name: agg.output_name.clone(),
-                    data_type: agg.output_type.clone(), table: None });
+                    data_type: agg.output_type.clone(),
+                    table: None,
+                });
             }
             let having_names: Vec<String> = having_schema.iter().map(|c| c.name.clone()).collect();
-            Some(self.build_predicate_with_subqueries(&having_node, &having_names, &having_schema)?)
+            Some(self.build_predicate_with_subqueries(
+                &having_node,
+                &having_names,
+                &having_schema,
+            )?)
         } else {
             None
         };
@@ -387,13 +441,16 @@ impl PhysicalPlanner {
         // table-qualified column references and NATURAL JOIN disambiguation
         // work correctly when a recursive CTE appears in a join context.
         let cte_table_name = rc.name.clone();
-        let _schema: Vec<super::super::tuple::ColumnInfo> = rc.schema.columns.iter().map(|c| {
-            super::super::tuple::ColumnInfo {
+        let _schema: Vec<super::super::tuple::ColumnInfo> = rc
+            .schema
+            .columns
+            .iter()
+            .map(|c| super::super::tuple::ColumnInfo {
                 name: c.name.clone(),
                 data_type: crate::types::datatype::DataType::Varchar(u16::MAX),
                 table: Some(cte_table_name.clone()),
-            }
-        }).collect();
+            })
+            .collect();
 
         // 1. Evaluate the non-recursive term to seed the working table
         let mut non_rec_op = self.plan_internal(&rc.non_recursive, cte_registry)?;
@@ -416,7 +473,8 @@ impl PhysicalPlanner {
             if working_table.is_empty() {
                 log::info!(
                     "[Volcano] Recursive CTE '{}' iteration {}: working table empty, done",
-                    rc.name, iteration
+                    rc.name,
+                    iteration
                 );
                 break;
             }
@@ -433,32 +491,50 @@ impl PhysicalPlanner {
 
             log::info!(
                 "[Volcano] Recursive CTE '{}' iteration {}: produced {} tuples",
-                rc.name, iteration, new_tuples.len()
+                rc.name,
+                iteration,
+                new_tuples.len()
             );
 
             if new_tuples.is_empty() {
                 log::info!(
                     "[Volcano] Recursive CTE '{}' iteration {}: no new tuples, done",
-                    rc.name, iteration
+                    rc.name,
+                    iteration
                 );
                 break;
             }
 
             // For UNION DISTINCT (not ALL), deduplicate new tuples against all_tuples
             let deduped_new: Vec<super::super::tuple::Tuple> = if !rc.union_all {
-                let existing_set: std::collections::HashSet<String> = all_tuples.iter().map(|t| {
-                    t.values.iter().map(|v| match v {
-                        Some(dv) => format!("{:?}", dv),
-                        None => "\x00N\x00".to_string(),
-                    }).collect::<Vec<_>>().join("|")
-                }).collect();
-                new_tuples.into_iter().filter(|t| {
-                    let key = t.values.iter().map(|v| match v {
-                        Some(dv) => format!("{:?}", dv),
-                        None => "\x00N\x00".to_string(),
-                    }).collect::<Vec<_>>().join("|");
-                    !existing_set.contains(&key)
-                }).collect()
+                let existing_set: std::collections::HashSet<String> = all_tuples
+                    .iter()
+                    .map(|t| {
+                        t.values
+                            .iter()
+                            .map(|v| match v {
+                                Some(dv) => format!("{:?}", dv),
+                                None => "\x00N\x00".to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .collect();
+                new_tuples
+                    .into_iter()
+                    .filter(|t| {
+                        let key = t
+                            .values
+                            .iter()
+                            .map(|v| match v {
+                                Some(dv) => format!("{:?}", dv),
+                                None => "\x00N\x00".to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        !existing_set.contains(&key)
+                    })
+                    .collect()
             } else {
                 new_tuples
             };
@@ -467,7 +543,8 @@ impl PhysicalPlanner {
             if num_appended == 0 {
                 log::info!(
                     "[Volcano] Recursive CTE '{}' iteration {}: no new (non-duplicate) tuples, done",
-                    rc.name, iteration
+                    rc.name,
+                    iteration
                 );
                 break;
             }
@@ -512,20 +589,32 @@ pub(super) fn rewrite_having_aggregates(
         P::BinaryOp { left, op, right } => P::BinaryOp {
             left: Box::new(rewrite_having_aggregates(left, logical_aggs, physical_aggs)),
             op: *op,
-            right: Box::new(rewrite_having_aggregates(right, logical_aggs, physical_aggs)),
+            right: Box::new(rewrite_having_aggregates(
+                right,
+                logical_aggs,
+                physical_aggs,
+            )),
         },
-        P::Not(inner) => {
-            P::Not(Box::new(rewrite_having_aggregates(inner, logical_aggs, physical_aggs)))
-        }
+        P::Not(inner) => P::Not(Box::new(rewrite_having_aggregates(
+            inner,
+            logical_aggs,
+            physical_aggs,
+        ))),
         P::Compare { left, op, right } => P::Compare {
             left: Box::new(rewrite_having_expr(left, logical_aggs, physical_aggs)),
             op: *op,
             right: Box::new(rewrite_having_expr(right, logical_aggs, physical_aggs)),
         },
-        P::IsNull(e) => P::IsNull(Box::new(rewrite_having_expr(e, logical_aggs, physical_aggs))),
-        P::IsNotNull(e) => {
-            P::IsNotNull(Box::new(rewrite_having_expr(e, logical_aggs, physical_aggs)))
-        }
+        P::IsNull(e) => P::IsNull(Box::new(rewrite_having_expr(
+            e,
+            logical_aggs,
+            physical_aggs,
+        ))),
+        P::IsNotNull(e) => P::IsNotNull(Box::new(rewrite_having_expr(
+            e,
+            logical_aggs,
+            physical_aggs,
+        ))),
         P::Between { expr, low, high } => P::Between {
             expr: Box::new(rewrite_having_expr(expr, logical_aggs, physical_aggs)),
             low: Box::new(rewrite_having_expr(low, logical_aggs, physical_aggs)),
@@ -538,7 +627,11 @@ pub(super) fn rewrite_having_aggregates(
                 .map(|e| rewrite_having_expr(e, logical_aggs, physical_aggs))
                 .collect(),
         },
-        P::Like { expr, pattern, escape_char } => P::Like {
+        P::Like {
+            expr,
+            pattern,
+            escape_char,
+        } => P::Like {
             expr: Box::new(rewrite_having_expr(expr, logical_aggs, physical_aggs)),
             pattern: pattern.clone(),
             escape_char: *escape_char,
@@ -547,7 +640,11 @@ pub(super) fn rewrite_having_aggregates(
             left: Box::new(rewrite_having_expr(left, logical_aggs, physical_aggs)),
             right: Box::new(rewrite_having_expr(right, logical_aggs, physical_aggs)),
         },
-        P::IsBoolean { expr, test, negated } => P::IsBoolean {
+        P::IsBoolean {
+            expr,
+            test,
+            negated,
+        } => P::IsBoolean {
             expr: Box::new(rewrite_having_expr(expr, logical_aggs, physical_aggs)),
             test: *test,
             negated: *negated,
@@ -610,9 +707,7 @@ fn render_function_args(args: &[rook_ast::FunctionArg]) -> String {
     args.iter()
         .map(|a| match a {
             rook_ast::FunctionArg::Star => "*".to_string(),
-            rook_ast::FunctionArg::Expr(e) => {
-                super::helpers::ast_expr_to_output_name(e)
-            }
+            rook_ast::FunctionArg::Expr(e) => super::helpers::ast_expr_to_output_name(e),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -640,7 +735,11 @@ fn expr_bound_to(expr: &Expr, schema: &[ColumnInfo]) -> bool {
         Expr::Column { table, column } => schema.iter().any(|c| {
             c.name.eq_ignore_ascii_case(column)
                 && match table {
-                    Some(t) => c.table.as_deref().map(|ct| ct.eq_ignore_ascii_case(t)).unwrap_or(true),
+                    Some(t) => c
+                        .table
+                        .as_deref()
+                        .map(|ct| ct.eq_ignore_ascii_case(t))
+                        .unwrap_or(true),
                     None => true,
                 }
         }),
@@ -701,7 +800,14 @@ fn extract_equi_join_keys(
         }
     }
 
-    walk(pred, left_schema, right_schema, &mut build_keys, &mut probe_keys, &mut residual);
+    walk(
+        pred,
+        left_schema,
+        right_schema,
+        &mut build_keys,
+        &mut probe_keys,
+        &mut residual,
+    );
 
     let residual_pred = residual.into_iter().cloned().reduce(Predicate::and);
     Some((build_keys, probe_keys, residual_pred))

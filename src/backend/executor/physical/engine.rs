@@ -6,8 +6,8 @@
 
 use rook_ast::logical::LogicalPlan;
 
-use super::tuple::{Tuple, display_tuples};
 use super::planner::PhysicalPlanner;
+use super::tuple::{Tuple, display_tuples};
 
 use crate::backend::catalog::types::Catalog;
 use crate::backend::error::RookResult;
@@ -15,11 +15,7 @@ use crate::backend::error::RookResult;
 /// Execute a logical plan using the Volcano engine and display the results.
 ///
 /// Returns the number of tuples produced.
-pub fn execute_plan(
-    plan: &LogicalPlan,
-    catalog: &Catalog,
-    db_name: &str,
-) -> RookResult<usize> {
+pub fn execute_plan(plan: &LogicalPlan, catalog: &Catalog, db_name: &str) -> RookResult<usize> {
     log::info!("[Volcano] Executing logical plan...");
     log::debug!("[Volcano] Plan: {:?}", plan);
 
@@ -28,7 +24,10 @@ pub fn execute_plan(
 
     // 2. Convert logical plan → physical operator tree
     let mut root = planner.plan(plan)?;
-    log::info!("[Volcano] Built physical operator tree: root={}", root.name());
+    log::info!(
+        "[Volcano] Built physical operator tree: root={}",
+        root.name()
+    );
 
     // 3. Pull all tuples from the root operator
     let mut tuples: Vec<Tuple> = Vec::new();
@@ -99,7 +98,9 @@ fn print_plan_recursive(plan: &LogicalPlan, depth: usize) {
             print_plan_recursive(&d.child, depth + 1);
         }
         LogicalPlan::Sort(s) => {
-            let keys: Vec<String> = s.order_by.iter()
+            let keys: Vec<String> = s
+                .order_by
+                .iter()
                 .map(|ob| {
                     let col = format!("{:?}", ob.expr);
                     let dir = if ob.ascending { " ASC" } else { " DESC" };
@@ -116,7 +117,10 @@ fn print_plan_recursive(plan: &LogicalPlan, depth: usize) {
         LogicalPlan::Aggregate(a) => {
             let gb_cols = a.group_by.len();
             let agg_count = a.aggregates.len();
-            println!("{}├─ Aggregate (group_by={}, aggregates={})", indent, gb_cols, agg_count);
+            println!(
+                "{}├─ Aggregate (group_by={}, aggregates={})",
+                indent, gb_cols, agg_count
+            );
             print_plan_recursive(&a.child, depth + 1);
         }
         LogicalPlan::Join(j) => {

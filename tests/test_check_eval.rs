@@ -8,12 +8,12 @@
 
 mod common;
 
+use common::TestWorkspace;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-use common::TestWorkspace;
 
 fn col(name: &str, ty: DataType) -> Column {
     Column {
@@ -105,13 +105,12 @@ fn check_null_passes_as_unknown() {
 #[test]
 fn check_function_call_expression() {
     let _ws = TestWorkspace::new("chkvol", "func");
-    let catalog = setup(
-        "fdb",
-        "UPPER(dept) = 'ENGINEERING'",
-        vec![],
-    );
+    let catalog = setup("fdb", "UPPER(dept) = 'ENGINEERING'", vec![]);
 
     assert!(insert_single_tuple(&catalog, "fdb", "staff", &["1", "engineering", "1"]).unwrap());
     let bad = insert_single_tuple(&catalog, "fdb", "staff", &["2", "sales", "1"]).unwrap();
-    assert!(!bad, "non-engineering dept must be rejected by UPPER comparison");
+    assert!(
+        !bad,
+        "non-engineering dept must be rejected by UPPER comparison"
+    );
 }

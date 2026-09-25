@@ -4,15 +4,9 @@
 //! and table schemas from the system tables (`sys_indexes`, `sys_constraints`,
 //! `sys_columns`, `sys_tables`).
 
-use crate::types::{DataValue, DataType};
 use crate::backend::heap::HeapManager;
+use crate::types::{DataType, DataValue};
 use std::path::PathBuf;
-
-
-
-
-
-
 
 /// A referencing foreign key record:
 /// `(child_table_name, child_column, parent_column, parent_table_name, action_type)`.
@@ -37,32 +31,37 @@ pub fn load_referencing_foreign_keys(
     }
 
     // Resolve db_name → db_id
-    let (_, _db_id) = match crate::backend::system_table::resolve_table_id(db_name, our_table_name) {
+    let (_, _db_id) = match crate::backend::system_table::resolve_table_id(db_name, our_table_name)
+    {
         Ok(ids) => ids,
         Err(_) => return Ok(Vec::new()),
     };
 
     // Load sys_tables for the db to create a table_id → table_name mapping
     let tbl_path = PathBuf::from(format!("{}/tables.dat", crate::layout::SYSTEM_DIR));
-    let mut tbl_id_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+    let mut tbl_id_to_name: std::collections::HashMap<i32, String> =
+        std::collections::HashMap::new();
     if tbl_path.exists()
-        && let Ok(heap) = HeapManager::open(tbl_path) {
-            for result in heap.scan() {
-                if let Ok((_, _, raw_bytes)) = result
-                    && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
-                        && decoded.len() >= 3
-                            && let Some(Some(DataValue::Int(tid))) = decoded.first() {
-                                let name_opt = match decoded.get(2) {
-                                    Some(Some(DataValue::Varchar(name))) => Some(name.clone()),
-                                    Some(Some(DataValue::Char(name))) => Some(name.clone()),
-                                    _ => None,
-                                };
-                                if let Some(name) = name_opt {
-                                    tbl_id_to_name.insert(*tid, name);
-                                }
-                            }
+        && let Ok(heap) = HeapManager::open(tbl_path)
+    {
+        for result in heap.scan() {
+            if let Ok((_, _, raw_bytes)) = result
+                && let Ok(decoded) =
+                    crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
+                && decoded.len() >= 3
+                && let Some(Some(DataValue::Int(tid))) = decoded.first()
+            {
+                let name_opt = match decoded.get(2) {
+                    Some(Some(DataValue::Varchar(name))) => Some(name.clone()),
+                    Some(Some(DataValue::Char(name))) => Some(name.clone()),
+                    _ => None,
+                };
+                if let Some(name) = name_opt {
+                    tbl_id_to_name.insert(*tid, name);
+                }
             }
         }
+    }
 
     let heap = HeapManager::open(constr_path)
         .map_err(|e| format!("Failed to open sys_constraints: {}", e))?;
@@ -71,8 +70,8 @@ pub fn load_referencing_foreign_keys(
     let schema = SYS_CONSTRAINTS_SCHEMA;
 
     for result in heap.scan() {
-        let (_page_id, _slot_id, raw_bytes) = result
-            .map_err(|e| format!("Error scanning sys_constraints: {}", e))?;
+        let (_page_id, _slot_id, raw_bytes) =
+            result.map_err(|e| format!("Error scanning sys_constraints: {}", e))?;
         let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
             .map_err(|e| format!("Error deserializing sys_constraints: {}", e))?;
 
@@ -105,7 +104,8 @@ pub fn load_referencing_foreign_keys(
             Some(DataValue::Int(id)) => *id,
             _ => continue,
         };
-        let child_table = tbl_id_to_name.get(&child_table_id)
+        let child_table = tbl_id_to_name
+            .get(&child_table_id)
             .cloned()
             .unwrap_or_else(|| format!("<table_id={}>", child_table_id));
 
@@ -130,7 +130,10 @@ pub fn load_referencing_foreign_keys(
 /// Load the complete column schema for a table from `sys_columns`.
 ///
 /// Returns `Vec<(column_name, DataType)>` ordered by ordinal position.
-pub(crate) fn load_table_schema(db_name: &str, table_name: &str) -> Result<Option<Vec<(String, DataType)>>, String> {
+pub(crate) fn load_table_schema(
+    db_name: &str,
+    table_name: &str,
+) -> Result<Option<Vec<(String, DataType)>>, String> {
     use crate::backend::system_table::{SYS_COLUMNS_SCHEMA, resolve_table_id};
 
     let (table_id, _) = match resolve_table_id(db_name, table_name) {
@@ -143,14 +146,14 @@ pub(crate) fn load_table_schema(db_name: &str, table_name: &str) -> Result<Optio
         return Ok(None);
     }
 
-    let heap = HeapManager::open(col_path)
-        .map_err(|e| format!("Failed to open sys_columns: {}", e))?;
+    let heap =
+        HeapManager::open(col_path).map_err(|e| format!("Failed to open sys_columns: {}", e))?;
 
     let mut schema: Vec<(i32, String, DataType)> = Vec::new();
 
     for result in heap.scan() {
-        let (_page_id, _slot_id, raw_bytes) = result
-            .map_err(|e| format!("Error scanning sys_columns: {}", e))?;
+        let (_page_id, _slot_id, raw_bytes) =
+            result.map_err(|e| format!("Error scanning sys_columns: {}", e))?;
         let decoded = crate::types::deserialize_nullable_row(SYS_COLUMNS_SCHEMA, &raw_bytes)
             .map_err(|e| format!("Error deserializing sys_columns: {}", e))?;
 
@@ -187,7 +190,9 @@ pub(crate) fn load_table_schema(db_name: &str, table_name: &str) -> Result<Optio
     }
 
     schema.sort_by_key(|(ord, _, _)| *ord);
-    Ok(Some(schema.into_iter().map(|(_, name, dt)| (name, dt)).collect()))
+    Ok(Some(
+        schema.into_iter().map(|(_, name, dt)| (name, dt)).collect(),
+    ))
 }
 
 /// Load the schema for a table AND find the position and type of a specific column.
@@ -204,7 +209,10 @@ pub(crate) fn load_table_schema_for_column(
         Err(e) => return Err(e),
     };
 
-    let col_pos = match schema_names.iter().position(|(name, _)| name.eq_ignore_ascii_case(column_name)) {
+    let col_pos = match schema_names
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(column_name))
+    {
         Some(p) => p,
         None => return Ok(None),
     };

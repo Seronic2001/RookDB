@@ -131,7 +131,11 @@ fn run_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -210,7 +214,12 @@ fn h_plan_cache_multirow_insert_valid_sql_errors_instead() {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db10h"), "create db");
     let mut catalog = load_catalog();
-    create_table(&mut catalog, "db10h", "mr1", vec![col("a", DataType::Int, true)]);
+    create_table(
+        &mut catalog,
+        "db10h",
+        "mr1",
+        vec![col("a", DataType::Int, true)],
+    );
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 

@@ -49,9 +49,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use storage_manager::backend::error::RookResult;
-use storage_manager::backend::executor::physical::expr::{
-    evaluate_predicate, Expr, Predicate,
-};
+use storage_manager::backend::executor::physical::expr::{Expr, Predicate, evaluate_predicate};
 use storage_manager::backend::executor::physical::operators::{
     AggregateFunction, AggregateInfo, HashJoinOperator, PerGroupState, PhysicalOperator,
 };
@@ -65,7 +63,7 @@ use storage_manager::executor::update::{parse_set_clause, update_by_pointers};
 use storage_manager::planner::plan_query;
 use storage_manager::types::comparison::compare_nullable;
 use storage_manager::types::datatype::DataType;
-use storage_manager::types::functions::{date_trunc_ceil, round, DatePart};
+use storage_manager::types::functions::{DatePart, date_trunc_ceil, round};
 use storage_manager::types::row::serialize_nullable_typed_row;
 use storage_manager::types::value::{DataValue, NumericValue, OrderedF64};
 
@@ -133,7 +131,11 @@ fn run_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -267,7 +269,11 @@ fn control_b_not_in_with_null_in_list_is_unknown() {
         true,
     );
     let r = evaluate_predicate(&pred, &tuple, &schema).unwrap();
-    assert_eq!(r, None, "control: 2 NOT IN (1, NULL) must be UNKNOWN; got {:?}", r);
+    assert_eq!(
+        r, None,
+        "control: 2 NOT IN (1, NULL) must be UNKNOWN; got {:?}",
+        r
+    );
 }
 
 // ── Finding C: LIKE trims significant spaces ───────────────────────────────
@@ -329,8 +335,14 @@ fn d_position_null_returns_null() {
     let tuple = Tuple::new(vec![]);
     let schema: Vec<ColumnInfo> = vec![];
     for args in [
-        vec![Expr::Null, Expr::Constant(DataValue::Varchar("abc".to_string()))],
-        vec![Expr::Constant(DataValue::Varchar("b".to_string())), Expr::Null],
+        vec![
+            Expr::Null,
+            Expr::Constant(DataValue::Varchar("abc".to_string())),
+        ],
+        vec![
+            Expr::Constant(DataValue::Varchar("b".to_string())),
+            Expr::Null,
+        ],
     ] {
         let r = Expr::Function {
             name: "POSITION".to_string(),
@@ -423,8 +435,12 @@ fn sum_info() -> AggregateInfo {
 #[test]
 fn e_sum_overflow_must_not_silently_saturate() {
     let mut st = PerGroupState::new();
-    st.update(AggregateFunction::Sum, Some(&DataValue::BigInt(i64::MAX)), false)
-        .unwrap();
+    st.update(
+        AggregateFunction::Sum,
+        Some(&DataValue::BigInt(i64::MAX)),
+        false,
+    )
+    .unwrap();
     st.update(AggregateFunction::Sum, Some(&DataValue::BigInt(10)), false)
         .unwrap();
     let out = st.finalize(&sum_info());
@@ -440,20 +456,29 @@ fn e_sum_numeric_stays_exact() {
     let mut st = PerGroupState::new();
     st.update(
         AggregateFunction::Sum,
-        Some(&DataValue::Numeric(NumericValue { unscaled: 10, scale: 2 })),
+        Some(&DataValue::Numeric(NumericValue {
+            unscaled: 10,
+            scale: 2,
+        })),
         false,
     )
     .unwrap();
     st.update(
         AggregateFunction::Sum,
-        Some(&DataValue::Numeric(NumericValue { unscaled: 20, scale: 2 })),
+        Some(&DataValue::Numeric(NumericValue {
+            unscaled: 20,
+            scale: 2,
+        })),
         false,
     )
     .unwrap();
     let out = st.finalize(&sum_info());
     assert_eq!(
         out,
-        Some(DataValue::Numeric(NumericValue { unscaled: 30, scale: 2 })),
+        Some(DataValue::Numeric(NumericValue {
+            unscaled: 30,
+            scale: 2
+        })),
         "BUG E CONFIRMED: SUM(0.10, 0.20 NUMERIC) returned {:?} — exact decimal went through binary f64",
         out
     );
@@ -524,7 +549,10 @@ fn g_ceil_timestamp_month_uses_calendar() {
         .unwrap();
     let r = date_trunc_ceil(&DataValue::Timestamp(ts), DatePart::Month).unwrap();
     let want = DataValue::Timestamp(
-        NaiveDate::from_ymd_opt(2024, 3, 1).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+        NaiveDate::from_ymd_opt(2024, 3, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
     );
     assert_eq!(
         r, want,
@@ -542,7 +570,10 @@ fn g_ceil_timestamp_year_handles_leap_year() {
         .unwrap();
     let r = date_trunc_ceil(&DataValue::Timestamp(ts), DatePart::Year).unwrap();
     let want = DataValue::Timestamp(
-        NaiveDate::from_ymd_opt(2025, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+        NaiveDate::from_ymd_opt(2025, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
     );
     assert_eq!(
         r, want,
@@ -560,7 +591,10 @@ fn g_ceil_timestamp_subsecond_is_not_a_boundary() {
         .unwrap();
     let r = date_trunc_ceil(&DataValue::Timestamp(ts), DatePart::Day).unwrap();
     let want = DataValue::Timestamp(
-        NaiveDate::from_ymd_opt(2024, 1, 2).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+        NaiveDate::from_ymd_opt(2024, 1, 2)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
     );
     assert_eq!(
         r, want,
@@ -618,20 +652,19 @@ fn h_update_cascade_growing_varchar_preserves_row() {
     // Sanity: the grown serialisation really does exceed the old slot, i.e.
     // the cascade takes the `new_len > old_len` branch at fk_actions.rs:593.
     let schema = vec![DataType::Varchar(50)];
-    let old_len = serialize_nullable_typed_row(
-        &schema,
-        &[Some(DataValue::Varchar("a".to_string()))],
-    )
-    .unwrap()
-    .len();
+    let old_len =
+        serialize_nullable_typed_row(&schema, &[Some(DataValue::Varchar("a".to_string()))])
+            .unwrap()
+            .len();
     let new_val = "abcdefghijklmnopqrstuvwxyzABCD";
-    let new_len = serialize_nullable_typed_row(
-        &schema,
-        &[Some(DataValue::Varchar(new_val.to_string()))],
-    )
-    .unwrap()
-    .len();
-    assert!(new_len > old_len, "test setup: grown value must exceed old slot");
+    let new_len =
+        serialize_nullable_typed_row(&schema, &[Some(DataValue::Varchar(new_val.to_string()))])
+            .unwrap()
+            .len();
+    assert!(
+        new_len > old_len,
+        "test setup: grown value must exceed old slot"
+    );
 
     // Flush the child heap so the cascade's raw page scan sees the row
     // (isolates this probe from the finding-X dirty-frame window).
@@ -674,7 +707,10 @@ fn i_bulk_load_maps_null_literal_to_null() {
         &mut catalog,
         "db8",
         "t",
-        vec![col("id", DataType::Int, false), col("s", DataType::Varchar(50), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("s", DataType::Varchar(50), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
@@ -712,8 +748,7 @@ fn i_bulk_load_enforces_unique() {
     );
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
-    create_index(&catalog, "db8", "u", "idx_u_id", &["id".to_string()])
-        .expect("create index");
+    create_index(&catalog, "db8", "u", "idx_u_id", &["id".to_string()]).expect("create index");
     assert!(insert_single_tuple(&catalog, "db8", "u", &["1", "10"]).unwrap());
 
     std::fs::write("i_dup.csv", "1,20\n").expect("write csv");
@@ -741,7 +776,10 @@ fn i_bulk_load_handles_quoted_comma() {
         &mut catalog,
         "db8",
         "q",
-        vec![col("a", DataType::Varchar(50), true), col("b", DataType::Int, true)],
+        vec![
+            col("a", DataType::Varchar(50), true),
+            col("b", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();

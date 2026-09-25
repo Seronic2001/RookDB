@@ -25,9 +25,7 @@ use rook_ast::QueryPlan;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
@@ -93,7 +91,11 @@ fn fmt_rows(tuples: &[Tuple]) -> Vec<Vec<String>> {
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -119,7 +121,10 @@ fn fullscan_index_drops_null_key_rows() {
         &mut catalog,
         "testdb",
         "g_t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -129,8 +134,7 @@ fn fullscan_index_drops_null_key_rows() {
     // Row 3 has NULL in the indexed column → never enters the B+tree.
     assert!(insert_single_tuple(&catalog, "testdb", "g_t", &["3", "NULL"]).unwrap());
 
-    create_index(&catalog, "testdb", "g_t", "idx_v", &["v".to_string()])
-        .expect("create index");
+    create_index(&catalog, "testdb", "g_t", "idx_v", &["v".to_string()]).expect("create index");
 
     // Unfiltered scan must return ALL rows regardless of index presence.
     let tuples = run_select(&catalog, "testdb", "SELECT * FROM g_t");
@@ -169,7 +173,10 @@ fn seqscan_no_index_returns_all_rows() {
         &mut catalog,
         "testdb",
         "g_n",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -195,7 +202,10 @@ fn position_returns_char_offset_for_multibyte() {
         &mut catalog,
         "testdb",
         "p_t",
-        vec![col("id", DataType::Int, false), col("s", DataType::Varchar(40), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("s", DataType::Varchar(40), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -209,7 +219,10 @@ fn position_returns_char_offset_for_multibyte() {
         tuples[0].values[0],
         Some(DataValue::Int(7)),
         "BUG H CONFIRMED: POSITION returned byte offset {} instead of char position 7",
-        tuples[0].values[0].as_ref().map(|v| format!("{}", v)).unwrap_or_default()
+        tuples[0].values[0]
+            .as_ref()
+            .map(|v| format!("{}", v))
+            .unwrap_or_default()
     );
 }
 
@@ -232,13 +245,19 @@ fn select_star_join_duplicate_column_names() {
         &mut catalog,
         "testdb",
         "a",
-        vec![col("id", DataType::Int, false), col("aval", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("aval", DataType::Int, true),
+        ],
     );
     create_table(
         &mut catalog,
         "testdb",
         "b",
-        vec![col("id", DataType::Int, false), col("bval", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("bval", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -249,12 +268,21 @@ fn select_star_join_duplicate_column_names() {
     // SELECT * must show a.id = 1 (left) and b.id = 2 (right) in the two id
     // columns. Name-based star projection resolves BOTH `id` columns to the
     // first occurrence.
-    let tuples = run_select(&catalog, "testdb", "SELECT * FROM a JOIN b ON a.aval = b.bval");
+    let tuples = run_select(
+        &catalog,
+        "testdb",
+        "SELECT * FROM a JOIN b ON a.aval = b.bval",
+    );
     assert_eq!(tuples.len(), 1, "one matching join row");
     let row = fmt_rows(&tuples).remove(0);
     assert_eq!(
         row,
-        vec!["1".to_string(), "100".to_string(), "2".to_string(), "100".to_string()],
+        vec![
+            "1".to_string(),
+            "100".to_string(),
+            "2".to_string(),
+            "100".to_string()
+        ],
         "BUG I CONFIRMED: SELECT * over join with duplicate 'id' columns produced {:?}",
         row
     );
@@ -280,13 +308,19 @@ fn insert_select_roundtrip_quoted_string() {
         &mut catalog,
         "testdb",
         "src",
-        vec![col("id", DataType::Int, false), col("name", DataType::Varchar(30), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("name", DataType::Varchar(30), true),
+        ],
     );
     create_table(
         &mut catalog,
         "testdb",
         "dst",
-        vec![col("id", DataType::Int, false), col("name", DataType::Varchar(30), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("name", DataType::Varchar(30), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 

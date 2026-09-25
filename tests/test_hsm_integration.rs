@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
+use storage_manager::catalog::types::{Column, Constraints};
 use storage_manager::catalog::{
     create_database, create_table, init_catalog, load_catalog, save_catalog,
 };
-use storage_manager::catalog::types::{Column, Constraints};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::heap::HeapManager;
 use storage_manager::types::DataType;
@@ -23,11 +23,7 @@ struct TestWorkspace {
 impl TestWorkspace {
     fn new(tag: &str) -> Self {
         let prev_cwd = std::env::current_dir().expect("read cwd");
-        let path = prev_cwd.join(format!(
-            "database_ws_p{}_{}",
-            std::process::id(),
-            tag
-        ));
+        let path = prev_cwd.join(format!("database_ws_p{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(path.join("base")).expect("create workspace");
         std::env::set_current_dir(&path).expect("chdir into workspace");
@@ -105,26 +101,20 @@ fn test_multiple_columns_insertion() {
     // Insert rows
     let values1 = vec!["1", "10", "Alice", "123456789", "Pizza"];
 
-    let success1 =
-        insert_single_tuple(&catalog, db_name, table_name, &values1).unwrap();
+    let success1 = insert_single_tuple(&catalog, db_name, table_name, &values1).unwrap();
 
     assert!(success1, "First tuple insertion failed");
 
     let values2 = vec!["2", "20", "Bob", "987654321", "Burger"];
 
-    let success2 =
-        insert_single_tuple(&catalog, db_name, table_name, &values2).unwrap();
+    let success2 = insert_single_tuple(&catalog, db_name, table_name, &values2).unwrap();
 
     assert!(success2, "Second tuple insertion failed");
 
     // Verify inserted tuple count
-    let path = PathBuf::from(format!(
-        "database/base/{}/{}.dat",
-        db_name, table_name
-    ));
+    let path = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table_name));
 
-    let manager =
-        HeapManager::open(path).expect("Failed to open heap manager");
+    let manager = HeapManager::open(path).expect("Failed to open heap manager");
 
     let scanned_count = manager.scan().filter_map(|r| r.ok()).count();
 
@@ -203,39 +193,27 @@ fn test_multiple_tables_isolation() {
     // Insert into users
     let t1_v1 = vec!["1", "Alice"];
 
-    assert!(
-        insert_single_tuple(&catalog, db_name, table1, &t1_v1).unwrap()
-    );
+    assert!(insert_single_tuple(&catalog, db_name, table1, &t1_v1).unwrap());
 
     // Insert into orders
     let t2_v1 = vec!["100", "50", "Book"];
 
-    assert!(
-        insert_single_tuple(&catalog, db_name, table2, &t2_v1).unwrap()
-    );
+    assert!(insert_single_tuple(&catalog, db_name, table2, &t2_v1).unwrap());
 
     // Insert second users row
     let t1_v2 = vec!["2", "Bob"];
 
-    assert!(
-        insert_single_tuple(&catalog, db_name, table1, &t1_v2).unwrap()
-    );
+    assert!(insert_single_tuple(&catalog, db_name, table1, &t1_v2).unwrap());
 
     // Insert second orders row
     let t2_v2 = vec!["101", "20", "Pen"];
 
-    assert!(
-        insert_single_tuple(&catalog, db_name, table2, &t2_v2).unwrap()
-    );
+    assert!(insert_single_tuple(&catalog, db_name, table2, &t2_v2).unwrap());
 
     // Verify users table
-    let path1 = PathBuf::from(format!(
-        "database/base/{}/{}.dat",
-        db_name, table1
-    ));
+    let path1 = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table1));
 
-    let t1_manager =
-        HeapManager::open(path1).expect("Failed to open table1 manager");
+    let t1_manager = HeapManager::open(path1).expect("Failed to open table1 manager");
 
     assert_eq!(
         t1_manager.scan().filter_map(|r| r.ok()).count(),
@@ -244,13 +222,9 @@ fn test_multiple_tables_isolation() {
     );
 
     // Verify orders table
-    let path2 = PathBuf::from(format!(
-        "database/base/{}/{}.dat",
-        db_name, table2
-    ));
+    let path2 = PathBuf::from(format!("database/base/{}/{}.dat", db_name, table2));
 
-    let t2_manager =
-        HeapManager::open(path2).expect("Failed to open table2 manager");
+    let t2_manager = HeapManager::open(path2).expect("Failed to open table2 manager");
 
     assert_eq!(
         t2_manager.scan().filter_map(|r| r.ok()).count(),

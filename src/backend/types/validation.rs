@@ -42,7 +42,11 @@ impl fmt::Display for TypeValidationError {
                 write!(f, "{} value '{}' is out of range: {}", ty, value, details)
             }
             TypeValidationError::InvalidFormat { ty, value, details } => {
-                write!(f, "{} value '{}' has invalid format: {}", ty, value, details)
+                write!(
+                    f,
+                    "{} value '{}' has invalid format: {}",
+                    ty, value, details
+                )
             }
         }
     }
@@ -160,7 +164,11 @@ pub fn validate_numeric(input: &str, precision: u8, scale: u8) -> Result<(), Typ
     combined.push_str(frac_part);
     combined.push_str(&"0".repeat(scale as usize - frac_part.len()));
     let significant = combined.trim_start_matches('0');
-    let digits = if significant.is_empty() { 1 } else { significant.len() };
+    let digits = if significant.is_empty() {
+        1
+    } else {
+        significant.len()
+    };
     if digits > precision as usize {
         return Err(TypeValidationError::OutOfRange {
             ty: format!("NUMERIC({},{})", precision, scale),
@@ -224,7 +232,10 @@ pub fn validate_char(input: &str, fixed_len: u16) -> Result<(), TypeValidationEr
         return Err(TypeValidationError::OutOfRange {
             ty: format!("CHAR({})", fixed_len),
             value: value.to_string(),
-            details: format!("maximum length is {} bytes (shorter values are space-padded)", fixed_len),
+            details: format!(
+                "maximum length is {} bytes (shorter values are space-padded)",
+                fixed_len
+            ),
         });
     }
     Ok(())
@@ -248,13 +259,15 @@ pub fn validate_time(input: &str) -> Result<(), TypeValidationError> {
     let raw = strip_enclosing_quotes(input);
 
     if let Some(fraction) = raw.split('.').nth(1)
-        && fraction.len() > 6 {
-            return Err(TypeValidationError::InvalidFormat {
-                ty: "TIME".to_string(),
-                value: raw.to_string(),
-                details: "Time precision exceeds microsecond limit (maximum 6 fractional digits).".to_string(),
-            });
-        }
+        && fraction.len() > 6
+    {
+        return Err(TypeValidationError::InvalidFormat {
+            ty: "TIME".to_string(),
+            value: raw.to_string(),
+            details: "Time precision exceeds microsecond limit (maximum 6 fractional digits)."
+                .to_string(),
+        });
+    }
     NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
         .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
         .map(|_| ())

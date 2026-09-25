@@ -1,14 +1,14 @@
-use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
-use crate::backend::error::{RookError, RookResult};
-use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
+use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
+use crate::backend::error::{RookError, RookResult};
 
-use crate::types::value::{DataValue, NumericValue};
-use crate::types::datatype::DataType;
 use crate::types::comparison::compare_nullable;
+use crate::types::datatype::DataType;
+use crate::types::value::{DataValue, NumericValue};
 
 // ── Aggregate Function Enum ────────────────────────────────────────────────────
 
@@ -44,13 +44,19 @@ fn add_numeric(a: NumericValue, b: NumericValue) -> Result<NumericValue, String>
             Ok(unscaled)
         } else {
             let diff = (target_scale - cur_scale) as u32;
-            let factor = 10_i128.checked_pow(diff).ok_or_else(|| "Numeric scale overflow".to_string())?;
-            unscaled.checked_mul(factor).ok_or_else(|| "Numeric scale overflow".to_string())
+            let factor = 10_i128
+                .checked_pow(diff)
+                .ok_or_else(|| "Numeric scale overflow".to_string())?;
+            unscaled
+                .checked_mul(factor)
+                .ok_or_else(|| "Numeric scale overflow".to_string())
         }
     };
     let a_scaled = scale_val(a.unscaled, a.scale)?;
     let b_scaled = scale_val(b.unscaled, b.scale)?;
-    let sum = a_scaled.checked_add(b_scaled).ok_or_else(|| "Numeric addition overflow".to_string())?;
+    let sum = a_scaled
+        .checked_add(b_scaled)
+        .ok_or_else(|| "Numeric addition overflow".to_string())?;
     Ok(NumericValue {
         unscaled: sum,
         scale: target_scale,
@@ -95,7 +101,12 @@ impl PerGroupState {
     }
 
     /// Update state with a new value from one row.
-    pub fn update(&mut self, function: AggregateFunction, value: Option<&DataValue>, distinct: bool) -> Result<(), String> {
+    pub fn update(
+        &mut self,
+        function: AggregateFunction,
+        value: Option<&DataValue>,
+        distinct: bool,
+    ) -> Result<(), String> {
         self.row_count += 1;
 
         let val = match value {
@@ -103,10 +114,9 @@ impl PerGroupState {
             None => return Ok(()),
         };
 
-        if distinct
-            && !self.distinct_seen.insert(val.clone()) {
-                return Ok(());
-            }
+        if distinct && !self.distinct_seen.insert(val.clone()) {
+            return Ok(());
+        }
 
         self.non_null_count += 1;
 
@@ -116,7 +126,10 @@ impl PerGroupState {
                     if self.sum_is_float {
                         self.sum_float += *v as f64;
                     } else if let Some(num) = self.sum_numeric.take() {
-                        let v_num = NumericValue { unscaled: *v as i128, scale: 0 };
+                        let v_num = NumericValue {
+                            unscaled: *v as i128,
+                            scale: 0,
+                        };
                         self.sum_numeric = Some(add_numeric(num, v_num)?);
                     } else {
                         self.sum_int += *v as i128;
@@ -127,7 +140,10 @@ impl PerGroupState {
                     if self.sum_is_float {
                         self.sum_float += *v as f64;
                     } else if let Some(num) = self.sum_numeric.take() {
-                        let v_num = NumericValue { unscaled: *v as i128, scale: 0 };
+                        let v_num = NumericValue {
+                            unscaled: *v as i128,
+                            scale: 0,
+                        };
                         self.sum_numeric = Some(add_numeric(num, v_num)?);
                     } else {
                         self.sum_int += *v as i128;
@@ -138,7 +154,10 @@ impl PerGroupState {
                     if self.sum_is_float {
                         self.sum_float += *v as f64;
                     } else if let Some(num) = self.sum_numeric.take() {
-                        let v_num = NumericValue { unscaled: *v as i128, scale: 0 };
+                        let v_num = NumericValue {
+                            unscaled: *v as i128,
+                            scale: 0,
+                        };
                         self.sum_numeric = Some(add_numeric(num, v_num)?);
                     } else {
                         self.sum_int += *v as i128;
@@ -174,7 +193,10 @@ impl PerGroupState {
                         self.sum_float += v.unscaled as f64 / 10f64.powi(v.scale as i32);
                     } else {
                         let current = self.sum_numeric.take().unwrap_or_else(|| {
-                            let n = NumericValue { unscaled: self.sum_int, scale: 0 };
+                            let n = NumericValue {
+                                unscaled: self.sum_int,
+                                scale: 0,
+                            };
                             self.sum_int = 0;
                             n
                         });
@@ -228,10 +250,14 @@ impl PerGroupState {
                 }
             }
             AggregateFunction::Sum => {
-                if !self.has_sum { return None; }
+                if !self.has_sum {
+                    return None;
+                }
                 if self.sum_is_float {
                     let total = self.sum_float + (self.sum_int as f64);
-                    Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(total)))
+                    Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                        total,
+                    )))
                 } else if let Some(num) = &self.sum_numeric {
                     Some(DataValue::Numeric(num.clone()))
                 } else {
@@ -246,7 +272,9 @@ impl PerGroupState {
                 }
             }
             AggregateFunction::Avg => {
-                if self.non_null_count == 0 || !self.has_sum { return None; }
+                if self.non_null_count == 0 || !self.has_sum {
+                    return None;
+                }
                 let total = if self.sum_is_float {
                     self.sum_float + (self.sum_int as f64)
                 } else if let Some(num) = &self.sum_numeric {
@@ -254,9 +282,9 @@ impl PerGroupState {
                 } else {
                     self.sum_int as f64
                 };
-                Some(DataValue::DoublePrecision(
-                    crate::types::value::OrderedF64(total / self.non_null_count as f64)
-                ))
+                Some(DataValue::DoublePrecision(crate::types::value::OrderedF64(
+                    total / self.non_null_count as f64,
+                )))
             }
             AggregateFunction::Min => self.min.clone(),
             AggregateFunction::Max => self.max.clone(),
@@ -272,11 +300,19 @@ pub fn infer_aggregate_output_type(
     match function {
         AggregateFunction::Count => DataType::BigInt,
         AggregateFunction::Sum => match input_type {
-            Some(DataType::SmallInt) | Some(DataType::Int) | Some(DataType::BigInt) => DataType::BigInt,
+            Some(DataType::SmallInt) | Some(DataType::Int) | Some(DataType::BigInt) => {
+                DataType::BigInt
+            }
             Some(DataType::Real) => DataType::Real,
             Some(DataType::DoublePrecision) => DataType::DoublePrecision,
-            Some(DataType::Numeric { precision, scale }) => DataType::Numeric { precision: *precision, scale: *scale },
-            Some(DataType::Decimal { precision, scale }) => DataType::Decimal { precision: *precision, scale: *scale },
+            Some(DataType::Numeric { precision, scale }) => DataType::Numeric {
+                precision: *precision,
+                scale: *scale,
+            },
+            Some(DataType::Decimal { precision, scale }) => DataType::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
             _ => DataType::BigInt,
         },
         AggregateFunction::Avg => DataType::DoublePrecision,
@@ -329,7 +365,9 @@ impl AggregateOperator {
         // projections above the aggregate can still use qualified references
         // (e.g. `SELECT d.dept, COUNT(*) FROM t d GROUP BY d.dept`).
         let child_schema = child.schema();
-        let mut output_schema: Vec<ColumnInfo> = group_by_names.iter().zip(group_by_types.iter())
+        let mut output_schema: Vec<ColumnInfo> = group_by_names
+            .iter()
+            .zip(group_by_types.iter())
             .map(|(name, dt)| ColumnInfo {
                 name: name.clone(),
                 data_type: dt.clone(),
@@ -342,7 +380,9 @@ impl AggregateOperator {
         for agg in &aggregates {
             output_schema.push(ColumnInfo {
                 name: agg.output_name.clone(),
-                data_type: agg.output_type.clone(), table: None });
+                data_type: agg.output_type.clone(),
+                table: None,
+            });
         }
 
         Self {
@@ -377,7 +417,9 @@ impl AggregateOperator {
         for entry in &self.groups {
             let tuple = self.build_output_tuple(entry)?;
             if let Some(ref having) = self.having {
-                if let Some(true) = evaluate_predicate(having, &tuple, &self.output_schema)? { self.output_buffer.push(tuple) }
+                if let Some(true) = evaluate_predicate(having, &tuple, &self.output_schema)? {
+                    self.output_buffer.push(tuple)
+                }
             } else {
                 self.output_buffer.push(tuple);
             }
@@ -421,10 +463,11 @@ impl AggregateOperator {
                     let key_values: Vec<Option<DataValue>> = if self.group_by_exprs.is_empty() {
                         Vec::new()
                     } else {
-                        self.group_by_exprs.iter()
+                        self.group_by_exprs
+                            .iter()
                             .map(|expr| expr.evaluate(&tuple, &child_schema))
                             .collect::<Result<Vec<_>, String>>()
-                            .map_err(|e| RookError::Internal(e))?
+                            .map_err(RookError::Internal)?
                     };
 
                     let group_idx = match self.group_map.entry(key_values.clone()) {
@@ -435,7 +478,10 @@ impl AggregateOperator {
                             let agg_states = (0..self.aggregates.len())
                                 .map(|_| PerGroupState::new())
                                 .collect();
-                            self.groups.push(GroupEntry { key_values, agg_states });
+                            self.groups.push(GroupEntry {
+                                key_values,
+                                agg_states,
+                            });
                             idx
                         }
                     };
@@ -446,7 +492,8 @@ impl AggregateOperator {
                             Some(expr) => expr.evaluate(&tuple, &child_schema)?,
                             None => None,
                         };
-                        group.agg_states[agg_idx].update(agg.function, value.as_ref(), agg.distinct)
+                        group.agg_states[agg_idx]
+                            .update(agg.function, value.as_ref(), agg.distinct)
                             .map_err(|e| RookError::Internal(format!("Aggregate error: {}", e)))?;
                     }
                 }

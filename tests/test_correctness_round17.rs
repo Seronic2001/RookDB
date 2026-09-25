@@ -105,7 +105,10 @@ fn uniq_col(name: &str, ty: DataType) -> Column {
         name: name.to_string(),
         data_type: ty,
         nullable: true,
-        constraints: Constraints { unique: true, ..Default::default() },
+        constraints: Constraints {
+            unique: true,
+            ..Default::default()
+        },
     }
 }
 
@@ -125,7 +128,11 @@ fn try_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect())
@@ -154,7 +161,9 @@ fn ah_insert_with_composite_unique_index_does_not_crash() {
         assert!(create_database(&mut catalog, db), "create db");
         let mut catalog = load_catalog();
         create_table(
-            &mut catalog, db, "t",
+            &mut catalog,
+            db,
+            "t",
             vec![
                 col("a", DataType::Int, true),
                 col("b", DataType::Int, true),
@@ -165,17 +174,35 @@ fn ah_insert_with_composite_unique_index_does_not_crash() {
     }
 
     let catalog = load_catalog();
-    assert!(insert_single_tuple(&catalog, db, "t", &["1", "2", "'x'"]).unwrap(), "seed row");
+    assert!(
+        insert_single_tuple(&catalog, db, "t", &["1", "2", "'x'"]).unwrap(),
+        "seed row"
+    );
 
     // Control: single-column UNIQUE index keeps working.
     let single = create_index_with_flags(&catalog, db, "t", "uq_v", &["v".into()], true, false);
     assert!(single.is_ok(), "control: single-col unique index creation");
     let ins_single = insert_single_tuple(&load_catalog(), db, "t", &["9", "9", "'unique9'"]);
-    assert!(matches!(ins_single, Ok(true)), "control: INSERT after single-col unique index");
+    assert!(
+        matches!(ins_single, Ok(true)),
+        "control: INSERT after single-col unique index"
+    );
 
     // The finding: composite UNIQUE index.
-    let res = create_index_with_flags(&load_catalog(), db, "t", "uq_ab", &["a".into(), "b".into()], true, false);
-    assert!(res.is_ok(), "composite unique index creation must succeed: {:?}", res);
+    let res = create_index_with_flags(
+        &load_catalog(),
+        db,
+        "t",
+        "uq_ab",
+        &["a".into(), "b".into()],
+        true,
+        false,
+    );
+    assert!(
+        res.is_ok(),
+        "composite unique index creation must succeed: {:?}",
+        res
+    );
 
     // A tuple distinct in the composite key must be insertable — this used
     // to panic inside check_unique_insert_meta (key arity 1 vs index arity 2).
@@ -211,8 +238,13 @@ fn ai_update_respects_varchar_length_limit() {
         assert!(create_database(&mut catalog, db), "create db");
         let mut catalog = load_catalog();
         create_table(
-            &mut catalog, db, "t",
-            vec![col("id", DataType::Int, true), uniq_col("name", DataType::Varchar(5))],
+            &mut catalog,
+            db,
+            "t",
+            vec![
+                col("id", DataType::Int, true),
+                uniq_col("name", DataType::Varchar(5)),
+            ],
         );
         save_catalog(&catalog).unwrap();
     }
@@ -222,7 +254,10 @@ fn ai_update_respects_varchar_length_limit() {
 
     // Control: INSERT over-length is rejected.
     let ins = insert_single_tuple(&load_catalog(), db, "t", &["2", "'toolong'"]);
-    assert!(matches!(ins, Ok(false)), "control: over-length INSERT must be rejected");
+    assert!(
+        matches!(ins, Ok(false)),
+        "control: over-length INSERT must be rejected"
+    );
 
     // The finding: UPDATE over-length is applied and corrupts the row.
     let upd = do_update(db, "t", "id = 1", "name = 'toolong'");
@@ -260,8 +295,13 @@ fn aj_batch_update_cannot_create_unique_violation() {
         assert!(create_database(&mut catalog, db), "create db");
         let mut catalog = load_catalog();
         create_table(
-            &mut catalog, db, "t",
-            vec![col("id", DataType::Int, true), uniq_col("tag", DataType::Int)],
+            &mut catalog,
+            db,
+            "t",
+            vec![
+                col("id", DataType::Int, true),
+                uniq_col("tag", DataType::Int),
+            ],
         );
         save_catalog(&catalog).unwrap();
     }
@@ -273,7 +313,11 @@ fn aj_batch_update_cannot_create_unique_violation() {
 
     // Control: single-row UPDATE colliding with an untouched row is rejected.
     let single = do_update(db, "t", "id = 1", "tag = 200");
-    assert_eq!(single, Ok(0), "control: colliding single-row UPDATE rejected");
+    assert_eq!(
+        single,
+        Ok(0),
+        "control: colliding single-row UPDATE rejected"
+    );
     let scan0 = try_select(&load_catalog(), db, "SELECT id, tag FROM t ORDER BY id");
     assert_eq!(
         scan0,
@@ -325,10 +369,7 @@ fn ak_multirow_insert_atomicity_on_unique_violation() {
         let mut catalog = load_catalog();
         assert!(create_database(&mut catalog, db), "create db");
         let mut catalog = load_catalog();
-        create_table(
-            &mut catalog, db, "t",
-            vec![uniq_col("id", DataType::Int)],
-        );
+        create_table(&mut catalog, db, "t", vec![uniq_col("id", DataType::Int)]);
         save_catalog(&catalog).unwrap();
     }
 
@@ -338,7 +379,10 @@ fn ak_multirow_insert_atomicity_on_unique_violation() {
     // Row 3 of the VALUES list violates UNIQUE(id). The statement must fail
     // WITHOUT leaving rows 2 and 3 (statement atomicity).
     let result = try_select(&load_catalog(), db, "INSERT INTO t VALUES (2), (3), (1)");
-    assert!(result.is_err(), "the INSERT must error on the violating row");
+    assert!(
+        result.is_err(),
+        "the INSERT must error on the violating row"
+    );
 
     let scan = try_select(&load_catalog(), db, "SELECT id FROM t ORDER BY id");
     assert_eq!(
@@ -365,8 +409,13 @@ fn x1_unique_lifecycle_and_char_padding_still_work() {
         assert!(create_database(&mut catalog, db), "create db");
         let mut catalog = load_catalog();
         create_table(
-            &mut catalog, db, "t",
-            vec![col("id", DataType::Int, true), uniq_col("tag", DataType::Int)],
+            &mut catalog,
+            db,
+            "t",
+            vec![
+                col("id", DataType::Int, true),
+                uniq_col("tag", DataType::Int),
+            ],
         );
         save_catalog(&catalog).unwrap();
     }
@@ -377,24 +426,31 @@ fn x1_unique_lifecycle_and_char_padding_still_work() {
 
     // Duplicate INSERT rejected.
     assert!(
-        matches!(insert_single_tuple(&load_catalog(), db, "t", &["3", "100"]), Ok(false)),
+        matches!(
+            insert_single_tuple(&load_catalog(), db, "t", &["3", "100"]),
+            Ok(false)
+        ),
         "control: duplicate unique INSERT rejected"
     );
 
     // Self-value UPDATE accepted.
-    assert_eq!(do_update(db, "t", "id = 1", "tag = 100"), Ok(1),
-        "control: setting a row's unique column to its own value succeeds");
+    assert_eq!(
+        do_update(db, "t", "id = 1", "tag = 100"),
+        Ok(1),
+        "control: setting a row's unique column to its own value succeeds"
+    );
 
     // Delete then reinsert the same value: accepted.
     let sel = parse_where_text("id = 1").unwrap();
     let ptrs = select_matching_pointers(&load_catalog(), db, "t", sel).unwrap();
     assert_eq!(ptrs.len(), 1, "control: one live pointer");
-    storage_manager::backend::executor::delete::delete_by_pointers(
-        &load_catalog(), db, "t", &ptrs,
-    )
-    .expect("delete");
+    storage_manager::backend::executor::delete::delete_by_pointers(&load_catalog(), db, "t", &ptrs)
+        .expect("delete");
     assert!(
-        matches!(insert_single_tuple(&load_catalog(), db, "t", &["4", "100"]), Ok(true)),
+        matches!(
+            insert_single_tuple(&load_catalog(), db, "t", &["4", "100"]),
+            Ok(true)
+        ),
         "control: reinserting a value whose previous holder was deleted"
     );
 
@@ -405,14 +461,22 @@ fn x1_unique_lifecycle_and_char_padding_still_work() {
         assert!(create_database(&mut catalog, db2), "create db2");
         let mut catalog = load_catalog();
         create_table(
-            &mut catalog, db2, "c",
-            vec![col("id", DataType::Int, true), uniq_col("code", DataType::Char(4))],
+            &mut catalog,
+            db2,
+            "c",
+            vec![
+                col("id", DataType::Int, true),
+                uniq_col("code", DataType::Char(4)),
+            ],
         );
         save_catalog(&catalog).unwrap();
     }
     assert!(insert_single_tuple(&load_catalog(), db2, "c", &["1", "'ab'"]).unwrap());
     assert!(
-        matches!(insert_single_tuple(&load_catalog(), db2, "c", &["2", "'ab  '"]), Ok(false)),
+        matches!(
+            insert_single_tuple(&load_catalog(), db2, "c", &["2", "'ab  '"]),
+            Ok(false)
+        ),
         "control: CHAR padding — 'ab' and 'ab  ' are the same value"
     );
 }
@@ -428,12 +492,22 @@ fn x2_insert_select_string_roundtrip_still_work() {
         assert!(create_database(&mut catalog, db), "create db");
         let mut catalog = load_catalog();
         create_table(
-            &mut catalog, db, "src",
-            vec![col("id", DataType::Int, true), col("name", DataType::Varchar(30), true)],
+            &mut catalog,
+            db,
+            "src",
+            vec![
+                col("id", DataType::Int, true),
+                col("name", DataType::Varchar(30), true),
+            ],
         );
         create_table(
-            &mut catalog, db, "dst",
-            vec![col("id", DataType::Int, true), col("name", DataType::Varchar(30), true)],
+            &mut catalog,
+            db,
+            "dst",
+            vec![
+                col("id", DataType::Int, true),
+                col("name", DataType::Varchar(30), true),
+            ],
         );
         save_catalog(&catalog).unwrap();
     }
@@ -443,12 +517,27 @@ fn x2_insert_select_string_roundtrip_still_work() {
     assert!(insert_single_tuple(&load_catalog(), db, "src", &["2", "'  spaced  '"]).unwrap());
     assert!(insert_single_tuple(&load_catalog(), db, "src", &["3", "'plain'"]).unwrap());
 
-    let ins = try_select(&load_catalog(), db, "INSERT INTO dst SELECT id, name FROM src ORDER BY id");
+    let ins = try_select(
+        &load_catalog(),
+        db,
+        "INSERT INTO dst SELECT id, name FROM src ORDER BY id",
+    );
     assert!(ins.is_ok(), "INSERT..SELECT works: {:?}", ins);
 
     let src = try_select(&load_catalog(), db, "SELECT id, name FROM src ORDER BY id").unwrap();
     let dst = try_select(&load_catalog(), db, "SELECT id, name FROM dst ORDER BY id").unwrap();
-    assert_eq!(src, dst, "INSERT..SELECT must preserve string content exactly");
-    assert_eq!(dst[0][1], "'O''Brien'".to_string(), "embedded quote preserved");
-    assert_eq!(dst[1][1], "'  spaced  '".to_string(), "leading/trailing spaces preserved");
+    assert_eq!(
+        src, dst,
+        "INSERT..SELECT must preserve string content exactly"
+    );
+    assert_eq!(
+        dst[0][1],
+        "'O''Brien'".to_string(),
+        "embedded quote preserved"
+    );
+    assert_eq!(
+        dst[1][1],
+        "'  spaced  '".to_string(),
+        "leading/trailing spaces preserved"
+    );
 }

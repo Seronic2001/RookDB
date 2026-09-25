@@ -53,29 +53,21 @@ pub fn build_alias_map(select: &SelectPlan, db: &Database) -> HashMap<String, St
                 "key_column_usage" => "columns",
                 other => other,
             };
-            let target = tref
-                .alias
-                .clone()
-                .unwrap_or_else(|| stamped.to_string());
+            let target = tref.alias.clone().unwrap_or_else(|| stamped.to_string());
             if let Some(alias) = &tref.alias {
                 map.insert(alias.to_ascii_lowercase(), target.clone());
             }
-            map.entry(stamped.to_ascii_lowercase())
-                .or_insert(target);
+            map.entry(stamped.to_ascii_lowercase()).or_insert(target);
             continue;
         }
         if db.tables.contains_key(&tref.name) {
             // The scan stamps the alias when present (SQL semantics), so all
             // qualifiers — alias AND raw table name — rewrite to it.
-            let target = tref
-                .alias
-                .clone()
-                .unwrap_or_else(|| tref.name.clone());
+            let target = tref.alias.clone().unwrap_or_else(|| tref.name.clone());
             if let Some(alias) = &tref.alias {
                 map.insert(alias.to_ascii_lowercase(), target.clone());
             }
-            map.entry(tref.name.to_ascii_lowercase())
-                .or_insert(target);
+            map.entry(tref.name.to_ascii_lowercase()).or_insert(target);
         }
     }
     map

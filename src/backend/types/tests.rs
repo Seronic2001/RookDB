@@ -24,7 +24,10 @@ fn parse_phase_one_types() {
     assert_eq!("INT".parse::<DataType>().unwrap(), DataType::Int);
     assert_eq!("BIGINT".parse::<DataType>().unwrap(), DataType::BigInt);
     assert_eq!("REAL".parse::<DataType>().unwrap(), DataType::Real);
-    assert_eq!("DOUBLE PRECISION".parse::<DataType>().unwrap(), DataType::DoublePrecision);
+    assert_eq!(
+        "DOUBLE PRECISION".parse::<DataType>().unwrap(),
+        DataType::DoublePrecision
+    );
     assert_eq!(
         "NUMERIC(10,2)".parse::<DataType>().unwrap(),
         DataType::Numeric {
@@ -52,7 +55,10 @@ fn parse_phase_one_types() {
     assert_eq!("DATE".parse::<DataType>().unwrap(), DataType::Date);
     assert_eq!("TIME".parse::<DataType>().unwrap(), DataType::Time);
     assert_eq!("BIT(12)".parse::<DataType>().unwrap(), DataType::Bit(12));
-    assert_eq!("TIMESTAMP".parse::<DataType>().unwrap(), DataType::Timestamp);
+    assert_eq!(
+        "TIMESTAMP".parse::<DataType>().unwrap(),
+        DataType::Timestamp
+    );
 }
 
 #[test]
@@ -153,7 +159,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Character(10).alignment(), 1);
     assert_eq!(DataType::Time.alignment(), 8);
     assert_eq!(DataType::Date.alignment(), 4);
-        assert_eq!(DataType::Timestamp.alignment(), 8);
+    assert_eq!(DataType::Timestamp.alignment(), 8);
     assert_eq!(DataType::Bool.alignment(), 1);
     assert_eq!(DataType::Varchar(64).alignment(), 1);
     assert_eq!(DataType::Bit(13).alignment(), 1);
@@ -183,7 +189,7 @@ fn phase_two_layout_rules() {
     assert_eq!(DataType::Character(10).fixed_size(), Some(10));
     assert_eq!(DataType::Time.fixed_size(), Some(8));
     assert_eq!(DataType::Date.fixed_size(), Some(4));
-        assert_eq!(DataType::Timestamp.fixed_size(), Some(8));
+    assert_eq!(DataType::Timestamp.fixed_size(), Some(8));
     assert_eq!(DataType::Bool.fixed_size(), Some(1));
     assert_eq!(DataType::Bit(13).fixed_size(), Some(2));
     assert_eq!(DataType::Varchar(64).fixed_size(), None);
@@ -218,8 +224,14 @@ fn roundtrip_int() {
 fn roundtrip_bool() {
     let t = DataValue::parse_and_encode(&DataType::Bool, "true").unwrap();
     let f = DataValue::parse_and_encode(&DataType::Bool, "0").unwrap();
-    assert_eq!(DataValue::from_bytes(&DataType::Bool, &t).unwrap(), DataValue::Bool(true));
-    assert_eq!(DataValue::from_bytes(&DataType::Bool, &f).unwrap(), DataValue::Bool(false));
+    assert_eq!(
+        DataValue::from_bytes(&DataType::Bool, &t).unwrap(),
+        DataValue::Bool(true)
+    );
+    assert_eq!(
+        DataValue::from_bytes(&DataType::Bool, &f).unwrap(),
+        DataValue::Bool(false)
+    );
 }
 
 #[test]
@@ -450,7 +462,10 @@ fn roundtrip_time() {
     let encoded = DataValue::parse_and_encode(&DataType::Time, "14:30:00").unwrap();
     assert_eq!(encoded.len(), 8);
     let v = DataValue::from_bytes(&DataType::Time, &encoded).unwrap();
-    assert_eq!(v, DataValue::Time(NaiveTime::from_hms_opt(14, 30, 0).unwrap()));
+    assert_eq!(
+        v,
+        DataValue::Time(NaiveTime::from_hms_opt(14, 30, 0).unwrap())
+    );
 }
 
 #[test]
@@ -459,7 +474,10 @@ fn roundtrip_time_with_micros() {
     let encoded = DataValue::parse_and_encode(&DataType::Time, "23:59:59.123456").unwrap();
     assert_eq!(encoded.len(), 8);
     let v = DataValue::from_bytes(&DataType::Time, &encoded).unwrap();
-    assert_eq!(v, DataValue::Time(NaiveTime::from_hms_micro_opt(23, 59, 59, 123456).unwrap()));
+    assert_eq!(
+        v,
+        DataValue::Time(NaiveTime::from_hms_micro_opt(23, 59, 59, 123456).unwrap())
+    );
 }
 
 #[test]
@@ -480,8 +498,7 @@ fn compare_time_chronological() {
 #[test]
 fn roundtrip_timestamp() {
     use chrono::NaiveDateTime;
-    let encoded =
-        DataValue::parse_and_encode(&DataType::Timestamp, "2026-03-13 14:30:00").unwrap();
+    let encoded = DataValue::parse_and_encode(&DataType::Timestamp, "2026-03-13 14:30:00").unwrap();
     assert_eq!(encoded.len(), 8);
     let v = DataValue::from_bytes(&DataType::Timestamp, &encoded).unwrap();
     assert_eq!(
@@ -584,7 +601,9 @@ fn nullable_row_roundtrip() {
     assert_eq!(decoded[1], None);
     assert_eq!(
         decoded[2],
-        Some(DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()))
+        Some(DataValue::Date(
+            NaiveDate::from_ymd_opt(2026, 3, 13).unwrap()
+        ))
     );
     assert_eq!(decoded[3], Some(DataValue::SmallInt(-7)));
 }
@@ -653,7 +672,12 @@ fn compare_nullable_non_null_values() {
 
 #[test]
 fn row_set_get_and_null() {
-    let schema = vec![DataType::Int, DataType::Bool, DataType::Varchar(16), DataType::Date];
+    let schema = vec![
+        DataType::Int,
+        DataType::Bool,
+        DataType::Varchar(16),
+        DataType::Date,
+    ];
     let mut row = Row::new(schema);
 
     row.set_value(0, &DataValue::Int(99)).unwrap();
@@ -690,12 +714,16 @@ fn row_serialize_deserialize_roundtrip() {
     row.set_value(1, &DataValue::Varchar("rook".to_string()))
         .unwrap();
     row.set_null(2).unwrap();
-    row.set_value(3, &DataValue::Bit("1010".to_string())).unwrap();
+    row.set_value(3, &DataValue::Bit("1010".to_string()))
+        .unwrap();
 
     let bytes = row.serialize();
     let restored = Row::deserialize(&schema, &bytes).unwrap();
 
-    assert_eq!(restored.get_value(0).unwrap(), Some(DataValue::SmallInt(-5)));
+    assert_eq!(
+        restored.get_value(0).unwrap(),
+        Some(DataValue::SmallInt(-5))
+    );
     assert_eq!(
         restored.get_value(1).unwrap(),
         Some(DataValue::Varchar("rook".to_string()))
@@ -767,8 +795,14 @@ fn fn_type_mismatch_errors() {
 #[test]
 fn fn_ltrim_rtrim() {
     let v = DataValue::Varchar("  rookdb  ".to_string());
-    assert_eq!(ltrim(&v).unwrap(), DataValue::Varchar("rookdb  ".to_string()));
-    assert_eq!(rtrim(&v).unwrap(), DataValue::Varchar("  rookdb".to_string()));
+    assert_eq!(
+        ltrim(&v).unwrap(),
+        DataValue::Varchar("rookdb  ".to_string())
+    );
+    assert_eq!(
+        rtrim(&v).unwrap(),
+        DataValue::Varchar("  rookdb".to_string())
+    );
 }
 
 // ── Built-in functions ─────────────────────────────────────────────────────────
@@ -784,8 +818,20 @@ fn fn_abs_round_floor_ceiling() {
         unscaled: -12345,
         scale: 2,
     });
-    assert_eq!(floor(&n).unwrap(), DataValue::Numeric(NumericValue { unscaled: -124, scale: 0 }));
-    assert_eq!(ceiling(&n).unwrap(), DataValue::Numeric(NumericValue { unscaled: -123, scale: 0 }));
+    assert_eq!(
+        floor(&n).unwrap(),
+        DataValue::Numeric(NumericValue {
+            unscaled: -124,
+            scale: 0
+        })
+    );
+    assert_eq!(
+        ceiling(&n).unwrap(),
+        DataValue::Numeric(NumericValue {
+            unscaled: -123,
+            scale: 0
+        })
+    );
 }
 
 #[test]
@@ -807,10 +853,7 @@ fn fn_coalesce_and_nullif() {
     let out = coalesce(&[None, Some(DataValue::Int(7)), Some(DataValue::Int(9))]);
     assert_eq!(out, Some(DataValue::Int(7)));
 
-    assert_eq!(
-        nullif(DataValue::Int(5), DataValue::Int(5)).unwrap(),
-        None
-    );
+    assert_eq!(nullif(DataValue::Int(5), DataValue::Int(5)).unwrap(), None);
     assert_eq!(
         nullif(DataValue::Int(5), DataValue::Int(6)).unwrap(),
         Some(DataValue::Int(5))
@@ -839,8 +882,7 @@ fn fn_current_temporal_values() {
 fn test_row_header_fields() {
     // Schema with 2 fixed + 1 var-len column
     let schema = vec![DataType::Int, DataType::Varchar(16), DataType::Bool];
-    let bytes =
-        serialize_nullable_row(&schema, &[Some("7"), Some("hello"), Some("true")]).unwrap();
+    let bytes = serialize_nullable_row(&schema, &[Some("7"), Some("hello"), Some("true")]).unwrap();
 
     let num_cols = u16::from_le_bytes([bytes[0], bytes[1]]);
     let num_varlen = u16::from_le_bytes([bytes[2], bytes[3]]);
@@ -868,8 +910,7 @@ fn test_varlen_offset_sentinel_for_null_varchar() {
 fn test_fixed_col_direct_access() {
     // Verify a fixed-length column can be read directly via RowLayout offsets.
     let schema = vec![DataType::Varchar(16), DataType::Int, DataType::Bool];
-    let bytes =
-        serialize_nullable_row(&schema, &[Some("hi"), Some("42"), Some("true")]).unwrap();
+    let bytes = serialize_nullable_row(&schema, &[Some("hi"), Some("42"), Some("true")]).unwrap();
 
     let physical = PhysicalSchema::from_logical(&schema);
     let layout = RowLayout::compute(&physical);
@@ -883,7 +924,10 @@ fn test_fixed_col_direct_access() {
     let col_start = layout.fixed_data_start + layout.fixed_col_offsets[int_rank];
     let col_bytes = &bytes[col_start..col_start + 4];
     let val = i32::from_le_bytes([col_bytes[0], col_bytes[1], col_bytes[2], col_bytes[3]]);
-    assert_eq!(val, 42, "direct fixed-offset read of INT column should be 42");
+    assert_eq!(
+        val, 42,
+        "direct fixed-offset read of INT column should be 42"
+    );
 }
 
 #[test]
@@ -915,7 +959,9 @@ fn test_mixed_schema_layout_roundtrip() {
     use chrono::NaiveDate;
     assert_eq!(
         decoded[4],
-        Some(DataValue::Date(NaiveDate::from_ymd_opt(2026, 4, 4).unwrap()))
+        Some(DataValue::Date(
+            NaiveDate::from_ymd_opt(2026, 4, 4).unwrap()
+        ))
     );
 }
 
@@ -995,9 +1041,6 @@ fn test_free_fn_row_byte_size() {
     row.set_value(1, &v1).unwrap();
     row.set_value(2, &v2).unwrap();
 
-    let free_size = row_byte_size(
-        &schema,
-        &[Some(&v0), Some(&v1), Some(&v2)],
-    );
+    let free_size = row_byte_size(&schema, &[Some(&v0), Some(&v1), Some(&v2)]);
     assert_eq!(free_size, row.serialize().len());
 }

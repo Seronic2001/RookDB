@@ -8,39 +8,26 @@ use std::path::PathBuf;
 
 use rook_ast::logical::*;
 
-use super::tuple::ColumnInfo;
-use super::expr::{Predicate, Expr, expr_from_ast};
-use crate::types::datatype::DataType;
+use super::expr::{Expr, Predicate, expr_from_ast};
 use super::operators::{
-    PhysicalOperator,
-    SeqScanOperator,
-    CteScanOperator,
-    SingleRowOperator,
-    IndexScanOperator,
-    IndexScanMode,
-    FilterOperator,
-    ProjectionOperator,
-    LimitOperator,
-    DistinctOperator,
-    SortOperator,
-    SetOpOperator,
-    SetOpType as PhysicalSetOpType,
-    SubqueryExecOperator,
-    SubqueryType as PhysicalSubqueryType,
-    InsertOperator,
-    ValuesOperator,
+    CteScanOperator, DistinctOperator, FilterOperator, IndexScanMode, IndexScanOperator,
+    InsertOperator, LimitOperator, PhysicalOperator, ProjectionOperator, SeqScanOperator,
+    SetOpOperator, SetOpType as PhysicalSetOpType, SingleRowOperator, SortOperator,
+    SubqueryExecOperator, SubqueryType as PhysicalSubqueryType, ValuesOperator,
 };
+use super::tuple::ColumnInfo;
+use crate::types::datatype::DataType;
 
+use self::helpers::infer_expr_type_from_ast;
 use crate::backend::catalog::types::Catalog;
 use crate::backend::error::{RookError, RookResult};
 use crate::backend::heap::heap_manager::HeapManager;
 use crate::backend::index::btree::BTree;
-use self::helpers::infer_expr_type_from_ast;
 
 pub mod helpers;
-pub mod subqueries;
-pub mod joins;
 pub mod index_scan;
+pub mod joins;
+pub mod subqueries;
 
 /// Converts a `LogicalPlan` into an executable `PhysicalOperator` tree.
 pub struct PhysicalPlanner {
@@ -79,19 +66,21 @@ impl PhysicalPlanner {
                 // index-accelerated scan (PointLookup or RangeLookup) instead
                 // of a SeqScan + FilterOperator.
                 if let LogicalPlan::TableScan(ref ts) = *f.child
-                    && let Some(scan_op) = self.try_plan_index_scan_with_predicate(ts, &f.predicate)? {
-                        log::info!(
-                            "[Volcano] Using index-accelerated scan for table '{}' (full predicate preserved on top)",
-                            ts.table
-                        );
-                        // IMPORTANT: Always apply the full predicate as a FilterOperator
-                        // on top of the index-accelerated scan. This guarantees correctness
-                        // for compound AND predicates like `indexed_col = 5 AND other > 10`
-                        // where only the indexed portion is used by the index scan and the
-                        // non-indexed portion must still be applied as a filter.
-                        let predicate = self.make_predicate(&f.predicate, scan_op.schema())?;
-                        return Ok(Box::new(FilterOperator::new(scan_op, predicate)));
-                    }
+                    && let Some(scan_op) =
+                        self.try_plan_index_scan_with_predicate(ts, &f.predicate)?
+                {
+                    log::info!(
+                        "[Volcano] Using index-accelerated scan for table '{}' (full predicate preserved on top)",
+                        ts.table
+                    );
+                    // IMPORTANT: Always apply the full predicate as a FilterOperator
+                    // on top of the index-accelerated scan. This guarantees correctness
+                    // for compound AND predicates like `indexed_col = 5 AND other > 10`
+                    // where only the indexed portion is used by the index scan and the
+                    // non-indexed portion must still be applied as a filter.
+                    let predicate = self.make_predicate(&f.predicate, scan_op.schema())?;
+                    return Ok(Box::new(FilterOperator::new(scan_op, predicate)));
+                }
 
                 // Fall through: create a SeqScan + FilterOperator
                 let child = self.plan_internal(&f.child, cte_registry)?;
@@ -102,8 +91,10 @@ impl PhysicalPlanner {
             LogicalPlan::Project(p) => {
                 let child = self.plan_internal(&p.child, cte_registry)?;
                 let child_schema = child.schema();
-                let column_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
-                let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
+                let column_names: Vec<String> =
+                    child_schema.iter().map(|c| c.name.clone()).collect();
+                let child_types: Vec<_> =
+                    child_schema.iter().map(|c| c.data_type.clone()).collect();
 
                 // Convert project expressions to physical expressions
                 if p.expressions.is_empty() {
@@ -113,7 +104,8 @@ impl PhysicalPlanner {
 
                 let mut projections = Vec::new();
                 for ne in &p.expressions {
-                    let (e, data_type) = self.plan_projection_expr(&ne.expr, &column_names, &child_types)?;
+                    let (e, data_type) =
+                        self.plan_projection_expr(&ne.expr, &column_names, &child_types)?;
                     projections.push((e, ne.name.clone(), data_type));
                 }
 
@@ -129,8 +121,10 @@ impl PhysicalPlanner {
                 let child = self.plan_internal(&s.child, cte_registry)?;
                 // Clone the schema immediately to avoid borrowing `child` (which will be moved later)
                 let child_schema: Vec<ColumnInfo> = child.schema().to_vec();
-                let column_names: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
-                let child_types: Vec<_> = child_schema.iter().map(|c| c.data_type.clone()).collect();
+                let column_names: Vec<String> =
+                    child_schema.iter().map(|c| c.name.clone()).collect();
+                let child_types: Vec<_> =
+                    child_schema.iter().map(|c| c.data_type.clone()).collect();
 
                 // ── Build sort keys, handling complex expressions ──────────────
                 //
@@ -147,14 +141,23 @@ impl PhysicalPlanner {
                 for ob in &s.order_by {
                     match &ob.expr {
                         rook_ast::ExprNode::Column(name) => {
-                            let idx = column_names.iter().position(|n| n == name)
-                                .ok_or_else(|| RookError::NotFound { entity: "Column", name: name.clone() })?;
+                            let idx =
+                                column_names.iter().position(|n| n == name).ok_or_else(|| {
+                                    RookError::NotFound {
+                                        entity: "Column",
+                                        name: name.clone(),
+                                    }
+                                })?;
                             sort_keys.push((idx, !ob.ascending));
                         }
                         rook_ast::ExprNode::Compound(parts) => {
                             let name = parts.last().cloned().unwrap_or_default();
-                            let idx = column_names.iter().position(|n| n == &name)
-                                .ok_or_else(|| RookError::NotFound { entity: "Column", name })?;
+                            let idx = column_names.iter().position(|n| n == &name).ok_or(
+                                RookError::NotFound {
+                                    entity: "Column",
+                                    name,
+                                },
+                            )?;
                             sort_keys.push((idx, !ob.ascending));
                         }
                         rook_ast::ExprNode::Constant(rook_ast::ConstantValue::Int(pos)) => {
@@ -172,7 +175,9 @@ impl PhysicalPlanner {
                         complex_expr => {
                             // Complex sort expression: project as a hidden column
                             let (phys_expr, data_type) = self.plan_projection_expr(
-                                complex_expr, &column_names, &child_types,
+                                complex_expr,
+                                &column_names,
+                                &child_types,
                             )?;
                             let col_name = format!("__sort_col_{}", extra_projections.len());
                             let sort_idx = column_names.len() + extra_projections.len();
@@ -190,37 +195,51 @@ impl PhysicalPlanner {
                     let mut all_projections: Vec<(Expr, String, DataType)> = child_schema
                         .iter()
                         .map(|ci| {
-                            let expr = Expr::Column { table: None, column: ci.name.clone() };
+                            let expr = Expr::Column {
+                                table: None,
+                                column: ci.name.clone(),
+                            };
                             (expr, ci.name.clone(), ci.data_type.clone())
                         })
                         .collect();
                     all_projections.extend(extra_projections);
-                    let child_with_extra = Box::new(ProjectionOperator::new(child, all_projections));
+                    let child_with_extra =
+                        Box::new(ProjectionOperator::new(child, all_projections));
 
                     let sort_op = SortOperator::new(child_with_extra, sort_keys);
 
                     // Strip the extra sort columns
-                    let result_schema: Vec<String> = child_schema.iter().map(|c| c.name.clone()).collect();
+                    let result_schema: Vec<String> =
+                        child_schema.iter().map(|c| c.name.clone()).collect();
                     let indices: Vec<usize> = (0..column_names.len()).collect();
 
                     if let Some(limit) = s.limit {
-                        log::info!("[Volcano] Sort has limit={}, wrapping in LimitOperator", limit);
-                        let limited = Box::new(LimitOperator::new(
-                            Box::new(sort_op), limit as usize, 0,
-                        ));
+                        log::info!(
+                            "[Volcano] Sort has limit={}, wrapping in LimitOperator",
+                            limit
+                        );
+                        let limited =
+                            Box::new(LimitOperator::new(Box::new(sort_op), limit as usize, 0));
                         Ok(Box::new(ProjectionOperator::from_indices(
-                            limited, &indices, &result_schema,
+                            limited,
+                            &indices,
+                            &result_schema,
                         )?))
                     } else {
                         Ok(Box::new(ProjectionOperator::from_indices(
-                            Box::new(sort_op), &indices, &result_schema,
+                            Box::new(sort_op),
+                            &indices,
+                            &result_schema,
                         )?))
                     }
                 } else {
                     // Simple case: all sort keys are column references
                     let already_sorted = if let Some(child_order) = child.ordering() {
                         sort_keys.len() <= child_order.len()
-                            && sort_keys.iter().zip(&child_order).all(|(req, actual)| req == actual)
+                            && sort_keys
+                                .iter()
+                                .zip(&child_order)
+                                .all(|(req, actual)| req == actual)
                     } else {
                         false
                     };
@@ -231,10 +250,10 @@ impl PhysicalPlanner {
                             sort_keys
                         );
                         if let Some(limit) = s.limit {
-                            log::info!("[Volcano] Pipelining into LimitOperator without SortOperator");
-                            Ok(Box::new(LimitOperator::new(
-                                child, limit as usize, 0,
-                            )))
+                            log::info!(
+                                "[Volcano] Pipelining into LimitOperator without SortOperator"
+                            );
+                            Ok(Box::new(LimitOperator::new(child, limit as usize, 0)))
                         } else {
                             Ok(child)
                         }
@@ -242,9 +261,14 @@ impl PhysicalPlanner {
                         let sort_op = SortOperator::new(child, sort_keys);
 
                         if let Some(limit) = s.limit {
-                            log::info!("[Volcano] Sort has limit={}, wrapping in LimitOperator", limit);
+                            log::info!(
+                                "[Volcano] Sort has limit={}, wrapping in LimitOperator",
+                                limit
+                            );
                             Ok(Box::new(LimitOperator::new(
-                                Box::new(sort_op), limit as usize, 0,
+                                Box::new(sort_op),
+                                limit as usize,
+                                0,
                             )))
                         } else {
                             Ok(Box::new(sort_op))
@@ -262,13 +286,9 @@ impl PhysicalPlanner {
                 )))
             }
 
-            LogicalPlan::Aggregate(a) => {
-                self.plan_aggregate_with_ctes(a, cte_registry)
-            }
+            LogicalPlan::Aggregate(a) => self.plan_aggregate_with_ctes(a, cte_registry),
 
-            LogicalPlan::Join(j) => {
-                self.plan_join_with_ctes(j, cte_registry)
-            }
+            LogicalPlan::Join(j) => self.plan_join_with_ctes(j, cte_registry),
 
             LogicalPlan::SetOp(s) => {
                 let left = self.plan_internal(&s.left, cte_registry)?;
@@ -288,11 +308,7 @@ impl PhysicalPlanner {
                     rook_ast::logical::SetOpType::Except => PhysicalSetOpType::Except,
                 };
 
-                log::info!(
-                    "[Volcano] Planning {:?} (all={})",
-                    op_type,
-                    s.all
-                );
+                log::info!("[Volcano] Planning {:?} (all={})", op_type, s.all);
 
                 Ok(Box::new(SetOpOperator::new(left, right, op_type, s.all)))
             }
@@ -319,13 +335,9 @@ impl PhysicalPlanner {
             }
 
             // ── Recursive CTE node ──────────────────────────────────────────
-
-            LogicalPlan::RecursiveCte(rc) => {
-                self.plan_recursive_cte(rc, cte_registry)
-            }
+            LogicalPlan::RecursiveCte(rc) => self.plan_recursive_cte(rc, cte_registry),
 
             // ── CTE nodes ────────────────────────────────────────────────────
-
             LogicalPlan::Cte(c) => {
                 // 1. Materialise the CTE inner plan into an in-memory Vec<Tuple>.
                 //
@@ -398,22 +410,28 @@ impl PhysicalPlanner {
                 let tuples = cte_registry
                     .get(&cs.name.to_ascii_lowercase())
                     .cloned()
-                    .ok_or_else(|| RookError::Internal(format!(
-                        "CTE '{}' not found in registry during physical planning", cs.name
-                    )))?;
+                    .ok_or_else(|| {
+                        RookError::Internal(format!(
+                            "CTE '{}' not found in registry during physical planning",
+                            cs.name
+                        ))
+                    })?;
 
                 // Build the schema for CteScanOperator from the CteScan node.
                 // The CTE name serves as the table qualifier so that table-qualified
                 // references (e.g. `my_cte.col`) and NATURAL JOIN disambiguation work
                 // correctly when a CTE is on the right side of a join.
                 let cte_table_name = cs.name.clone();
-                let schema: Vec<super::tuple::ColumnInfo> = cs.schema.columns.iter().map(|c| {
-                    super::tuple::ColumnInfo {
+                let schema: Vec<super::tuple::ColumnInfo> = cs
+                    .schema
+                    .columns
+                    .iter()
+                    .map(|c| super::tuple::ColumnInfo {
                         name: c.name.clone(),
                         data_type: crate::types::datatype::DataType::Varchar(u16::MAX),
                         table: Some(cte_table_name.clone()),
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 log::info!(
                     "[Volcano] CteScan '{}': {} tuples available",
@@ -441,17 +459,17 @@ impl PhysicalPlanner {
     /// uses an `IndexScanOperator` with `FullScan` mode instead of a
     /// sequential scan.  This allows the B+ Tree index to drive tuple
     /// retrieval in key order.
-    pub(crate) fn plan_table_scan(&self, ts: &LogicalTableScan) -> RookResult<Box<dyn PhysicalOperator>> {
+    pub(crate) fn plan_table_scan(
+        &self,
+        ts: &LogicalTableScan,
+    ) -> RookResult<Box<dyn PhysicalOperator>> {
         // ── System table path ─────────────────────────────────────────────
         if let Some(sys_name) = &ts.system_table_name {
             // Virtual single-row table: no heap file needed
             if sys_name == "__singlerow__" {
                 return Ok(Box::new(SingleRowOperator::new()));
             }
-            let heap_path = PathBuf::from(format!(
-                "database/system/{}.dat",
-                sys_name
-            ));
+            let heap_path = PathBuf::from(format!("database/system/{}.dat", sys_name));
             if !heap_path.exists() {
                 return Err(RookError::NotFound {
                     entity: "System table",
@@ -478,7 +496,8 @@ impl PhysicalPlanner {
             let info_schema = &ts.schema;
             let sys_schema = crate::backend::system_table::system_table_schema(sys_name);
             // Map info_schema column names to physical column types + positions
-            let (mut column_info, column_mapping) = self.map_info_schema_columns(sys_name, info_schema, sys_schema);
+            let (mut column_info, column_mapping) =
+                self.map_info_schema_columns(sys_name, info_schema, sys_schema);
             // Set the table name for each column to allow table-qualified resolution
             // (alias takes precedence per SQL semantics).
             let sys_table_name = ts.alias.clone().unwrap_or_else(|| sys_name.to_string());
@@ -486,10 +505,9 @@ impl PhysicalPlanner {
                 ci.table = Some(sys_table_name.clone());
             }
             let schema_types: Vec<DataType> = sys_schema.to_vec();
-            let heap_manager = HeapManager::open(heap_path)
-                .map_err(|e| RookError::Io(e).with_context(format!(
-                    "Failed to open system table '{}'", sys_name
-                )))?;
+            let heap_manager = HeapManager::open(heap_path).map_err(|e| {
+                RookError::Io(e).with_context(format!("Failed to open system table '{}'", sys_name))
+            })?;
             return Ok(Box::new(SeqScanOperator::new_with_mapping(
                 heap_manager,
                 schema_types,
@@ -504,28 +522,29 @@ impl PhysicalPlanner {
         // semantics: once a table is aliased, references must use the alias.
         // This also lets self-joins disambiguate two scans of one table.
         let table_name = ts.alias.clone().unwrap_or_else(|| ts.table.clone());
-        let column_info: Vec<ColumnInfo> = table_schema.iter().map(|c| {
-            ColumnInfo {
+        let column_info: Vec<ColumnInfo> = table_schema
+            .iter()
+            .map(|c| ColumnInfo {
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
                 table: Some(table_name.clone()),
-            }
-        }).collect();
+            })
+            .collect();
 
-        let heap_path = PathBuf::from(format!(
-            "database/base/{}/{}.dat",
-            self.db_name, ts.table
-        ));
+        let heap_path = PathBuf::from(format!("database/base/{}/{}.dat", self.db_name, ts.table));
 
         if !heap_path.exists() {
-            return Err(RookError::NotFound { entity: "Table", name: ts.table.clone() });
+            return Err(RookError::NotFound {
+                entity: "Table",
+                name: ts.table.clone(),
+            });
         }
 
         // Check for any index files (named or legacy) alongside the heap file
         // First try loading named indexes from sys_indexes
-        let named_indexes = crate::backend::executor::create_index::load_table_indexes(
-            &self.db_name, &ts.table
-        ).unwrap_or_default();
+        let named_indexes =
+            crate::backend::executor::create_index::load_table_indexes(&self.db_name, &ts.table)
+                .unwrap_or_default();
 
         if !named_indexes.is_empty() {
             // Use the first named index for the full scan
@@ -538,31 +557,37 @@ impl PhysicalPlanner {
             if index_path.exists() {
                 log::info!(
                     "[Volcano] Named index '{}' file found at {:?}, using IndexScanOperator with FullScan",
-                    first_idx_name, index_path
+                    first_idx_name,
+                    index_path
                 );
 
                 crate::backend::cache::checkpoint();
-                let mut btree = BTree::open(index_path)
-                    .map_err(|e| RookError::Io(e).with_context(format!(
-                        "Failed to open index for table '{}'", ts.table
-                    )))?;
+                let mut btree = BTree::open(index_path).map_err(|e| {
+                    RookError::Io(e)
+                        .with_context(format!("Failed to open index for table '{}'", ts.table))
+                })?;
 
                 // Set the key type from the indexed column (NOT the first table column)
                 let idx_col_name = &named_indexes[0].1;
-                if let Some(idx_col) = table_schema.iter().find(|c| c.name.eq_ignore_ascii_case(idx_col_name)) {
+                if let Some(idx_col) = table_schema
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(idx_col_name))
+                {
                     btree.set_key_type(idx_col.data_type.clone());
                 } else if let Some(first_col) = table_schema.first() {
                     btree.set_key_type(first_col.data_type.clone());
                 }
 
-                let heap_manager = HeapManager::open(heap_path)
-                    .map_err(|e| RookError::Io(e).with_context(format!(
-                        "Failed to open heap for table '{}'", ts.table
-                    )))?;
+                let heap_manager = HeapManager::open(heap_path).map_err(|e| {
+                    RookError::Io(e)
+                        .with_context(format!("Failed to open heap for table '{}'", ts.table))
+                })?;
 
-                let indexed_cols: Vec<usize> = column_info.iter()
+                let indexed_cols: Vec<usize> = column_info
+                    .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(idx_col_name))
-                    .into_iter().collect();
+                    .into_iter()
+                    .collect();
 
                 return Ok(Box::new(IndexScanOperator::new(
                     btree,
@@ -575,10 +600,8 @@ impl PhysicalPlanner {
         }
 
         // Fallback: check for legacy single-index file
-        let legacy_index_path = PathBuf::from(format!(
-            "database/base/{}/{}.idx",
-            self.db_name, ts.table
-        ));
+        let legacy_index_path =
+            PathBuf::from(format!("database/base/{}/{}.idx", self.db_name, ts.table));
 
         if legacy_index_path.exists() {
             log::info!(
@@ -587,21 +610,27 @@ impl PhysicalPlanner {
             );
 
             crate::backend::cache::checkpoint();
-            let mut btree = BTree::open(legacy_index_path)
-                .map_err(|e| RookError::Io(e).with_context(format!(
-                    "Failed to open legacy index for table '{}'", ts.table
-                )))?;
+            let mut btree = BTree::open(legacy_index_path).map_err(|e| {
+                RookError::Io(e).with_context(format!(
+                    "Failed to open legacy index for table '{}'",
+                    ts.table
+                ))
+            })?;
 
             if let Some(first_col) = table_schema.first() {
                 btree.set_key_type(first_col.data_type.clone());
             }
 
-            let heap_manager = HeapManager::open(heap_path)
-                .map_err(|e| RookError::Io(e).with_context(format!(
-                    "Failed to open heap for table '{}'", ts.table
-                )))?;
+            let heap_manager = HeapManager::open(heap_path).map_err(|e| {
+                RookError::Io(e)
+                    .with_context(format!("Failed to open heap for table '{}'", ts.table))
+            })?;
 
-            let indexed_cols: Vec<usize> = if column_info.is_empty() { Vec::new() } else { vec![0] };
+            let indexed_cols: Vec<usize> = if column_info.is_empty() {
+                Vec::new()
+            } else {
+                vec![0]
+            };
             return Ok(Box::new(IndexScanOperator::new(
                 btree,
                 heap_manager,
@@ -616,10 +645,9 @@ impl PhysicalPlanner {
             ts.table
         );
 
-        let heap_manager = HeapManager::open(heap_path)
-            .map_err(|e| RookError::Io(e).with_context(format!(
-                "Failed to open heap for table '{}'", ts.table
-            )))?;
+        let heap_manager = HeapManager::open(heap_path).map_err(|e| {
+            RookError::Io(e).with_context(format!("Failed to open heap for table '{}'", ts.table))
+        })?;
 
         Ok(Box::new(SeqScanOperator::new(heap_manager, column_info)))
     }
@@ -685,9 +713,13 @@ impl PhysicalPlanner {
             mapping = (0..sys_schema.len()).collect();
         }
 
-        let column_info: Vec<ColumnInfo> = info_schema.columns.iter().zip(mapping.iter())
+        let column_info: Vec<ColumnInfo> = info_schema
+            .columns
+            .iter()
+            .zip(mapping.iter())
             .map(|(c, &phys_idx)| {
-                let dt = sys_schema.get(phys_idx)
+                let dt = sys_schema
+                    .get(phys_idx)
                     .cloned()
                     .unwrap_or(DataType::Varchar(255));
                 ColumnInfo {
@@ -702,11 +734,25 @@ impl PhysicalPlanner {
     }
 
     /// Resolve the table's schema from the catalog.
-    pub(crate) fn resolve_table_schema(&self, table_name: &str) -> RookResult<Vec<crate::backend::catalog::types::Column>> {
-        let db = self.catalog.databases.get(&self.db_name)
-            .ok_or_else(|| RookError::NotFound { entity: "Database", name: self.db_name.clone() })?;
-        let table = db.tables.get(table_name)
-            .ok_or_else(|| RookError::NotFound { entity: "Table", name: table_name.to_string() })?;
+    pub(crate) fn resolve_table_schema(
+        &self,
+        table_name: &str,
+    ) -> RookResult<Vec<crate::backend::catalog::types::Column>> {
+        let db = self
+            .catalog
+            .databases
+            .get(&self.db_name)
+            .ok_or_else(|| RookError::NotFound {
+                entity: "Database",
+                name: self.db_name.clone(),
+            })?;
+        let table = db
+            .tables
+            .get(table_name)
+            .ok_or_else(|| RookError::NotFound {
+                entity: "Table",
+                name: table_name.to_string(),
+            })?;
         Ok(table.columns.clone())
     }
 
@@ -747,7 +793,8 @@ impl PhysicalPlanner {
                             table: None,
                         })
                         .collect();
-                    let (phys_expr, dt) = self.build_correlated_scalar_subquery(info, &outer_schema)?;
+                    let (phys_expr, dt) =
+                        self.build_correlated_scalar_subquery(info, &outer_schema)?;
                     Ok((phys_expr, dt))
                 } else {
                     let (value, data_type) = self.materialize_scalar_subquery(&info.select)?;
@@ -769,8 +816,10 @@ impl PhysicalPlanner {
                         table: None,
                     })
                     .collect();
-                let left_expr = self.build_expr_with_correlated_subquery(left, column_names, &outer_schema)?;
-                let right_expr = self.build_expr_with_correlated_subquery(right, column_names, &outer_schema)?;
+                let left_expr =
+                    self.build_expr_with_correlated_subquery(left, column_names, &outer_schema)?;
+                let right_expr =
+                    self.build_expr_with_correlated_subquery(right, column_names, &outer_schema)?;
                 let phys_op = match op {
                     rook_ast::ArithOp::Add => Expr::Add(Box::new(left_expr), Box::new(right_expr)),
                     rook_ast::ArithOp::Sub => Expr::Sub(Box::new(left_expr), Box::new(right_expr)),
@@ -780,7 +829,10 @@ impl PhysicalPlanner {
                 let data_type = infer_expr_type_from_ast(expr, child_types, column_names)?;
                 Ok((phys_op, data_type))
             }
-            rook_ast::ExprNode::Cast { expr: inner, data_type } => {
+            rook_ast::ExprNode::Cast {
+                expr: inner,
+                data_type,
+            } => {
                 let outer_schema: Vec<ColumnInfo> = column_names
                     .iter()
                     .zip(child_types.iter())
@@ -790,12 +842,18 @@ impl PhysicalPlanner {
                         table: None,
                     })
                     .collect();
-                let inner_expr = self.build_expr_with_correlated_subquery(inner, column_names, &outer_schema)?;
-                let target_dt: DataType = data_type.parse()
-                    .map_err(|e: String| RookError::TypeMismatch(format!(
-                        "Invalid CAST target type '{}': {}", data_type, e
-                    )))?;
-                Ok((Expr::Cast(Box::new(inner_expr), target_dt.clone()), target_dt))
+                let inner_expr =
+                    self.build_expr_with_correlated_subquery(inner, column_names, &outer_schema)?;
+                let target_dt: DataType = data_type.parse().map_err(|e: String| {
+                    RookError::TypeMismatch(format!(
+                        "Invalid CAST target type '{}': {}",
+                        data_type, e
+                    ))
+                })?;
+                Ok((
+                    Expr::Cast(Box::new(inner_expr), target_dt.clone()),
+                    target_dt,
+                ))
             }
             // All other expression types: use the standard converter
             _ => {
@@ -809,32 +867,53 @@ impl PhysicalPlanner {
 
 // ── Index-accelerated scan planning (M1 + M2) ────────────────────────────────
 
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rook_ast::{PredicateNode, ExprNode, ComparisonOp, BinaryOp, ConstantValue};
+    use rook_ast::{BinaryOp, ComparisonOp, ConstantValue, ExprNode, PredicateNode};
 
-    fn col(name: &str) -> ExprNode { ExprNode::Column(name.to_string()) }
+    fn col(name: &str) -> ExprNode {
+        ExprNode::Column(name.to_string())
+    }
     fn compound(parts: &[&str]) -> ExprNode {
         ExprNode::Compound(parts.iter().map(|s| s.to_string()).collect())
     }
-    fn constant_int(v: i64) -> ExprNode { ExprNode::Constant(ConstantValue::Int(v)) }
-    fn constant_float(v: f64) -> ExprNode { ExprNode::Constant(ConstantValue::Float(v)) }
-    fn constant_text(s: &str) -> ExprNode { ExprNode::Constant(ConstantValue::Text(s.to_string())) }
+    fn constant_int(v: i64) -> ExprNode {
+        ExprNode::Constant(ConstantValue::Int(v))
+    }
+    fn constant_float(v: f64) -> ExprNode {
+        ExprNode::Constant(ConstantValue::Float(v))
+    }
+    fn constant_text(s: &str) -> ExprNode {
+        ExprNode::Constant(ConstantValue::Text(s.to_string()))
+    }
     #[allow(dead_code)]
-    fn constant_bool(b: bool) -> ExprNode { ExprNode::Constant(ConstantValue::Boolean(b)) }
+    fn constant_bool(b: bool) -> ExprNode {
+        ExprNode::Constant(ConstantValue::Boolean(b))
+    }
 
     fn eq_pred(l: ExprNode, r: ExprNode) -> PredicateNode {
-        PredicateNode::Compare { left: Box::new(l), op: ComparisonOp::Eq, right: Box::new(r) }
+        PredicateNode::Compare {
+            left: Box::new(l),
+            op: ComparisonOp::Eq,
+            right: Box::new(r),
+        }
     }
     fn gt_pred(l: ExprNode, r: ExprNode) -> PredicateNode {
-        PredicateNode::Compare { left: Box::new(l), op: ComparisonOp::Gt, right: Box::new(r) }
+        PredicateNode::Compare {
+            left: Box::new(l),
+            op: ComparisonOp::Gt,
+            right: Box::new(r),
+        }
     }
     fn and_pred(l: PredicateNode, r: PredicateNode) -> PredicateNode {
-        PredicateNode::BinaryOp { left: Box::new(l), op: BinaryOp::And, right: Box::new(r) }
+        PredicateNode::BinaryOp {
+            left: Box::new(l),
+            op: BinaryOp::And,
+            right: Box::new(r),
+        }
     }
     fn not_pred(inner: PredicateNode) -> PredicateNode {
         PredicateNode::Not(Box::new(inner))
@@ -844,7 +923,9 @@ mod tests {
     fn make_planner() -> PhysicalPlanner {
         use std::collections::HashMap;
         PhysicalPlanner {
-            catalog: Catalog { databases: HashMap::new() },
+            catalog: Catalog {
+                databases: HashMap::new(),
+            },
             db_name: "test".to_string(),
         }
     }
@@ -949,8 +1030,16 @@ mod tests {
         assert!(mode.is_some(), "Range operator should now match");
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
-                assert_eq!(low, crate::types::value::DataValue::Int(19), "Gt should increment the bound");
-                assert_eq!(high, crate::types::value::DataValue::Int(i32::MAX), "Gt should use MAX sentinel");
+                assert_eq!(
+                    low,
+                    crate::types::value::DataValue::Int(19),
+                    "Gt should increment the bound"
+                );
+                assert_eq!(
+                    high,
+                    crate::types::value::DataValue::Int(i32::MAX),
+                    "Gt should use MAX sentinel"
+                );
             }
             other => panic!("Expected RangeLookup, got {:?}", other),
         }
@@ -969,7 +1058,11 @@ mod tests {
         assert!(mode.is_some(), "Ge should match");
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
-                assert_eq!(low, crate::types::value::DataValue::Int(18), "Ge should NOT increment the bound");
+                assert_eq!(
+                    low,
+                    crate::types::value::DataValue::Int(18),
+                    "Ge should NOT increment the bound"
+                );
                 assert_eq!(high, crate::types::value::DataValue::Int(i32::MAX));
             }
             other => panic!("Expected RangeLookup, got {:?}", other),
@@ -990,7 +1083,11 @@ mod tests {
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
                 assert_eq!(low, crate::types::value::DataValue::Int(i32::MIN));
-                assert_eq!(high, crate::types::value::DataValue::Int(9), "Lt should decrement the bound");
+                assert_eq!(
+                    high,
+                    crate::types::value::DataValue::Int(9),
+                    "Lt should decrement the bound"
+                );
             }
             other => panic!("Expected RangeLookup, got {:?}", other),
         }
@@ -1010,7 +1107,11 @@ mod tests {
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
                 assert_eq!(low, crate::types::value::DataValue::Int(i32::MIN));
-                assert_eq!(high, crate::types::value::DataValue::Int(10), "Le should NOT decrement the bound");
+                assert_eq!(
+                    high,
+                    crate::types::value::DataValue::Int(10),
+                    "Le should NOT decrement the bound"
+                );
             }
             other => panic!("Expected RangeLookup, got {:?}", other),
         }
@@ -1021,7 +1122,8 @@ mod tests {
         let planner = make_planner();
         // salary > 50000.0 → RangeLookup(nextafter(50000.0), MAX) for DOUBLE
         let pred = gt_pred(col("salary"), constant_float(50000.0));
-        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        let mode =
+            planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
         assert!(mode.is_some(), "Gt on float should match");
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
@@ -1051,7 +1153,10 @@ mod tests {
         assert!(mode.is_some(), "Gt on BigInt should match");
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
-                assert_eq!(low, crate::types::value::DataValue::BigInt(1_000_000_000_001));
+                assert_eq!(
+                    low,
+                    crate::types::value::DataValue::BigInt(1_000_000_000_001)
+                );
                 assert_eq!(high, crate::types::value::DataValue::BigInt(i64::MAX));
             }
             other => panic!("Expected RangeLookup, got {:?}", other),
@@ -1074,10 +1179,16 @@ mod tests {
         assert!(mode.is_some(), "AND of two ranges should match");
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
-                assert_eq!(low, crate::types::value::DataValue::Int(6),
-                    "Combined low should be max(6, MIN) = 6");
-                assert_eq!(high, crate::types::value::DataValue::Int(9),
-                    "Combined high should be min(MAX, 9) = 9");
+                assert_eq!(
+                    low,
+                    crate::types::value::DataValue::Int(6),
+                    "Combined low should be max(6, MIN) = 6"
+                );
+                assert_eq!(
+                    high,
+                    crate::types::value::DataValue::Int(9),
+                    "Combined high should be min(MAX, 9) = 9"
+                );
             }
             other => panic!("Expected RangeLookup, got {:?}", other),
         }
@@ -1122,8 +1233,11 @@ mod tests {
         assert!(mode.is_some(), "AND of Eq+Gt should match");
         match mode.unwrap() {
             IndexScanMode::PointLookup(dv) => {
-                assert_eq!(dv, crate::types::value::DataValue::Int(7),
-                    "PointLookup should be preferred over RangeLookup");
+                assert_eq!(
+                    dv,
+                    crate::types::value::DataValue::Int(7),
+                    "PointLookup should be preferred over RangeLookup"
+                );
             }
             other => panic!("Expected PointLookup, got {:?}", other),
         }
@@ -1147,11 +1261,15 @@ mod tests {
     fn test_extract_varchar_equality() {
         let planner = make_planner();
         let pred = eq_pred(col("name"), constant_text("Alice"));
-        let mode = planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
+        let mode =
+            planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
         assert!(mode.is_some(), "Varchar equality should match");
         match mode.unwrap() {
             IndexScanMode::PointLookup(dv) => {
-                assert_eq!(dv, crate::types::value::DataValue::Varchar("Alice".to_string()));
+                assert_eq!(
+                    dv,
+                    crate::types::value::DataValue::Varchar("Alice".to_string())
+                );
             }
             other => panic!("Expected PointLookup, got {:?}", other),
         }
@@ -1161,17 +1279,16 @@ mod tests {
     fn test_extract_float_equality() {
         let planner = make_planner();
         let pred = eq_pred(col("salary"), constant_float(75000.5));
-        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        let mode =
+            planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
         assert!(mode.is_some(), "Float equality should match");
         match mode.unwrap() {
-            IndexScanMode::PointLookup(dv) => {
-                match dv {
-                    crate::types::value::DataValue::DoublePrecision(v) => {
-                        assert!((v.0 - 75000.5).abs() < 0.001, "Unexpected value: {}", v.0);
-                    }
-                    _ => panic!("Expected DoublePrecision"),
+            IndexScanMode::PointLookup(dv) => match dv {
+                crate::types::value::DataValue::DoublePrecision(v) => {
+                    assert!((v.0 - 75000.5).abs() < 0.001, "Unexpected value: {}", v.0);
                 }
-            }
+                _ => panic!("Expected DoublePrecision"),
+            },
             other => panic!("Expected PointLookup, got {:?}", other),
         }
     }
@@ -1192,12 +1309,19 @@ mod tests {
         let point = IndexScanMode::PointLookup(crate::types::value::DataValue::Int(0));
         let full = IndexScanMode::FullScan;
 
-        assert_eq!(PhysicalPlanner::scan_mode_priority(&point), 0,
-            "PointLookup should have highest priority (0)");
-        assert_eq!(PhysicalPlanner::scan_mode_priority(&full), 2,
-            "FullScan should have lowest priority (2)");
+        assert_eq!(
+            PhysicalPlanner::scan_mode_priority(&point),
+            0,
+            "PointLookup should have highest priority (0)"
+        );
+        assert_eq!(
+            PhysicalPlanner::scan_mode_priority(&full),
+            2,
+            "FullScan should have lowest priority (2)"
+        );
         assert!(
-            PhysicalPlanner::scan_mode_priority(&point) < PhysicalPlanner::scan_mode_priority(&full),
+            PhysicalPlanner::scan_mode_priority(&point)
+                < PhysicalPlanner::scan_mode_priority(&full),
             "PointLookup priority should be higher (lower number) than FullScan"
         );
     }
@@ -1214,7 +1338,10 @@ mod tests {
     fn test_ast_constant_bigint_to_data_value() {
         // Larger than i32::MAX should become BigInt
         let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Int(3_000_000_000));
-        assert_eq!(dv, Some(crate::types::value::DataValue::BigInt(3_000_000_000)));
+        assert_eq!(
+            dv,
+            Some(crate::types::value::DataValue::BigInt(3_000_000_000))
+        );
     }
 
     #[test]
@@ -1231,8 +1358,12 @@ mod tests {
 
     #[test]
     fn test_ast_constant_text_to_data_value() {
-        let dv = PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Text("hello".to_string()));
-        assert_eq!(dv, Some(crate::types::value::DataValue::Varchar("hello".to_string())));
+        let dv =
+            PhysicalPlanner::ast_constant_to_data_value(&ConstantValue::Text("hello".to_string()));
+        assert_eq!(
+            dv,
+            Some(crate::types::value::DataValue::Varchar("hello".to_string()))
+        );
     }
 
     #[test]
@@ -1260,9 +1391,13 @@ mod tests {
             system_table_name: Some("tables".to_string()),
         };
         let pred = eq_pred(col("table_name"), constant_text("users"));
-        let result = planner.try_plan_index_scan_with_predicate(&ts, &pred)
+        let result = planner
+            .try_plan_index_scan_with_predicate(&ts, &pred)
             .expect("Should not error");
-        assert!(result.is_none(), "System tables should not use index-accelerated scans");
+        assert!(
+            result.is_none(),
+            "System tables should not use index-accelerated scans"
+        );
     }
 
     #[test]
@@ -1276,9 +1411,13 @@ mod tests {
             system_table_name: None,
         };
         let pred = eq_pred(col("id"), constant_int(1));
-        let result = planner.try_plan_index_scan_with_predicate(&ts, &pred)
+        let result = planner
+            .try_plan_index_scan_with_predicate(&ts, &pred)
             .expect("Should not error");
-        assert!(result.is_none(), "Non-existent table should return None gracefully");
+        assert!(
+            result.is_none(),
+            "Non-existent table should return None gracefully"
+        );
     }
 
     #[test]
@@ -1315,13 +1454,21 @@ mod tests {
             gt_pred(col("age"), constant_int(30)),
         );
 
-        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
-        assert!(mode.is_some(), "Should match the indexed column part of AND");
+        let mode =
+            planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        assert!(
+            mode.is_some(),
+            "Should match the indexed column part of AND"
+        );
         match mode.unwrap() {
             IndexScanMode::PointLookup(dv) => {
-                assert_eq!(dv, crate::types::value::DataValue::DoublePrecision(
-                    crate::types::value::OrderedF64(50000.0)
-                ), "Should extract the indexed side of the AND");
+                assert_eq!(
+                    dv,
+                    crate::types::value::DataValue::DoublePrecision(
+                        crate::types::value::OrderedF64(50000.0)
+                    ),
+                    "Should extract the indexed side of the AND"
+                );
             }
             other => panic!("Expected PointLookup for indexed column, got {:?}", other),
         }
@@ -1368,20 +1515,25 @@ mod tests {
     fn test_extract_between_float_range() {
         let planner = make_planner();
         // salary BETWEEN 30000.0 AND 80000.0 → RangeLookup(30000.0, 80000.0)
-        let pred = between_pred(col("salary"), constant_float(30000.0), constant_float(80000.0));
-        let mode = planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
+        let pred = between_pred(
+            col("salary"),
+            constant_float(30000.0),
+            constant_float(80000.0),
+        );
+        let mode =
+            planner.extract_index_mode_from_predicate(&pred, "salary", &DataType::DoublePrecision);
         assert!(mode.is_some(), "BETWEEN on indexed column should match");
         match mode.unwrap() {
-            IndexScanMode::RangeLookup(low, high) => {
-                match (low, high) {
-                    (crate::types::value::DataValue::DoublePrecision(l),
-                     crate::types::value::DataValue::DoublePrecision(h)) => {
-                        assert!((l.0 - 30000.0).abs() < 0.001);
-                        assert!((h.0 - 80000.0).abs() < 0.001);
-                    }
-                    _ => panic!("Expected DoublePrecision values"),
+            IndexScanMode::RangeLookup(low, high) => match (low, high) {
+                (
+                    crate::types::value::DataValue::DoublePrecision(l),
+                    crate::types::value::DataValue::DoublePrecision(h),
+                ) => {
+                    assert!((l.0 - 30000.0).abs() < 0.001);
+                    assert!((h.0 - 80000.0).abs() < 0.001);
                 }
-            }
+                _ => panic!("Expected DoublePrecision values"),
+            },
             other => panic!("Expected RangeLookup, got {:?}", other),
         }
     }
@@ -1392,20 +1544,37 @@ mod tests {
         // BETWEEN on 'name' but index is on 'id'
         let pred = between_pred(col("name"), constant_text("A"), constant_text("Z"));
         let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
-        assert!(mode.is_none(), "BETWEEN on non-indexed column should not match");
+        assert!(
+            mode.is_none(),
+            "BETWEEN on non-indexed column should not match"
+        );
     }
 
     #[test]
     fn test_extract_between_varchar_range() {
         let planner = make_planner();
         // name BETWEEN 'Alice' AND 'Charlie' → RangeLookup('Alice', 'Charlie')
-        let pred = between_pred(col("name"), constant_text("Alice"), constant_text("Charlie"));
-        let mode = planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
-        assert!(mode.is_some(), "BETWEEN on indexed VARCHAR column should match");
+        let pred = between_pred(
+            col("name"),
+            constant_text("Alice"),
+            constant_text("Charlie"),
+        );
+        let mode =
+            planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
+        assert!(
+            mode.is_some(),
+            "BETWEEN on indexed VARCHAR column should match"
+        );
         match mode.unwrap() {
             IndexScanMode::RangeLookup(low, high) => {
-                assert_eq!(low, crate::types::value::DataValue::Varchar("Alice".to_string()));
-                assert_eq!(high, crate::types::value::DataValue::Varchar("Charlie".to_string()));
+                assert_eq!(
+                    low,
+                    crate::types::value::DataValue::Varchar("Alice".to_string())
+                );
+                assert_eq!(
+                    high,
+                    crate::types::value::DataValue::Varchar("Charlie".to_string())
+                );
             }
             other => panic!("Expected RangeLookup, got {:?}", other),
         }
@@ -1442,7 +1611,10 @@ mod tests {
         };
         let pred = between_pred(col("age"), dynamic_low, constant_int(100));
         let mode = planner.extract_index_mode_from_predicate(&pred, "age", &DataType::Int);
-        assert!(mode.is_none(), "BETWEEN with dynamic low bound should not match");
+        assert!(
+            mode.is_none(),
+            "BETWEEN with dynamic low bound should not match"
+        );
     }
 
     #[test]
@@ -1473,7 +1645,10 @@ mod tests {
         // id IN (42) → PointLookup(42)
         let pred = inlist_pred(col("id"), vec![constant_int(42)]);
         let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
-        assert!(mode.is_some(), "Single-element IN list on indexed column should match");
+        assert!(
+            mode.is_some(),
+            "Single-element IN list on indexed column should match"
+        );
         match mode.unwrap() {
             IndexScanMode::PointLookup(dv) => {
                 assert_eq!(dv, crate::types::value::DataValue::Int(42));
@@ -1486,13 +1661,15 @@ mod tests {
     fn test_extract_inlist_multi_element_returns_none() {
         let planner = make_planner();
         // id IN (1, 2, 3) → not accelerated, falls through to SeqScan+Filter
-        let pred = inlist_pred(col("id"), vec![
-            constant_int(1),
-            constant_int(2),
-            constant_int(3),
-        ]);
+        let pred = inlist_pred(
+            col("id"),
+            vec![constant_int(1), constant_int(2), constant_int(3)],
+        );
         let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
-        assert!(mode.is_none(), "Multi-element IN list should not be directly accelerated");
+        assert!(
+            mode.is_none(),
+            "Multi-element IN list should not be directly accelerated"
+        );
     }
 
     #[test]
@@ -1509,11 +1686,15 @@ mod tests {
         let planner = make_planner();
         // name IN ('Bob') → PointLookup('Bob')
         let pred = inlist_pred(col("name"), vec![constant_text("Bob")]);
-        let mode = planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
+        let mode =
+            planner.extract_index_mode_from_predicate(&pred, "name", &DataType::Varchar(255));
         assert!(mode.is_some(), "Single-element VARCHAR IN should match");
         match mode.unwrap() {
             IndexScanMode::PointLookup(dv) => {
-                assert_eq!(dv, crate::types::value::DataValue::Varchar("Bob".to_string()));
+                assert_eq!(
+                    dv,
+                    crate::types::value::DataValue::Varchar("Bob".to_string())
+                );
             }
             other => panic!("Expected PointLookup, got {:?}", other),
         }
@@ -1523,12 +1704,12 @@ mod tests {
     fn test_extract_inlist_compound_column_single() {
         let planner = make_planner();
         // users.id IN (100) → PointLookup(100)
-        let pred = inlist_pred(
-            compound(&["users", "id"]),
-            vec![constant_int(100)],
-        );
+        let pred = inlist_pred(compound(&["users", "id"]), vec![constant_int(100)]);
         let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
-        assert!(mode.is_some(), "Single-element IN with compound column should match");
+        assert!(
+            mode.is_some(),
+            "Single-element IN with compound column should match"
+        );
         match mode.unwrap() {
             IndexScanMode::PointLookup(dv) => {
                 assert_eq!(dv, crate::types::value::DataValue::Int(100));
@@ -1543,6 +1724,9 @@ mod tests {
         // id IN (some_column) → single element but not constant → no match
         let pred = inlist_pred(col("id"), vec![col("other")]);
         let mode = planner.extract_index_mode_from_predicate(&pred, "id", &DataType::Int);
-        assert!(mode.is_none(), "IN with non-constant list element should not match");
+        assert!(
+            mode.is_none(),
+            "IN with non-constant list element should not match"
+        );
     }
 }

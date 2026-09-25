@@ -1,9 +1,8 @@
-
-use std::io;
 use std::fs::File;
+use std::io;
 
-use crate::backend::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE};
 use crate::backend::instrumentation::HEAP_METRICS;
+use crate::backend::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page};
 use std::sync::atomic::Ordering;
 
 /// Get the lower pointer (insertion point) from a page header
@@ -15,8 +14,9 @@ pub fn get_lower(page: &Page) -> io::Result<u32> {
         ));
     }
     let lower = u32::from_le_bytes(
-        page.data[0..4].try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid byte slice"))?
+        page.data[0..4]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid byte slice"))?,
     );
     debug_print_page(&format!("get_lower: {} bytes", lower));
     Ok(lower)
@@ -31,8 +31,9 @@ pub fn get_upper(page: &Page) -> io::Result<u32> {
         ));
     }
     let upper = u32::from_le_bytes(
-        page.data[4..8].try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid byte slice"))?
+        page.data[4..8]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid byte slice"))?,
     );
     debug_print_page(&format!("get_upper: {} bytes", upper));
     Ok(upper)
@@ -77,16 +78,18 @@ pub fn get_tuple_count(page: &Page) -> io::Result<u32> {
 
 /// Get free space available in a page (in bytes)
 pub fn get_free_space(page: &Page) -> io::Result<u32> {
-    HEAP_METRICS.page_free_space_calls.fetch_add(1, Ordering::Relaxed);
+    HEAP_METRICS
+        .page_free_space_calls
+        .fetch_add(1, Ordering::Relaxed);
     let lower = get_lower(page)?;
     let upper = get_upper(page)?;
-    
+
     if lower >= upper {
         let free = 0u32;
         debug_print_page(&format!("get_free_space: {} bytes (page full)", free));
         return Ok(free);
     }
-    
+
     let free = upper - lower;
     debug_print_page(&format!("get_free_space: {} bytes available", free));
     Ok(free)
@@ -96,13 +99,13 @@ pub fn get_free_space(page: &Page) -> io::Result<u32> {
 pub fn can_fit_tuple(page: &Page, tuple_size: u32) -> io::Result<bool> {
     let required_space = tuple_size + ITEM_ID_SIZE; // Tuple data + item ID
     let free_space = get_free_space(page)?;
-    
+
     let can_fit = free_space >= required_space;
     debug_print_page(&format!(
         "can_fit_tuple: needs {}, available {}. Result: {}",
         required_space, free_space, can_fit
     ));
-    
+
     Ok(can_fit)
 }
 
@@ -111,13 +114,13 @@ pub fn get_page_count_from_file(file: &mut File) -> io::Result<u32> {
     let metadata = file.metadata()?;
     let file_size = metadata.len() as u32;
     let page_size = 8192u32; // PAGE_SIZE constant
-    
+
     let count = file_size.div_ceil(page_size); // Ceiling division
     debug_print_page(&format!(
         "get_page_count: file_size={}, page_size={}, count={}",
         file_size, page_size, count
     ));
-    
+
     Ok(count)
 }
 
@@ -125,9 +128,12 @@ pub fn get_page_count_from_file(file: &mut File) -> io::Result<u32> {
 pub fn validate_page_header(page: &Page) -> io::Result<()> {
     let lower = get_lower(page)?;
     let upper = get_upper(page)?;
-    
-    debug_print_page(&format!("Validating page header: lower={}, upper={}", lower, upper));
-    
+
+    debug_print_page(&format!(
+        "Validating page header: lower={}, upper={}",
+        lower, upper
+    ));
+
     // Lower should be at least PAGE_HEADER_SIZE
     if lower < PAGE_HEADER_SIZE {
         return Err(io::Error::new(
@@ -135,7 +141,7 @@ pub fn validate_page_header(page: &Page) -> io::Result<()> {
             format!("Invalid lower pointer: {} < {}", lower, PAGE_HEADER_SIZE),
         ));
     }
-    
+
     // Lower should be <= upper
     if lower > upper {
         return Err(io::Error::new(
@@ -143,7 +149,7 @@ pub fn validate_page_header(page: &Page) -> io::Result<()> {
             format!("Invalid page pointers: lower({}) > upper({})", lower, upper),
         ));
     }
-    
+
     // Both should be within page bounds (8192)
     const PAGE_SIZE: u32 = 8192;
     if upper > PAGE_SIZE {
@@ -152,7 +158,7 @@ pub fn validate_page_header(page: &Page) -> io::Result<()> {
             format!("Upper pointer out of bounds: {} > {}", upper, PAGE_SIZE),
         ));
     }
-    
+
     debug_print_page("Page header validation passed");
     Ok(())
 }
@@ -163,12 +169,12 @@ pub fn get_page_stats(page: &Page) -> io::Result<String> {
     let upper = get_upper(page)?;
     let tuple_count = get_tuple_count(page)?;
     let free_space = get_free_space(page)?;
-    
+
     let stats = format!(
         "Lower: {}, Upper: {}, Tuples: {}, Free Space: {} bytes",
         lower, upper, tuple_count, free_space
     );
-    
+
     debug_print_page(&format!("Page stats: {}", stats));
     Ok(stats)
 }
@@ -176,14 +182,14 @@ pub fn get_page_stats(page: &Page) -> io::Result<String> {
 /// Reset a page to initial empty state
 pub fn reset_page(page: &mut Page) -> io::Result<()> {
     debug_print_page("Resetting page to empty state");
-    
+
     const PAGE_HEADER_SIZE_VAL: u32 = 8u32;
     const PAGE_SIZE: u32 = 8192u32;
-    
+
     // Set lower and upper pointers
     set_lower(page, PAGE_HEADER_SIZE_VAL)?;
     set_upper(page, PAGE_SIZE)?;
-    
+
     debug_print_page("Page reset successfully");
     Ok(())
 }
@@ -204,10 +210,10 @@ mod tests {
         let mut page = Page::new();
         let _ = set_lower(&mut page, 16);
         let _ = set_upper(&mut page, 8192);
-        
+
         let lower = get_lower(&page).unwrap();
         let upper = get_upper(&page).unwrap();
-        
+
         assert_eq!(lower, 16);
         assert_eq!(upper, 8192);
     }
@@ -217,7 +223,7 @@ mod tests {
         let mut page = Page::new();
         let _ = set_lower(&mut page, 8);
         let _ = set_upper(&mut page, 8192);
-        
+
         assert!(validate_page_header(&page).is_ok());
     }
 
@@ -226,7 +232,7 @@ mod tests {
         let mut page = Page::new();
         let _ = set_lower(&mut page, 9000);
         let _ = set_upper(&mut page, 8192);
-        
+
         assert!(validate_page_header(&page).is_err());
     }
 }

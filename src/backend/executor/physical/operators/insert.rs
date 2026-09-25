@@ -10,8 +10,8 @@
 //! if any later row fails, those rows are deleted again before the error
 //! propagates.
 
-use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::Expr;
+use super::super::tuple::{ColumnInfo, Tuple};
 use super::PhysicalOperator;
 use crate::backend::error::{RookError, RookResult};
 
@@ -64,9 +64,16 @@ impl InsertOperator {
         let inserted_pointers = Rc::new(RefCell::new(Vec::new()));
         let ptrs_clone = inserted_pointers.clone();
         let inserter: InsertInserter = Box::new(move |vals| {
-            match crate::backend::executor::load_csv::insert_single_tuple_with_location(&cat, &db, &tbl, vals) {
+            match crate::backend::executor::load_csv::insert_single_tuple_with_location(
+                &cat, &db, &tbl, vals,
+            ) {
                 Ok(Some(ptr)) => {
-                    log::info!("[Insert] Inserted tuple into table '{}' at (page={}, slot={})", tbl, ptr.0, ptr.1);
+                    log::info!(
+                        "[Insert] Inserted tuple into table '{}' at (page={}, slot={})",
+                        tbl,
+                        ptr.0,
+                        ptr.1
+                    );
                     ptrs_clone.borrow_mut().push(ptr);
                     Ok(())
                 }
@@ -104,10 +111,10 @@ impl InsertOperator {
 
     fn rollback(&mut self) {
         let ptrs: Vec<(u32, u32)> = self.inserted_pointers.borrow_mut().drain(..).collect();
-        if !ptrs.is_empty() {
-            if let (Some(cat), Some(db), Some(tbl)) = (&self.catalog, &self.db_name, &self.table) {
-                let _ = crate::backend::executor::delete::delete_by_pointers(cat, db, tbl, &ptrs);
-            }
+        if !ptrs.is_empty()
+            && let (Some(cat), Some(db), Some(tbl)) = (&self.catalog, &self.db_name, &self.table)
+        {
+            let _ = crate::backend::executor::delete::delete_by_pointers(cat, db, tbl, &ptrs);
         }
     }
 }
@@ -177,7 +184,6 @@ impl PhysicalOperator for InsertOperator {
     }
 }
 
-
 // ── ValuesOperator ────────────────────────────────────────────────────────────
 
 /// A constant-producing child for `INSERT ... VALUES`.
@@ -193,7 +199,11 @@ pub struct ValuesOperator {
 
 impl ValuesOperator {
     pub fn new(rows: Vec<Vec<Expr>>, schema: Vec<ColumnInfo>) -> Self {
-        Self { rows, schema, pos: 0 }
+        Self {
+            rows,
+            schema,
+            pos: 0,
+        }
     }
 }
 
@@ -228,20 +238,21 @@ impl PhysicalOperator for ValuesOperator {
     }
 }
 
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::value::DataValue;
-    use crate::types::datatype::DataType;
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use rook_ast::logical::{LogicalPlan, LogicalInsert, LogicalTableScan, LogicalProject, ColumnSchema};
     use crate::backend::executor::physical::planner::PhysicalPlanner;
     use crate::catalog::types::Catalog;
+    use crate::types::datatype::DataType;
+    use crate::types::value::DataValue;
+    use rook_ast::logical::{
+        ColumnSchema, LogicalInsert, LogicalPlan, LogicalProject, LogicalTableScan,
+    };
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
 
     /// A mock child operator that yields a fixed set of tuples.
     struct MockChild {
@@ -252,7 +263,11 @@ mod tests {
 
     impl MockChild {
         fn new(tuples: Vec<Tuple>, schema: Vec<ColumnInfo>) -> Self {
-            Self { tuples, pos: 0, schema }
+            Self {
+                tuples,
+                pos: 0,
+                schema,
+            }
         }
     }
 
@@ -287,21 +302,25 @@ mod tests {
 
     fn int_schema() -> Vec<ColumnInfo> {
         vec![
-            ColumnInfo { name: "a".into(), data_type: DataType::Int, table: None },
-            ColumnInfo { name: "b".into(), data_type: DataType::Int, table: None },
+            ColumnInfo {
+                name: "a".into(),
+                data_type: DataType::Int,
+                table: None,
+            },
+            ColumnInfo {
+                name: "b".into(),
+                data_type: DataType::Int,
+                table: None,
+            },
         ]
     }
 
     fn int_tuples(data: Vec<(Option<i32>, Option<i32>)>) -> (Vec<Tuple>, Vec<ColumnInfo>) {
         let schema = int_schema();
-        let tuples = data.into_iter().map(|(a, b)| {
-            Tuple::new(
-                vec![
-                    a.map(DataValue::Int),
-                    b.map(DataValue::Int),
-                ],
-            )
-        }).collect();
+        let tuples = data
+            .into_iter()
+            .map(|(a, b)| Tuple::new(vec![a.map(DataValue::Int), b.map(DataValue::Int)]))
+            .collect();
         (tuples, schema)
     }
 
@@ -313,10 +332,7 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![]);
         let child = MockChild::new(tuples, schema);
 
-        let mut op = InsertOperator::for_test(
-            Box::new(child),
-            Box::new(|_| Ok(())),
-        );
+        let mut op = InsertOperator::for_test(Box::new(child), Box::new(|_| Ok(())));
 
         assert!(op.next().unwrap().is_none());
     }
@@ -332,7 +348,8 @@ mod tests {
         let mut op = InsertOperator::for_test(
             Box::new(child),
             Box::new(move |vals| {
-                ins.borrow_mut().push(vals.iter().map(|s| s.to_string()).collect());
+                ins.borrow_mut()
+                    .push(vals.iter().map(|s| s.to_string()).collect());
                 Ok(())
             }),
         );
@@ -360,7 +377,8 @@ mod tests {
         let mut op = InsertOperator::for_test(
             Box::new(child),
             Box::new(move |vals| {
-                ins.borrow_mut().push(vals.iter().map(|s| s.to_string()).collect());
+                ins.borrow_mut()
+                    .push(vals.iter().map(|s| s.to_string()).collect());
                 Ok(())
             }),
         );
@@ -381,11 +399,7 @@ mod tests {
 
         assert_eq!(
             *inserted.borrow(),
-            vec![
-                vec!["1", "10"],
-                vec!["2", "20"],
-                vec!["3", "30"],
-            ]
+            vec![vec!["1", "10"], vec!["2", "20"], vec!["3", "30"],]
         );
     }
 
@@ -512,10 +526,7 @@ mod tests {
     #[test]
     fn test_insert_operator_reset() {
         // Reset allows re-iterating the child tuples
-        let (tuples, schema) = int_tuples(vec![
-            (Some(1), Some(10)),
-            (Some(2), Some(20)),
-        ]);
+        let (tuples, schema) = int_tuples(vec![(Some(1), Some(10)), (Some(2), Some(20))]);
         let child = MockChild::new(tuples, schema);
 
         let count: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
@@ -552,10 +563,7 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![(Some(1), Some(10))]);
         let child = MockChild::new(tuples, schema.clone());
 
-        let mut op = InsertOperator::for_test(
-            Box::new(child),
-            Box::new(|_| Ok(())),
-        );
+        let mut op = InsertOperator::for_test(Box::new(child), Box::new(|_| Ok(())));
 
         // Clone to avoid borrow conflict with next()
         let schema = op.schema().to_vec();
@@ -583,10 +591,7 @@ mod tests {
         ]);
         let child = MockChild::new(tuples, schema);
 
-        let op = InsertOperator::for_test(
-            Box::new(child),
-            Box::new(|_| Ok(())),
-        );
+        let op = InsertOperator::for_test(Box::new(child), Box::new(|_| Ok(())));
 
         assert_eq!(op.estimate_cardinality(), 4);
     }
@@ -597,10 +602,7 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![]);
         let child = MockChild::new(tuples, schema);
 
-        let op = InsertOperator::for_test(
-            Box::new(child),
-            Box::new(|_| Ok(())),
-        );
+        let op = InsertOperator::for_test(Box::new(child), Box::new(|_| Ok(())));
 
         assert_eq!(op.estimate_cardinality(), 0);
     }
@@ -612,10 +614,7 @@ mod tests {
         let (tuples, schema) = int_tuples(vec![(Some(1), Some(10))]);
         let child = MockChild::new(tuples, schema);
 
-        let op = InsertOperator::for_test(
-            Box::new(child),
-            Box::new(|_| Ok(())),
-        );
+        let op = InsertOperator::for_test(Box::new(child), Box::new(|_| Ok(())));
 
         assert_eq!(op.name(), "Insert");
     }
@@ -642,16 +641,28 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog { databases: HashMap::new() };
+        let catalog = Catalog {
+            databases: HashMap::new(),
+        };
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let result = planner.plan(&plan);
 
-        assert!(result.is_ok(), "Physical planner should produce InsertOperator");
+        assert!(
+            result.is_ok(),
+            "Physical planner should produce InsertOperator"
+        );
         let op = result.unwrap();
         assert_eq!(op.name(), "Insert");
-        assert!(op.schema().is_empty(), "SingleRow child should produce empty schema");
+        assert!(
+            op.schema().is_empty(),
+            "SingleRow child should produce empty schema"
+        );
         // SingleRowOperator.estimate_cardinality() returns 0 by default
-        assert_eq!(op.estimate_cardinality(), 0, "SingleRowOperator returns 0 by default");
+        assert_eq!(
+            op.estimate_cardinality(),
+            0,
+            "SingleRowOperator returns 0 by default"
+        );
     }
 
     #[test]
@@ -672,7 +683,9 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog { databases: HashMap::new() };
+        let catalog = Catalog {
+            databases: HashMap::new(),
+        };
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let result = planner.plan(&plan);
 
@@ -705,7 +718,9 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog { databases: HashMap::new() };
+        let catalog = Catalog {
+            databases: HashMap::new(),
+        };
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let result = planner.plan(&plan);
 
@@ -732,12 +747,17 @@ mod tests {
             values_rows: Vec::new(),
         });
 
-        let catalog = Catalog { databases: HashMap::new() };
+        let catalog = Catalog {
+            databases: HashMap::new(),
+        };
         let planner = PhysicalPlanner::new(catalog, "test_db".to_string());
         let mut op = planner.plan(&plan).unwrap();
 
         // Reset should succeed
         let reset_result = op.reset();
-        assert!(reset_result.is_ok(), "InsertOperator.reset() should succeed");
+        assert!(
+            reset_result.is_ok(),
+            "InsertOperator.reset() should succeed"
+        );
     }
 }

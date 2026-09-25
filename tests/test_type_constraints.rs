@@ -61,18 +61,15 @@ fn varchar_length_prefix_violation_is_rejected() {
 
 #[test]
 fn team_robustness_edge_cases_validation() {
-    
-    assert!(validate_date("2024-02-29").is_ok()); 
-    assert!(validate_date("2026-02-29").is_err()); 
-    assert!(validate_bit("B'101'", 4).is_err()); 
+    assert!(validate_date("2024-02-29").is_ok());
+    assert!(validate_date("2026-02-29").is_err());
+    assert!(validate_bit("B'101'", 4).is_err());
 
-    
     assert!(validate_real("NaN").is_ok());
     assert!(validate_real("-Infinity").is_ok());
     assert!(validate_time("23:59:59.999999").is_ok());
-    assert!(validate_time("23:59:59.1000000").is_err()); 
+    assert!(validate_time("23:59:59.1000000").is_err());
 
-    
     assert!(validate_double("NaN").is_ok());
     assert!(validate_double("Infinity").is_ok());
     assert!(validate_numeric("1234567.89", 8, 2).is_err());

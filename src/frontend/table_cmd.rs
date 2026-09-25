@@ -13,7 +13,7 @@ pub fn show_tables_cmd(catalog: &Catalog, current_db: &Option<String>) {
             return;
         }
     };
-    
+
     show_tables(catalog, db);
 }
 
@@ -77,10 +77,7 @@ pub fn create_table_cmd(
     Ok(())
 }
 
-pub fn show_table_statistics_cmd(
-    catalog: &Catalog,
-    current_db: &Option<String>,
-) -> io::Result<()> {
+pub fn show_table_statistics_cmd(catalog: &Catalog, current_db: &Option<String>) -> io::Result<()> {
     let db_name = match current_db {
         Some(db) => db,
         None => {

@@ -20,10 +20,10 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::buffer_manager::shared_pool;
 use crate::backend::executor::create_index::{index_file_path, load_table_indexes_multi};
+use crate::backend::index::btree::BTree;
 use crate::catalog::Catalog;
 use crate::heap::HeapManager;
-use crate::backend::index::btree::BTree;
-use crate::types::{deserialize_nullable_row, DataType};
+use crate::types::{DataType, deserialize_nullable_row};
 
 /// Summary of one VACUUM run, for reporting and tests.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,10 +47,8 @@ pub fn vacuum_table(
     table_name: &str,
 ) -> Result<VacuumStats, String> {
     // Path-safety before touching the filesystem.
-    crate::backend::name_validation::validate_database_name(db_name)
-        .map_err(|e| e.to_string())?;
-    crate::backend::name_validation::validate_table_name(table_name)
-        .map_err(|e| e.to_string())?;
+    crate::backend::name_validation::validate_database_name(db_name).map_err(|e| e.to_string())?;
+    crate::backend::name_validation::validate_table_name(table_name).map_err(|e| e.to_string())?;
 
     // Table must exist in the catalog.
     catalog
@@ -92,7 +90,11 @@ pub fn vacuum_table(
 
     log::info!(
         "[Vacuum] {}.{} done: {} page(s) compacted, {} dead tuple(s) reclaimed, {} index(es) rebuilt",
-        db_name, table_name, pages_compacted, dead_before, indexes_rebuilt
+        db_name,
+        table_name,
+        pages_compacted,
+        dead_before,
+        indexes_rebuilt
     );
 
     Ok(VacuumStats {
@@ -141,10 +143,17 @@ fn rebuild_indexes(db_name: &str, table_name: &str) -> Result<usize, String> {
             .get(db_name)
             .and_then(|db| db.tables.get(table_name));
         let Some(t) = catalog_table else {
-            return Err(format!("Table '{}.{}' not found in catalog", db_name, table_name));
+            return Err(format!(
+                "Table '{}.{}' not found in catalog",
+                db_name, table_name
+            ));
         };
         for cname in col_names {
-            match t.columns.iter().position(|c| c.name.eq_ignore_ascii_case(cname)) {
+            match t
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(cname))
+            {
                 Some(pos) => {
                     key_types.push(t.columns[pos].data_type.clone());
                     col_positions.push(pos);
@@ -207,7 +216,11 @@ fn rebuild_indexes(db_name: &str, table_name: &str) -> Result<usize, String> {
             .sync()
             .map_err(|e| format!("Failed to sync rebuilt index '{}': {}", idx_name, e))?;
         crate::backend::cache::evict_btree(&idx_path);
-        log::info!("[Vacuum] Rebuilt index '{}' with {} entries", idx_name, entries);
+        log::info!(
+            "[Vacuum] Rebuilt index '{}' with {} entries",
+            idx_name,
+            entries
+        );
         rebuilt += 1;
     }
 

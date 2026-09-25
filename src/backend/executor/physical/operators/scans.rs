@@ -1,12 +1,11 @@
-
 use crate::backend::heap::heap_manager::{HeapManager, HeapScanIterator};
 use crate::backend::index::btree::BTree;
 
-use super::super::tuple::{Tuple, ColumnInfo};
+use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
 
-use crate::types::value::DataValue;
 use crate::types::datatype::DataType;
+use crate::types::value::DataValue;
 
 // ── SeqScan Operator ──────────────────────────────────────────────────────────
 
@@ -36,10 +35,7 @@ impl SeqScanOperator {
     /// `heap_manager` must be already opened/created for the target table.
     /// `column_info` should contain the table's column metadata (from the catalog).
     /// The DataTypes in `column_info` are used both for deserialisation and labeling.
-    pub fn new(
-        heap_manager: HeapManager,
-        column_info: Vec<ColumnInfo>,
-    ) -> Self {
+    pub fn new(heap_manager: HeapManager, column_info: Vec<ColumnInfo>) -> Self {
         let schema_types: Vec<DataType> = column_info.iter().map(|c| c.data_type.clone()).collect();
         let identity: Vec<usize> = (0..column_info.len()).collect();
         let scan_iter = heap_manager.scan();
@@ -91,17 +87,26 @@ impl PhysicalOperator for SeqScanOperator {
         match self.scan_iter.next() {
             Some(Ok((page_id, slot_id, raw_bytes))) => {
                 // Deserialise the raw tuple bytes using PHYSICAL column schema
-                let phys_values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
-                    .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
+                let phys_values =
+                    crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
+                        .map_err(|e| {
+                            RookError::Internal(format!("Failed to deserialise tuple: {}", e))
+                        })?;
 
                 // Reorder values from physical order to view column order
-                let values: Vec<Option<DataValue>> = if self.column_mapping.len() == phys_values.len()
-                    && self.column_mapping.iter().enumerate().all(|(i, &idx)| idx == i)
+                let values: Vec<Option<DataValue>> = if self.column_mapping.len()
+                    == phys_values.len()
+                    && self
+                        .column_mapping
+                        .iter()
+                        .enumerate()
+                        .all(|(i, &idx)| idx == i)
                 {
                     // Identity mapping — skip reordering for efficiency
                     phys_values
                 } else {
-                    self.column_mapping.iter()
+                    self.column_mapping
+                        .iter()
                         .map(|&phys_idx| phys_values.get(phys_idx).cloned().unwrap_or(None))
                         .collect()
                 };
@@ -123,18 +128,26 @@ impl PhysicalOperator for SeqScanOperator {
         }
 
         let is_identity = self.column_mapping.len() == self.schema_types.len()
-            && self.column_mapping.iter().enumerate().all(|(i, &idx)| idx == i);
+            && self
+                .column_mapping
+                .iter()
+                .enumerate()
+                .all(|(i, &idx)| idx == i);
 
         while batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
             match self.scan_iter.next() {
                 Some(Ok((page_id, slot_id, raw_bytes))) => {
-                    let phys_values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
-                        .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
+                    let phys_values =
+                        crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
+                            .map_err(|e| {
+                                RookError::Internal(format!("Failed to deserialise tuple: {}", e))
+                            })?;
 
                     let values = if is_identity {
                         phys_values
                     } else {
-                        self.column_mapping.iter()
+                        self.column_mapping
+                            .iter()
                             .map(|&phys_idx| phys_values.get(phys_idx).cloned().unwrap_or(None))
                             .collect()
                     };
@@ -258,31 +271,34 @@ impl IndexScanOperator {
                 // ALL matching entries, not just the first one found by search().
                 // This handles non-unique indexes where multiple rows share the
                 // same key value (e.g., multiple employees in the same department).
-                let tids = self.btree.search_range(key, key)
-                    .map_err(|e| RookError::Internal(format!("Index scan point lookup error: {}", e)))?;
+                let tids = self.btree.search_range(key, key).map_err(|e| {
+                    RookError::Internal(format!("Index scan point lookup error: {}", e))
+                })?;
                 self.results = tids;
             }
             IndexScanMode::CompositePointLookup(keys) => {
-                let tids = self.btree.search_range_keys(keys, keys)
-                    .map_err(|e| RookError::Internal(format!("Index scan composite point lookup error: {}", e)))?;
+                let tids = self.btree.search_range_keys(keys, keys).map_err(|e| {
+                    RookError::Internal(format!("Index scan composite point lookup error: {}", e))
+                })?;
                 self.results = tids;
             }
             IndexScanMode::RangeLookup(low, high) => {
-                let tids = self.btree.search_range(low, high)
-                    .map_err(|e| RookError::Internal(format!("Index scan range lookup error: {}", e)))?;
+                let tids = self.btree.search_range(low, high).map_err(|e| {
+                    RookError::Internal(format!("Index scan range lookup error: {}", e))
+                })?;
                 self.results = tids;
             }
             IndexScanMode::FullScan => {
-                let tids = self.btree.scan_all()
-                    .map_err(|e| RookError::Internal(format!("Index scan full scan error: {}", e)))?;
-                let mut tid_set: std::collections::HashSet<(u32, u32)> = tids.iter().cloned().collect();
+                let tids = self.btree.scan_all().map_err(|e| {
+                    RookError::Internal(format!("Index scan full scan error: {}", e))
+                })?;
+                let mut tid_set: std::collections::HashSet<(u32, u32)> =
+                    tids.iter().cloned().collect();
                 let mut all_results = tids;
-                for item in self.heap_manager.scan() {
-                    if let Ok((page_id, slot_id, _)) = item {
-                        if !tid_set.contains(&(page_id, slot_id)) {
-                            all_results.push((page_id, slot_id));
-                            tid_set.insert((page_id, slot_id));
-                        }
+                for (page_id, slot_id, _) in self.heap_manager.scan().flatten() {
+                    if !tid_set.contains(&(page_id, slot_id)) {
+                        all_results.push((page_id, slot_id));
+                        tid_set.insert((page_id, slot_id));
                     }
                 }
                 self.results = all_results;
@@ -296,8 +312,12 @@ impl IndexScanOperator {
     /// Propagates the heap location metadata so DML operations (UPDATE/DELETE)
     /// can identify which physical row to modify.
     fn fetch_tuple(&mut self, page_id: u32, slot_id: u32) -> RookResult<Tuple> {
-        let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id)
-            .map_err(|e| RookError::Internal(format!("Failed to fetch heap tuple (page={}, slot={}): {}", page_id, slot_id, e)))?;
+        let raw_bytes = self.heap_manager.get_tuple(page_id, slot_id).map_err(|e| {
+            RookError::Internal(format!(
+                "Failed to fetch heap tuple (page={}, slot={}): {}",
+                page_id, slot_id, e
+            ))
+        })?;
         let values = crate::types::deserialize_nullable_row(&self.schema_types, &raw_bytes)
             .map_err(|e| RookError::Internal(format!("Failed to deserialise tuple: {}", e)))?;
         Ok(Tuple::new_with_location(values, page_id, slot_id))
@@ -376,4 +396,3 @@ impl PhysicalOperator for IndexScanOperator {
         }
     }
 }
-

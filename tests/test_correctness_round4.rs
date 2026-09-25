@@ -35,9 +35,7 @@ use rook_ast::QueryPlan;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::create_index::create_index;
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
@@ -102,7 +100,11 @@ fn fmt_rows(tuples: &[Tuple]) -> Vec<Vec<String>> {
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -134,7 +136,10 @@ fn vacuum_stale_btree_handle_loses_new_rows() {
         &mut catalog,
         "t4db",
         "t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -144,18 +149,13 @@ fn vacuum_stale_btree_handle_loses_new_rows() {
     }
     assert!(insert_single_tuple(&catalog, "t4db", "t", &["7", "NULL"]).unwrap());
 
-    create_index(&catalog, "t4db", "t", "idx_v", &["v".to_string()])
-        .expect("create index");
+    create_index(&catalog, "t4db", "t", "idx_v", &["v".to_string()]).expect("create index");
 
     // Delete two rows → dead slots → vacuum has real work to do.
     // Pointers are (page_id, slot_id); first live rows live on page 1.
-    let deleted = storage_manager::executor::delete_by_pointers(
-        &catalog,
-        "t4db",
-        "t",
-        &[(1, 0), (1, 1)],
-    )
-    .expect("delete failed");
+    let deleted =
+        storage_manager::executor::delete_by_pointers(&catalog, "t4db", "t", &[(1, 0), (1, 1)])
+            .expect("delete failed");
     assert_eq!(deleted.deleted_count, 2, "two rows must be soft-deleted");
 
     // VACUUM: compacts pages (renumbering slots) and rebuilds idx_v from scratch.
@@ -174,7 +174,12 @@ fn vacuum_stale_btree_handle_loses_new_rows() {
     let tuples = run_select(&catalog, "t4db", "SELECT id FROM t WHERE v = 100");
     let mut ids: Vec<String> = tuples
         .iter()
-        .map(|t| t.values[0].as_ref().map(|d| format!("{}", d)).unwrap_or_default())
+        .map(|t| {
+            t.values[0]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_default()
+        })
         .collect();
     ids.sort();
 
@@ -212,7 +217,10 @@ fn order_by_control_sorted_output_when_all_keys_non_null() {
         &mut catalog,
         "t4db",
         "t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -221,17 +229,26 @@ fn order_by_control_sorted_output_when_all_keys_non_null() {
     assert!(insert_single_tuple(&catalog, "t4db", "t", &["2", "10"]).unwrap());
     assert!(insert_single_tuple(&catalog, "t4db", "t", &["3", "20"]).unwrap());
 
-    create_index(&catalog, "t4db", "t", "idx_v", &["v".to_string()])
-        .expect("create index");
+    create_index(&catalog, "t4db", "t", "idx_v", &["v".to_string()]).expect("create index");
 
     // ORDER BY v: FullScan claims ordering, planner elides the sort. With
     // all keys non-NULL the claim is actually true → passes.
     let tuples = run_select(&catalog, "t4db", "SELECT id, v FROM t ORDER BY v");
     let vs: Vec<String> = tuples
         .iter()
-        .map(|t| t.values[1].as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+        .map(|t| {
+            t.values[1]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_else(|| "NULL".into())
+        })
         .collect();
-    assert_eq!(vs, vec!["10", "20", "30"], "control: expected sorted v; got {:?}", vs);
+    assert_eq!(
+        vs,
+        vec!["10", "20", "30"],
+        "control: expected sorted v; got {:?}",
+        vs
+    );
 }
 
 #[test]
@@ -246,7 +263,10 @@ fn order_by_with_null_key_row_violates_claimed_ordering() {
         &mut catalog,
         "t4db",
         "t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -256,8 +276,7 @@ fn order_by_with_null_key_row_violates_claimed_ordering() {
     // NULL in the indexed column → appended after the index-ordered rows.
     assert!(insert_single_tuple(&catalog, "t4db", "t", &["3", "NULL"]).unwrap());
 
-    create_index(&catalog, "t4db", "t", "idx_v", &["v".to_string()])
-        .expect("create index");
+    create_index(&catalog, "t4db", "t", "idx_v", &["v".to_string()]).expect("create index");
 
     // ORDER BY v: FullScan claims ordering on v, planner elides the sort.
     // The engine's own sort comparator puts NULL FIRST on ASC, so the
@@ -266,7 +285,12 @@ fn order_by_with_null_key_row_violates_claimed_ordering() {
     let tuples = run_select(&catalog, "t4db", "SELECT id, v FROM t ORDER BY v");
     let vs: Vec<String> = tuples
         .iter()
-        .map(|t| t.values[1].as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+        .map(|t| {
+            t.values[1]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_else(|| "NULL".into())
+        })
         .collect();
     assert_eq!(
         vs,
@@ -291,7 +315,10 @@ fn order_by_no_index_control_nulls_first() {
         &mut catalog,
         "t4db",
         "t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -304,7 +331,12 @@ fn order_by_no_index_control_nulls_first() {
     let tuples = run_select(&catalog, "t4db", "SELECT id, v FROM t ORDER BY v");
     let vs: Vec<String> = tuples
         .iter()
-        .map(|t| t.values[1].as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+        .map(|t| {
+            t.values[1]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_else(|| "NULL".into())
+        })
         .collect();
     assert_eq!(
         vs,
@@ -332,7 +364,10 @@ fn update_set_literal_with_arith_char_survives_end_to_end() {
         &mut catalog,
         "t4db",
         "t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Varchar(50), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Varchar(50), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -342,8 +377,8 @@ fn update_set_literal_with_arith_char_survives_end_to_end() {
     use storage_manager::executor::{parse_set_clause, update_by_pointers};
     let assignments = parse_set_clause("v = 'n-5'").expect("parse set");
 
-    let result = update_by_pointers(&catalog, "t4db", "t", &[(1, 0)], &assignments)
-        .expect("update failed");
+    let result =
+        update_by_pointers(&catalog, "t4db", "t", &[(1, 0)], &assignments).expect("update failed");
 
     // The row must now contain exactly the literal text `n-5`, NOT NULL and
     // NOT a partial arithmetic evaluation.
@@ -370,7 +405,10 @@ fn control_delete_pointers_target_expected_rows() {
         &mut catalog,
         "t4db",
         "t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -379,22 +417,28 @@ fn control_delete_pointers_target_expected_rows() {
         assert!(insert_single_tuple(&catalog, "t4db", "t", &[&i.to_string(), "100"]).unwrap());
     }
 
-    let deleted = storage_manager::executor::delete_by_pointers(
-        &catalog,
-        "t4db",
-        "t",
-        &[(1, 0), (1, 1)],
-    )
-    .expect("delete failed");
+    let deleted =
+        storage_manager::executor::delete_by_pointers(&catalog, "t4db", "t", &[(1, 0), (1, 1)])
+            .expect("delete failed");
 
     assert_eq!(deleted.deleted_count, 2, "two rows must be deleted");
     let tuples = run_select(&catalog, "t4db", "SELECT id FROM t");
     let mut ids: Vec<String> = tuples
         .iter()
-        .map(|t| t.values[0].as_ref().map(|d| format!("{}", d)).unwrap_or_default())
+        .map(|t| {
+            t.values[0]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_default()
+        })
         .collect();
     ids.sort();
-    assert_eq!(ids, vec!["3", "4", "5", "6"], "deleted wrong rows: {:?}", ids);
+    assert_eq!(
+        ids,
+        vec!["3", "4", "5", "6"],
+        "deleted wrong rows: {:?}",
+        ids
+    );
 }
 
 // ── Finding N: get_tuple / delete_tuple pin-leak on error paths ─────────────
@@ -409,7 +453,8 @@ fn get_tuple_error_paths_do_not_leak_buffer_pool_pins() {
     let _ws = TestWorkspace::new("pin_leak");
 
     let heap_path = _ws.path.join("base").join("test_pins.dat");
-    let mut manager = storage_manager::backend::heap::heap_manager::HeapManager::create(heap_path).expect("create heap");
+    let mut manager = storage_manager::backend::heap::heap_manager::HeapManager::create(heap_path)
+        .expect("create heap");
 
     // Insert 1 tuple onto page 1
     let (page_id, slot_id) = manager.insert_tuple(b"hello world").expect("insert tuple");
@@ -422,20 +467,33 @@ fn get_tuple_error_paths_do_not_leak_buffer_pool_pins() {
     // Out-of-bounds slot lookup -> returns error, but MUST NOT leak pin
     let err = manager.get_tuple(page_id, 999);
     assert!(err.is_err());
-    assert_eq!(manager.pool.lock().unwrap().pinned_count(), 0, "out-of-bounds slot leaked pin");
+    assert_eq!(
+        manager.pool.lock().unwrap().pinned_count(),
+        0,
+        "out-of-bounds slot leaked pin"
+    );
 
     // Delete the tuple
-    manager.delete_tuple(page_id, slot_id).expect("delete tuple");
+    manager
+        .delete_tuple(page_id, slot_id)
+        .expect("delete tuple");
     assert_eq!(manager.pool.lock().unwrap().pinned_count(), 0);
 
     // Lookup on deleted tuple -> returns NotFound error, but MUST NOT leak pin
     let err = manager.get_tuple(page_id, slot_id);
     assert!(err.is_err());
-    assert_eq!(manager.pool.lock().unwrap().pinned_count(), 0, "deleted slot lookup leaked pin");
+    assert_eq!(
+        manager.pool.lock().unwrap().pinned_count(),
+        0,
+        "deleted slot lookup leaked pin"
+    );
 
     // Out-of-bounds slot delete -> returns error, but MUST NOT leak pin
     let err = manager.delete_tuple(page_id, 999);
     assert!(err.is_err());
-    assert_eq!(manager.pool.lock().unwrap().pinned_count(), 0, "bad slot delete leaked pin");
+    assert_eq!(
+        manager.pool.lock().unwrap().pinned_count(),
+        0,
+        "bad slot delete leaked pin"
+    );
 }
-

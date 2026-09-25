@@ -130,7 +130,11 @@ fn try_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect())
@@ -142,7 +146,10 @@ fn setup_sc(db: &str, table: &str, rows: &[&[&str]]) {
     make_table(
         db,
         table,
-        vec![col("n", DataType::Int, true), col("s", DataType::Varchar(20), true)],
+        vec![
+            col("n", DataType::Int, true),
+            col("s", DataType::Varchar(20), true),
+        ],
     );
     for row in rows {
         insert(db, table, row);
@@ -162,7 +169,11 @@ fn w_case_when_with_comparison_condition_parses_and_evaluates() {
     // Control: the same comparison in WHERE works (convert_predicate path).
     let control = try_select(&catalog, "db14w", "SELECT COUNT(*) FROM t WHERE n > 10")
         .expect("control: WHERE comparison works");
-    assert_eq!(control, vec![vec!["1".to_string()]], "control: WHERE comparison");
+    assert_eq!(
+        control,
+        vec![vec!["1".to_string()]],
+        "control: WHERE comparison"
+    );
 
     // CASE with a comparison condition must parse and evaluate.
     let result = try_select(
@@ -190,7 +201,11 @@ fn w2_case_when_constant_condition_parses_too() {
     setup_sc("db14w2", "t", &[&["5", "'a'"]]);
     let catalog = load_catalog();
 
-    let result = try_select(&catalog, "db14w2", "SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END FROM t");
+    let result = try_select(
+        &catalog,
+        "db14w2",
+        "SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END FROM t",
+    );
     assert_eq!(
         result,
         Ok(vec![vec!["1".to_string()]]),
@@ -210,14 +225,22 @@ fn x_cast_fractional_double_to_int_truncates() {
 
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db14x"), "create db");
-    make_table("db14x", "t", vec![col("x", DataType::DoublePrecision, true)]);
+    make_table(
+        "db14x",
+        "t",
+        vec![col("x", DataType::DoublePrecision, true)],
+    );
     insert("db14x", "t", &["2.9"]);
     let catalog = load_catalog();
 
     // Control: CAST in the other direction works.
     let widen = try_select(&catalog, "db14x", "SELECT CAST(x AS NUMERIC(8,2)) FROM t")
         .expect("control: widen cast works");
-    assert_eq!(widen, vec![vec!["2.90".to_string()]], "control: DOUBLE→NUMERIC cast");
+    assert_eq!(
+        widen,
+        vec![vec!["2.90".to_string()]],
+        "control: DOUBLE→NUMERIC cast"
+    );
 
     let result = try_select(&catalog, "db14x", "SELECT CAST(x AS INT) FROM t");
     assert_eq!(
@@ -237,7 +260,11 @@ fn x2_cast_negative_fractional_double_to_int_truncates_toward_zero() {
 
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db14x2"), "create db");
-    make_table("db14x2", "t", vec![col("x", DataType::DoublePrecision, true)]);
+    make_table(
+        "db14x2",
+        "t",
+        vec![col("x", DataType::DoublePrecision, true)],
+    );
     insert("db14x2", "t", &["-2.9"]);
     let catalog = load_catalog();
 
@@ -258,26 +285,41 @@ fn y_order_by_positional_constant_sorts_by_output_column() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let _ws = TestWorkspace::new("y_order_pos");
 
-    setup_sc(
-        "db14y", "t",
-        &[&["3", "'c'"], &["1", "'a'"], &["2", "'b'"]],
-    );
+    setup_sc("db14y", "t", &[&["3", "'c'"], &["1", "'a'"], &["2", "'b'"]]);
     let catalog = load_catalog();
 
     // Control: column-name and expression forms both sort.
-    let by_name = try_select(&catalog, "db14y", "SELECT n FROM t ORDER BY n")
-        .expect("control: ORDER BY n");
-    assert_eq!(by_name, vec![vec!["1".to_string()], vec!["2".to_string()], vec!["3".to_string()]]);
+    let by_name =
+        try_select(&catalog, "db14y", "SELECT n FROM t ORDER BY n").expect("control: ORDER BY n");
+    assert_eq!(
+        by_name,
+        vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()]
+        ]
+    );
 
     let by_expr = try_select(&catalog, "db14y", "SELECT n FROM t ORDER BY n + 0")
         .expect("control: ORDER BY n + 0");
-    assert_eq!(by_expr, vec![vec!["1".to_string()], vec!["2".to_string()], vec!["3".to_string()]]);
+    assert_eq!(
+        by_expr,
+        vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()]
+        ]
+    );
 
     // Positional form: ORDER BY 1 == ORDER BY (the 1st output column).
     let positional = try_select(&catalog, "db14y", "SELECT n FROM t ORDER BY 1");
     assert_eq!(
         positional,
-        Ok(vec![vec!["1".to_string()], vec!["2".to_string()], vec!["3".to_string()]]),
+        Ok(vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()]
+        ]),
         "BUG Y CONFIRMED: `SELECT n FROM t ORDER BY 1` returned {:?} — the \
          constant 1 is projected as a hidden __sort_col_0 with value 1 for \
          every row, so the sort is a stable no-op and rows keep scan order \
@@ -299,7 +341,11 @@ fn z_string_concat_operator_parses_and_concatenates() {
     // Control: CONCAT() function works.
     let func = try_select(&catalog, "db14z", "SELECT CONCAT(s, 'x') FROM t")
         .expect("control: CONCAT() works");
-    assert_eq!(func, vec![vec!["'abx'".to_string()]], "control: CONCAT() function");
+    assert_eq!(
+        func,
+        vec![vec!["'abx'".to_string()]],
+        "control: CONCAT() function"
+    );
 
     let op = try_select(&catalog, "db14z", "SELECT s || 'x' FROM t");
     assert_eq!(
@@ -322,7 +368,11 @@ fn x3_non_fractional_and_string_int_casts_still_work() {
 
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db14x3"));
-    make_table("db14x3", "t", vec![col("x", DataType::DoublePrecision, true)]);
+    make_table(
+        "db14x3",
+        "t",
+        vec![col("x", DataType::DoublePrecision, true)],
+    );
     insert("db14x3", "t", &["100.0"]);
     let catalog = load_catalog();
 
@@ -346,24 +396,51 @@ fn y2_limit_offset_and_in_still_work() {
     let _ws = TestWorkspace::new("y2_limit");
 
     setup_sc(
-        "db14y2", "t",
-        &[&["3", "'c'"], &["1", "'a'"], &["2", "'b'"], &["5", "'e'"], &["4", "'d'"]],
+        "db14y2",
+        "t",
+        &[
+            &["3", "'c'"],
+            &["1", "'a'"],
+            &["2", "'b'"],
+            &["5", "'e'"],
+            &["4", "'d'"],
+        ],
     );
     let catalog = load_catalog();
 
-    let limit = try_select(&catalog, "db14y2", "SELECT n FROM t ORDER BY n LIMIT 2 OFFSET 1")
-        .expect("limit/offset");
+    let limit = try_select(
+        &catalog,
+        "db14y2",
+        "SELECT n FROM t ORDER BY n LIMIT 2 OFFSET 1",
+    )
+    .expect("limit/offset");
     assert_eq!(limit, vec![vec!["2".to_string()], vec!["3".to_string()]]);
 
-    let in_list = try_select(&catalog, "db14y2", "SELECT COUNT(*) FROM t WHERE n IN (1, 2, 3)")
-        .expect("IN list");
+    let in_list = try_select(
+        &catalog,
+        "db14y2",
+        "SELECT COUNT(*) FROM t WHERE n IN (1, 2, 3)",
+    )
+    .expect("IN list");
     assert_eq!(in_list, vec![vec!["3".to_string()]]);
 
-    let between = try_select(&catalog, "db14y2", "SELECT COUNT(*) FROM t WHERE n BETWEEN 2 AND 4")
-        .expect("BETWEEN");
+    let between = try_select(
+        &catalog,
+        "db14y2",
+        "SELECT COUNT(*) FROM t WHERE n BETWEEN 2 AND 4",
+    )
+    .expect("BETWEEN");
     assert_eq!(between, vec![vec!["3".to_string()]]);
 
-    let not_in_null = try_select(&catalog, "db14y2", "SELECT COUNT(*) FROM t WHERE n NOT IN (1, NULL)")
-        .expect("NOT IN with NULL");
-    assert_eq!(not_in_null, vec![vec!["0".to_string()]], "guard: three-valued NOT IN");
+    let not_in_null = try_select(
+        &catalog,
+        "db14y2",
+        "SELECT COUNT(*) FROM t WHERE n NOT IN (1, NULL)",
+    )
+    .expect("NOT IN with NULL");
+    assert_eq!(
+        not_in_null,
+        vec![vec!["0".to_string()]],
+        "guard: three-valued NOT IN"
+    );
 }

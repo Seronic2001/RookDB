@@ -18,16 +18,15 @@ use std::path::PathBuf;
 use crate::catalog::types::{Catalog, Column, Constraints, Database, Table};
 use crate::types::DataType;
 
-
 use save::{populate_system_tables, strip_check_wrapper};
 
+mod info_schema;
 mod metadata;
 mod save;
-mod info_schema;
 
+pub use info_schema::*;
 pub use metadata::*;
 pub use save::*;
-pub use info_schema::*;
 
 pub(crate) const SYS_DIR: &str = crate::layout::SYSTEM_DIR;
 pub(crate) fn sys_path(table: &str) -> PathBuf {
@@ -304,7 +303,9 @@ pub fn load_catalog_from_system() -> Catalog {
                     Some(Some(crate::types::DataValue::Char(s))) => s.clone(),
                     _ => continue,
                 };
-                let col_type = col_type_str.parse::<DataType>().unwrap_or(DataType::Varchar(255));
+                let col_type = col_type_str
+                    .parse::<DataType>()
+                    .unwrap_or(DataType::Varchar(255));
                 let col_nullable = match &col_row.get(5) {
                     Some(Some(crate::types::DataValue::Bool(v))) => *v,
                     _ => true,
@@ -357,10 +358,8 @@ pub fn load_catalog_from_system() -> Catalog {
                             }
                         } else if constr_type.contains("NOT NULL") {
                             constraints.not_null = true;
-                        } else if constr_type == "UNIQUE" {
-                            if !columns_field.contains(',') {
-                                constraints.unique = true;
-                            }
+                        } else if constr_type == "UNIQUE" && !columns_field.contains(',') {
+                            constraints.unique = true;
                         }
                     }
                 }
@@ -403,17 +402,21 @@ pub fn load_catalog_from_system() -> Catalog {
                         .position(|(_, c)| expr.contains(&c.name))
                         .unwrap_or(0);
                     if let Some((_, col)) = col_with_ordinals.get_mut(owner)
-                        && col.constraints.check.is_none() {
-                            col.constraints.check = Some(expr);
-                        }
+                        && col.constraints.check.is_none()
+                    {
+                        col.constraints.check = Some(expr);
+                    }
                 }
             }
 
             let table_cols: Vec<Column> = col_with_ordinals.into_iter().map(|(_, c)| c).collect();
 
-            database
-                .tables
-                .insert(tbl_name, Table { columns: table_cols });
+            database.tables.insert(
+                tbl_name,
+                Table {
+                    columns: table_cols,
+                },
+            );
         }
 
         // Load views for this database
@@ -435,9 +438,12 @@ pub fn load_catalog_from_system() -> Catalog {
                 Some(Some(crate::types::DataValue::Char(q))) => q,
                 _ => continue,
             };
-            database.views.insert(view_name.clone(), crate::catalog::types::ViewDef {
-                query_json: view_query_json.clone(),
-            });
+            database.views.insert(
+                view_name.clone(),
+                crate::catalog::types::ViewDef {
+                    query_json: view_query_json.clone(),
+                },
+            );
         }
 
         catalog.databases.insert(db_name, database);
@@ -449,46 +455,58 @@ pub fn load_catalog_from_system() -> Catalog {
 pub fn resolve_table_id(db_name: &str, table_name: &str) -> std::io::Result<(i32, i32)> {
     let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let db_id = db_rows.iter().find_map(|row| {
-        let name = match row.get(1) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(db_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let db_id = db_rows
+        .iter()
+        .find_map(|row| {
+            let name = match row.get(1) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(db_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Database '{}' not found in sys_databases", db_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Database '{}' not found in sys_databases", db_name),
+            )
+        })?;
 
     let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let table_id = tbl_rows.iter().find_map(|row| {
-        let tbl_db_id = match row.get(1) {
-            Some(Some(crate::types::DataValue::Int(id))) => *id,
-            _ => return None,
-        };
-        if tbl_db_id != db_id {
-            return None;
-        }
-        let name = match row.get(2) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(table_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let table_id = tbl_rows
+        .iter()
+        .find_map(|row| {
+            let tbl_db_id = match row.get(1) {
+                Some(Some(crate::types::DataValue::Int(id))) => *id,
+                _ => return None,
+            };
+            if tbl_db_id != db_id {
+                return None;
+            }
+            let name = match row.get(2) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(table_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Table '{}.{}' not found in sys_tables", db_name, table_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
+            )
+        })?;
 
     Ok((table_id, db_id))
 }
@@ -509,7 +527,14 @@ pub fn system_tables_exist() -> bool {
 fn create_system_table_files() {
     let _ = std::fs::create_dir_all(SYS_DIR);
 
-    for name in &["databases", "tables", "columns", "constraints", "indexes", "views"] {
+    for name in &[
+        "databases",
+        "tables",
+        "columns",
+        "constraints",
+        "indexes",
+        "views",
+    ] {
         let path = sys_path(name);
         if !path.exists() {
             match crate::backend::heap::HeapManager::create(path.clone()) {
@@ -519,7 +544,11 @@ fn create_system_table_files() {
                     }
                 }
                 Err(e) => {
-                    log::error!("[SystemCatalog] Failed to create system table {}: {}", name, e);
+                    log::error!(
+                        "[SystemCatalog] Failed to create system table {}: {}",
+                        name,
+                        e
+                    );
                 }
             }
         }
@@ -532,7 +561,10 @@ pub fn ensure_system_tables() {
     create_system_table_files();
 }
 /// Scan all rows from a system table and return decoded values.
-fn scan_system_table(name: &str, schema: &[DataType]) -> Result<Vec<Vec<Option<crate::types::DataValue>>>, String> {
+fn scan_system_table(
+    name: &str,
+    schema: &[DataType],
+) -> Result<Vec<Vec<Option<crate::types::DataValue>>>, String> {
     let path = sys_path(name);
     if !path.exists() {
         return Ok(Vec::new());

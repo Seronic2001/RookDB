@@ -9,13 +9,12 @@
 
 mod common;
 
-
 use rook_ast::{QueryPlan, SelectPlan};
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
@@ -71,15 +70,12 @@ fn run_select(catalog: &Catalog, db: &str, sql: &str) -> Vec<Vec<String>> {
 
 fn run_select_plan(catalog: &Catalog, db: &str, select: &SelectPlan) -> Vec<Vec<String>> {
     // The SelectPlan is re-wrapped in a QueryPlan for the logical planner.
-    let logical = storage_manager::planner::plan_query(
-        &QueryPlan::Select(select.clone()),
-        catalog,
-        db,
-    )
-    .expect("logical planning failed");
+    let logical =
+        storage_manager::planner::plan_query(&QueryPlan::Select(select.clone()), catalog, db)
+            .expect("logical planning failed");
 
-    let tuples: Vec<Tuple> = execute_plan_collect(&logical, catalog, db)
-        .expect("physical execution failed");
+    let tuples: Vec<Tuple> =
+        execute_plan_collect(&logical, catalog, db).expect("physical execution failed");
 
     tuples
         .iter()
@@ -205,8 +201,11 @@ fn distinct_with_limit_and_offset() {
         "emp_db",
         "SELECT DISTINCT dept FROM employees ORDER BY dept LIMIT 2 OFFSET 1",
     );
-    assert_eq!(out.len(), 2, "LIMIT 2 OFFSET 1 on 3 distinct departments must return 2 rows");
+    assert_eq!(
+        out.len(),
+        2,
+        "LIMIT 2 OFFSET 1 on 3 distinct departments must return 2 rows"
+    );
     assert_eq!(out[0][0], "'hr'");
     assert_eq!(out[1][0], "'sales'");
 }
-

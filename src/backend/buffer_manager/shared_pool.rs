@@ -66,7 +66,9 @@ fn canonical_key(path: &Path) -> PathBuf {
 }
 
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
-    let mut reg = registry().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut reg = registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut reg)
 }
 

@@ -293,19 +293,21 @@ impl Comparable for DataValue {
 
             // Cross-type temporal: DATE ↔ TIMESTAMP (promote Date to midnight Timestamp)
             (DataValue::Date(a), DataValue::Timestamp(b)) => {
-                let midnight = a.and_hms_opt(0, 0, 0)
-                    .ok_or_else(|| ComparisonError::TypeMismatch {
-                        left: "DATE".to_string(),
-                        right: "TIMESTAMP".to_string(),
-                    })?;
+                let midnight =
+                    a.and_hms_opt(0, 0, 0)
+                        .ok_or_else(|| ComparisonError::TypeMismatch {
+                            left: "DATE".to_string(),
+                            right: "TIMESTAMP".to_string(),
+                        })?;
                 Ok(midnight.cmp(b))
             }
             (DataValue::Timestamp(a), DataValue::Date(b)) => {
-                let midnight = b.and_hms_opt(0, 0, 0)
-                    .ok_or_else(|| ComparisonError::TypeMismatch {
-                        left: "TIMESTAMP".to_string(),
-                        right: "DATE".to_string(),
-                    })?;
+                let midnight =
+                    b.and_hms_opt(0, 0, 0)
+                        .ok_or_else(|| ComparisonError::TypeMismatch {
+                            left: "TIMESTAMP".to_string(),
+                            right: "DATE".to_string(),
+                        })?;
                 Ok(a.cmp(&midnight))
             }
 
@@ -314,25 +316,32 @@ impl Comparable for DataValue {
             (DataValue::Timestamp(a), DataValue::Time(b)) => Ok(a.time().cmp(b)),
 
             // Cross-type temporal: DATE ↔ VARCHAR/CHAR
-            (DataValue::Date(a), DataValue::Varchar(s)) | (DataValue::Date(a), DataValue::Char(s)) => {
-                let parsed = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
-                    .map_err(|_| ComparisonError::TypeMismatch {
-                        left: "DATE".to_string(),
-                        right: "VARCHAR".to_string(),
+            (DataValue::Date(a), DataValue::Varchar(s))
+            | (DataValue::Date(a), DataValue::Char(s)) => {
+                let parsed =
+                    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|_| {
+                        ComparisonError::TypeMismatch {
+                            left: "DATE".to_string(),
+                            right: "VARCHAR".to_string(),
+                        }
                     })?;
                 Ok(a.cmp(&parsed))
             }
-            (DataValue::Varchar(s), DataValue::Date(b)) | (DataValue::Char(s), DataValue::Date(b)) => {
-                let parsed = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
-                    .map_err(|_| ComparisonError::TypeMismatch {
-                        left: "VARCHAR".to_string(),
-                        right: "DATE".to_string(),
+            (DataValue::Varchar(s), DataValue::Date(b))
+            | (DataValue::Char(s), DataValue::Date(b)) => {
+                let parsed =
+                    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|_| {
+                        ComparisonError::TypeMismatch {
+                            left: "VARCHAR".to_string(),
+                            right: "DATE".to_string(),
+                        }
                     })?;
                 Ok(parsed.cmp(b))
             }
 
             // Cross-type temporal: TIMESTAMP ↔ VARCHAR/CHAR
-            (DataValue::Timestamp(a), DataValue::Varchar(s)) | (DataValue::Timestamp(a), DataValue::Char(s)) => {
+            (DataValue::Timestamp(a), DataValue::Varchar(s))
+            | (DataValue::Timestamp(a), DataValue::Char(s)) => {
                 let raw = s.trim();
                 let parsed = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
                     .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
@@ -346,7 +355,8 @@ impl Comparable for DataValue {
                     })?;
                 Ok(a.cmp(&parsed))
             }
-            (DataValue::Varchar(s), DataValue::Timestamp(b)) | (DataValue::Char(s), DataValue::Timestamp(b)) => {
+            (DataValue::Varchar(s), DataValue::Timestamp(b))
+            | (DataValue::Char(s), DataValue::Timestamp(b)) => {
                 let raw = s.trim();
                 let parsed = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
                     .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
@@ -362,7 +372,8 @@ impl Comparable for DataValue {
             }
 
             // Cross-type temporal: TIME ↔ VARCHAR/CHAR
-            (DataValue::Time(a), DataValue::Varchar(s)) | (DataValue::Time(a), DataValue::Char(s)) => {
+            (DataValue::Time(a), DataValue::Varchar(s))
+            | (DataValue::Time(a), DataValue::Char(s)) => {
                 let raw = s.trim();
                 let parsed = chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
                     .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S"))
@@ -372,7 +383,8 @@ impl Comparable for DataValue {
                     })?;
                 Ok(a.cmp(&parsed))
             }
-            (DataValue::Varchar(s), DataValue::Time(b)) | (DataValue::Char(s), DataValue::Time(b)) => {
+            (DataValue::Varchar(s), DataValue::Time(b))
+            | (DataValue::Char(s), DataValue::Time(b)) => {
                 let raw = s.trim();
                 let parsed = chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S%.f")
                     .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S"))

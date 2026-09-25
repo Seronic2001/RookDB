@@ -11,11 +11,7 @@ use storage_manager::heap::HeapManager;
 
 /// Unique absolute path for an isolated test file.
 fn temp_file(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rookdb_shp_p{}_{}",
-        std::process::id(),
-        tag
-    ));
+    let dir = std::env::temp_dir().join(format!("rookdb_shp_p{}_{}", std::process::id(), tag));
     let _ = std::fs::create_dir_all(&dir);
     dir.join(format!("{}.dat", tag))
 }
@@ -38,7 +34,9 @@ fn two_managers_share_one_pool() {
         // Insert through A; B must observe the tuple WITHOUT any flush,
         // because both handles look at the same cached page.
         a.insert_tuple(b"hello world").unwrap();
-        let got = b.get_tuple(1, 0).expect("B must see A's insert via shared cache");
+        let got = b
+            .get_tuple(1, 0)
+            .expect("B must see A's insert via shared cache");
         assert_eq!(got, b"hello world");
     }
 
@@ -104,7 +102,10 @@ fn create_replaces_stale_pool_for_same_path() {
     drop(old);
 
     // Fresh file starts empty — reading a stale cached row would be wrong.
-    assert!(fresh.get_tuple(1, 0).is_err(), "recreated file must start empty");
+    assert!(
+        fresh.get_tuple(1, 0).is_err(),
+        "recreated file must start empty"
+    );
 
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

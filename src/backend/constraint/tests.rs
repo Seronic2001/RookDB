@@ -29,14 +29,12 @@ mod tests {
 
     #[test]
     fn test_check_not_null_rejects_null_for_non_nullable() {
-        let columns = vec![
-            Column {
-                name: "id".to_string(),
-                data_type: DataType::Int,
-                nullable: false,
-                constraints: Constraints::default(),
-            },
-        ];
+        let columns = vec![Column {
+            name: "id".to_string(),
+            data_type: DataType::Int,
+            nullable: false,
+            constraints: Constraints::default(),
+        }];
         assert!(
             validation::check_not_null("t", &columns, &["null"]).is_err(),
             "Should reject NULL for NOT NULL column"
@@ -49,18 +47,15 @@ mod tests {
 
     #[test]
     fn test_check_not_null_accepts_null_for_nullable() {
-        let columns = vec![
-            Column {
-                name: "name".to_string(),
-                data_type: DataType::Varchar(100),
-                nullable: true,
-                constraints: Constraints::default(),
-            },
-        ];
+        let columns = vec![Column {
+            name: "name".to_string(),
+            data_type: DataType::Varchar(100),
+            nullable: true,
+            constraints: Constraints::default(),
+        }];
         assert!(
             validation::check_not_null("t", &columns, &["null"]).is_ok(),
             "Should accept NULL for nullable column"
         );
     }
-
 }

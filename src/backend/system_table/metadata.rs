@@ -4,7 +4,6 @@ use crate::types::DataType;
 
 use super::*;
 
-
 /// Delete all system table metadata (constraints, columns, indexes) for a specific table.
 ///
 /// Scans `sys_constraints`, `sys_columns`, and `sys_indexes` for rows whose
@@ -17,46 +16,58 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
     // Resolve table_id from sys_tables
     let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let db_id = db_rows.iter().find_map(|row| {
-        let name = match row.get(1) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(db_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let db_id = db_rows
+        .iter()
+        .find_map(|row| {
+            let name = match row.get(1) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(db_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Database '{}' not found in sys_databases", db_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Database '{}' not found in sys_databases", db_name),
+            )
+        })?;
 
     let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let table_id = tbl_rows.iter().find_map(|row| {
-        let tbl_db_id = match row.get(1) {
-            Some(Some(crate::types::DataValue::Int(id))) => *id,
-            _ => return None,
-        };
-        if tbl_db_id != db_id {
-            return None;
-        }
-        let name = match row.get(2) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(table_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let table_id = tbl_rows
+        .iter()
+        .find_map(|row| {
+            let tbl_db_id = match row.get(1) {
+                Some(Some(crate::types::DataValue::Int(id))) => *id,
+                _ => return None,
+            };
+            if tbl_db_id != db_id {
+                return None;
+            }
+            let name = match row.get(2) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(table_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Table '{}.{}' not found in sys_tables", db_name, table_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
+            )
+        })?;
 
     let mut total = 0usize;
     total += delete_rows_by_table_id("constraints", SYS_CONSTRAINTS_SCHEMA, table_id)?;
@@ -65,7 +76,10 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
 
     log::info!(
         "[SystemCatalog] Deleted {} metadata rows for table '{}.{}' (table_id={})",
-        total, db_name, table_name, table_id
+        total,
+        db_name,
+        table_name,
+        table_id
     );
     Ok(total)
 }
@@ -79,65 +93,77 @@ pub fn delete_table_metadata(db_name: &str, table_name: &str) -> std::io::Result
 pub fn insert_constraint_metadata(
     db_name: &str,
     table_name: &str,
-    constraint_type: &str,      // e.g. "NOT NULL", "UNIQUE", "PRIMARY KEY", "CHECK", "FOREIGN KEY"
-    columns: &str,               // e.g. "id" or "id,name"
-    ref_table: Option<&str>,     // for FOREIGN KEY
-    ref_columns: Option<&str>,   // for FOREIGN KEY
+    constraint_type: &str, // e.g. "NOT NULL", "UNIQUE", "PRIMARY KEY", "CHECK", "FOREIGN KEY"
+    columns: &str,         // e.g. "id" or "id,name"
+    ref_table: Option<&str>, // for FOREIGN KEY
+    ref_columns: Option<&str>, // for FOREIGN KEY
 ) -> std::io::Result<()> {
     // 1. Resolve db_name → db_id
     let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let db_id = db_rows.iter().find_map(|row| {
-        let name = match row.get(1) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(db_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let db_id = db_rows
+        .iter()
+        .find_map(|row| {
+            let name = match row.get(1) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(db_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Database '{}' not found in sys_databases", db_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Database '{}' not found in sys_databases", db_name),
+            )
+        })?;
 
     // 2. Resolve (db_id, table_name) → table_id
     let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let table_id = tbl_rows.iter().find_map(|row| {
-        let tbl_db_id = match row.get(1) {
-            Some(Some(crate::types::DataValue::Int(id))) => *id,
-            _ => return None,
-        };
-        if tbl_db_id != db_id {
-            return None;
-        }
-        let name = match row.get(2) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(table_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let table_id = tbl_rows
+        .iter()
+        .find_map(|row| {
+            let tbl_db_id = match row.get(1) {
+                Some(Some(crate::types::DataValue::Int(id))) => *id,
+                _ => return None,
+            };
+            if tbl_db_id != db_id {
+                return None;
+            }
+            let name = match row.get(2) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(table_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Table '{}.{}' not found in sys_tables", db_name, table_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
+            )
+        })?;
 
     // 3. Compute next constraint_id by scanning sys_constraints
     let constr_rows = scan_system_table("constraints", SYS_CONSTRAINTS_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let next_constr_id = constr_rows.iter().fold(1i32, |max_id, row| {
-        match row.first() {
+    let next_constr_id = constr_rows
+        .iter()
+        .fold(1i32, |max_id, row| match row.first() {
             Some(Some(crate::types::DataValue::Int(id))) => std::cmp::max(max_id, *id + 1),
             _ => max_id,
-        }
-    });
+        });
 
     // 4. Insert the new constraint row
     // SYS_CONSTRAINTS_SCHEMA: [constraint_id:INT, table_id:INT, constraint_type:VARCHAR(50),
@@ -175,66 +201,76 @@ pub fn insert_index_metadata(
     // 1. Resolve db_name → db_id from sys_databases
     let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let db_id = db_rows.iter().find_map(|row| {
-        let name = match row.get(1) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(db_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let db_id = db_rows
+        .iter()
+        .find_map(|row| {
+            let name = match row.get(1) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(db_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Database '{}' not found in sys_databases", db_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Database '{}' not found in sys_databases", db_name),
+            )
+        })?;
 
     // 2. Resolve (db_id, table_name) → table_id from sys_tables
     let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let table_id = tbl_rows.iter().find_map(|row| {
-        let tbl_db_id = match row.get(1) {
-            Some(Some(crate::types::DataValue::Int(id))) => *id,
-            _ => return None,
-        };
-        if tbl_db_id != db_id {
-            return None;
-        }
-        let name = match row.get(2) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(table_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let table_id = tbl_rows
+        .iter()
+        .find_map(|row| {
+            let tbl_db_id = match row.get(1) {
+                Some(Some(crate::types::DataValue::Int(id))) => *id,
+                _ => return None,
+            };
+            if tbl_db_id != db_id {
+                return None;
+            }
+            let name = match row.get(2) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(table_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Table '{}.{}' not found in sys_tables", db_name, table_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
+            )
+        })?;
 
     // 3. Compute next index_id by scanning sys_indexes
     let idx_rows = scan_system_table("indexes", SYS_INDEXES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let next_idx_id = idx_rows.iter().fold(1i32, |max_id, row| {
-        match row.first() {
-            Some(Some(crate::types::DataValue::Int(id))) => std::cmp::max(max_id, *id + 1),
-            _ => max_id,
-        }
+    let next_idx_id = idx_rows.iter().fold(1i32, |max_id, row| match row.first() {
+        Some(Some(crate::types::DataValue::Int(id))) => std::cmp::max(max_id, *id + 1),
+        _ => max_id,
     });
 
     // 4. Insert the new index row
     let idx_row = vec![
-        Some(next_idx_id.to_string()),           // index_id
-        Some(table_id.to_string()),              // table_id
-        Some(index_name.to_string()),            // name
+        Some(next_idx_id.to_string()),                               // index_id
+        Some(table_id.to_string()),                                  // table_id
+        Some(index_name.to_string()),                                // name
         Some(if is_unique { "true" } else { "false" }.to_string()),  // is_unique
         Some(if is_primary { "true" } else { "false" }.to_string()), // is_primary
-        Some(column_name.to_string()),           // columns
+        Some(column_name.to_string()),                               // columns
     ];
     let res = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &[idx_row]);
     if res.is_ok() {
@@ -258,47 +294,59 @@ pub fn delete_index_metadata(
     // Resolve db_name → db_id
     let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let db_id = db_rows.iter().find_map(|row| {
-        let name = match row.get(1) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(db_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let db_id = db_rows
+        .iter()
+        .find_map(|row| {
+            let name = match row.get(1) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(db_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Database '{}' not found in sys_databases", db_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Database '{}' not found in sys_databases", db_name),
+            )
+        })?;
 
     // Resolve (db_id, table_name) → table_id
     let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let table_id = tbl_rows.iter().find_map(|row| {
-        let tbl_db_id = match row.get(1) {
-            Some(Some(crate::types::DataValue::Int(id))) => *id,
-            _ => return None,
-        };
-        if tbl_db_id != db_id {
-            return None;
-        }
-        let name = match row.get(2) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(table_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let table_id = tbl_rows
+        .iter()
+        .find_map(|row| {
+            let tbl_db_id = match row.get(1) {
+                Some(Some(crate::types::DataValue::Int(id))) => *id,
+                _ => return None,
+            };
+            if tbl_db_id != db_id {
+                return None;
+            }
+            let name = match row.get(2) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(table_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Table '{}.{}' not found in sys_tables", db_name, table_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Table '{}.{}' not found in sys_tables", db_name, table_name),
+            )
+        })?;
 
     // Scan sys_indexes to find matching row
     let idx_path = sys_path("indexes");
@@ -341,7 +389,10 @@ pub fn delete_index_metadata(
 
     log::info!(
         "[SystemCatalog] Deleted {} index row(s) for '{}.{}[{})'",
-        count, db_name, table_name, index_name
+        count,
+        db_name,
+        table_name,
+        index_name
     );
     Ok(count)
 }
@@ -405,7 +456,10 @@ pub fn delete_column_constraints(
 
     log::info!(
         "[SystemCatalog] Deleted {} constraint row(s) for column '{}.{}.{}'",
-        count, db_name, table_name, column_name
+        count,
+        db_name,
+        table_name,
+        column_name
     );
     Ok(count)
 }
@@ -463,13 +517,23 @@ pub fn rename_column_in_constraints(
         }
 
         // Replace old_name with new_name (case-insensitive match, case-preserving replace)
-        let new_columns = parts.iter().map(|c| {
-            if c.eq_ignore_ascii_case(old_name) { new_name.to_string() } else { c.to_string() }
-        }).collect::<Vec<_>>().join(", ");
+        let new_columns = parts
+            .iter()
+            .map(|c| {
+                if c.eq_ignore_ascii_case(old_name) {
+                    new_name.to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
 
         // Reconstruct a row with the updated columns field
         let updated_row = vec![
-            decoded.first().and_then(|v| v.as_ref().map(value_to_string)),
+            decoded
+                .first()
+                .and_then(|v| v.as_ref().map(value_to_string)),
             decoded.get(1).and_then(|v| v.as_ref().map(value_to_string)),
             decoded.get(2).and_then(|v| v.as_ref().map(value_to_string)),
             Some(new_columns),
@@ -494,7 +558,11 @@ pub fn rename_column_in_constraints(
 
     log::info!(
         "[SystemCatalog] Renamed column in {} constraint row(s) for '{}.{}': '{}' → '{}'",
-        count, db_name, table_name, old_name, new_name
+        count,
+        db_name,
+        table_name,
+        old_name,
+        new_name
     );
     Ok(count)
 }
@@ -510,36 +578,46 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
     // 1. Resolve db_name → db_id
     let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let db_id = db_rows.iter().find_map(|row| {
-        let name = match row.get(1) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(db_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let db_id = db_rows
+        .iter()
+        .find_map(|row| {
+            let name = match row.get(1) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(db_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Database '{}' not found in sys_databases", db_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Database '{}' not found in sys_databases", db_name),
+            )
+        })?;
 
     // 2. Find all tables belonging to this database
     let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let table_ids: Vec<i32> = tbl_rows.iter().filter_map(|row| {
-        let tbl_db_id = match row.get(1) {
-            Some(Some(crate::types::DataValue::Int(id))) => *id,
-            _ => return None,
-        };
-        if tbl_db_id == db_id
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let table_ids: Vec<i32> = tbl_rows
+        .iter()
+        .filter_map(|row| {
+            let tbl_db_id = match row.get(1) {
+                Some(Some(crate::types::DataValue::Int(id))) => *id,
+                _ => return None,
+            };
+            if tbl_db_id == db_id
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).collect();
+            None
+        })
+        .collect();
 
     let mut total = 0usize;
 
@@ -561,7 +639,9 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
 
     log::info!(
         "[SystemCatalog] Deleted {} metadata rows for database '{}' (db_id={})",
-        total, db_name, db_id
+        total,
+        db_name,
+        db_id
     );
     Ok(total)
 }
@@ -572,7 +652,12 @@ pub fn delete_database_metadata(db_name: &str) -> std::io::Result<usize> {
 /// Used by `delete_database_metadata` to delete from `sys_databases` (col 0)
 /// and `sys_tables` (col 1), and by `delete_table_metadata` via the
 /// more specific `delete_rows_by_table_id` wrapper.
-fn delete_rows_by_column(name: &str, schema: &[DataType], column_idx: usize, target_id: i32) -> std::io::Result<usize> {
+fn delete_rows_by_column(
+    name: &str,
+    schema: &[DataType],
+    column_idx: usize,
+    target_id: i32,
+) -> std::io::Result<usize> {
     let path = sys_path(name);
     if !path.exists() {
         return Ok(0);
@@ -586,9 +671,10 @@ fn delete_rows_by_column(name: &str, schema: &[DataType], column_idx: usize, tar
         let decoded = crate::types::deserialize_nullable_row(schema, &raw_bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if let Some(Some(crate::types::DataValue::Int(tid))) = decoded.get(column_idx)
-            && *tid == target_id {
-                to_delete.push((page_id, slot_id));
-            }
+            && *tid == target_id
+        {
+            to_delete.push((page_id, slot_id));
+        }
     }
 
     let count = to_delete.len();
@@ -599,7 +685,10 @@ fn delete_rows_by_column(name: &str, schema: &[DataType], column_idx: usize, tar
 
     log::trace!(
         "[SystemCatalog] delete_rows_by_column({}, col={}): removed {} rows for id={}",
-        name, column_idx, count, target_id
+        name,
+        column_idx,
+        count,
+        target_id
     );
     Ok(count)
 }
@@ -608,7 +697,11 @@ fn delete_rows_by_column(name: &str, schema: &[DataType], column_idx: usize, tar
 /// `table_id` column (index 1) matches `target_table_id`.
 ///
 /// Uses `HeapManager::delete_tuple` to mark each matching slot as deleted.
-fn delete_rows_by_table_id(name: &str, schema: &[DataType], target_table_id: i32) -> std::io::Result<usize> {
+fn delete_rows_by_table_id(
+    name: &str,
+    schema: &[DataType],
+    target_table_id: i32,
+) -> std::io::Result<usize> {
     delete_rows_by_column(name, schema, 1, target_table_id)
 }
 
@@ -620,28 +713,38 @@ pub fn delete_referencing_foreign_keys(
     // Resolve db_id
     let db_rows = scan_system_table("databases", SYS_DATABASES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let db_id = db_rows.iter().find_map(|row| {
-        let name = match row.get(1) {
-            Some(Some(crate::types::DataValue::Varchar(n))) => n,
-            Some(Some(crate::types::DataValue::Char(n))) => n,
-            _ => return None,
-        };
-        if name.eq_ignore_ascii_case(db_name)
-            && let Some(Some(crate::types::DataValue::Int(id))) = row.first() {
+    let db_id = db_rows
+        .iter()
+        .find_map(|row| {
+            let name = match row.get(1) {
+                Some(Some(crate::types::DataValue::Varchar(n))) => n,
+                Some(Some(crate::types::DataValue::Char(n))) => n,
+                _ => return None,
+            };
+            if name.eq_ignore_ascii_case(db_name)
+                && let Some(Some(crate::types::DataValue::Int(id))) = row.first()
+            {
                 return Some(*id);
             }
-        None
-    }).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound,
-            format!("Database '{}' not found in sys_databases", db_name))
-    })?;
+            None
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Database '{}' not found in sys_databases", db_name),
+            )
+        })?;
 
     // Load sys_tables for the db to create a table_id → db_id mapping
     let tbl_rows = scan_system_table("tables", SYS_TABLES_SCHEMA)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut table_id_to_db_id = std::collections::HashMap::new();
     for row in &tbl_rows {
-        if let (Some(Some(crate::types::DataValue::Int(tid))), Some(Some(crate::types::DataValue::Int(t_db_id)))) = (row.first(), row.get(1)) {
+        if let (
+            Some(Some(crate::types::DataValue::Int(tid))),
+            Some(Some(crate::types::DataValue::Int(t_db_id))),
+        ) = (row.first(), row.get(1))
+        {
             table_id_to_db_id.insert(*tid, *t_db_id);
         }
     }
@@ -658,7 +761,7 @@ pub fn delete_referencing_foreign_keys(
         let (page_id, slot_id, raw_bytes) = result?;
         let decoded = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        
+
         if decoded.len() >= 6 {
             let row_table_id = match &decoded[1] {
                 Some(crate::types::DataValue::Int(id)) => *id,
@@ -728,9 +831,13 @@ mod tests {
         let mut tables = HashMap::new();
         tables.insert("users".to_string(), users);
 
-        catalog
-            .databases
-            .insert("test_db".to_string(), Database { tables, views: HashMap::new() });
+        catalog.databases.insert(
+            "test_db".to_string(),
+            Database {
+                tables,
+                views: HashMap::new(),
+            },
+        );
 
         catalog
     }
@@ -750,10 +857,7 @@ mod tests {
     fn test_schema_serialization_roundtrip() {
         // Verify that the system table schemas produce valid serialization
         let schema = vec![DataType::Int, DataType::Varchar(255)];
-        let result = crate::types::serialize_nullable_row(
-            &schema,
-            &[Some("42"), Some("hello")],
-        );
+        let result = crate::types::serialize_nullable_row(&schema, &[Some("42"), Some("hello")]);
         assert!(result.is_ok());
 
         let bytes = result.unwrap();

@@ -1,6 +1,6 @@
 use crate::types::datatype::DataType;
 use crate::types::value::DataValue;
-use crate::types::{serialize_nullable_typed_row, deserialize_nullable_row};
+use crate::types::{deserialize_nullable_row, serialize_nullable_typed_row};
 
 /// Metadata describing one column in a query result set.
 #[derive(Debug, Clone)]
@@ -40,16 +40,20 @@ impl Tuple {
 
     /// Create a new tuple from deserialized values.
     pub fn new(values: Vec<Option<DataValue>>) -> Self {
-        Self { values, page_id: None, slot_id: None }
+        Self {
+            values,
+            page_id: None,
+            slot_id: None,
+        }
     }
 
     /// Create a new tuple with heap location metadata.
-    pub fn new_with_location(
-        values: Vec<Option<DataValue>>,
-        page_id: u32,
-        slot_id: u32,
-    ) -> Self {
-        Self { values, page_id: Some(page_id), slot_id: Some(slot_id) }
+    pub fn new_with_location(values: Vec<Option<DataValue>>, page_id: u32, slot_id: u32) -> Self {
+        Self {
+            values,
+            page_id: Some(page_id),
+            slot_id: Some(slot_id),
+        }
     }
 
     /// Set heap location metadata.
@@ -143,7 +147,7 @@ impl Tuple {
         let mut projected = Vec::with_capacity(indices.len());
         for &i in indices {
             projected.push(if i < self.values.len() {
-                std::mem::replace(&mut self.values[i], None)
+                self.values[i].take()
             } else {
                 None
             });
@@ -198,8 +202,8 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
 
     // Compute width per column: max of header length and data value lengths (clamped between 4 and 40)
     let mut col_widths = Vec::with_capacity(col_count);
-    for idx in 0..col_count {
-        let header_len = headers[idx].chars().count();
+    for (idx, header) in headers.iter().enumerate() {
+        let header_len = header.chars().count();
         let max_val_len = tuples
             .iter()
             .map(|t| {
@@ -221,8 +225,8 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
     let mut mid_border = format!("├{}┼", row_pad);
     let mut bot_border = format!("└{}┴", row_pad);
 
-    for idx in 0..col_count {
-        let line = "─".repeat(col_widths[idx] + 2);
+    for (idx, w) in col_widths.iter().enumerate() {
+        let line = "─".repeat(w + 2);
         if idx < col_count - 1 {
             top_border.push_str(&format!("{}┬", line));
             mid_border.push_str(&format!("{}┼", line));
@@ -236,9 +240,8 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
 
     println!("{}", top_border);
     print!("│ {:<width$} │", row_header, width = row_num_width);
-    for idx in 0..col_count {
-        let display = &headers[idx];
-        let w = col_widths[idx];
+    for (display, w) in headers.iter().zip(col_widths.iter()) {
+        let w = *w;
         let truncated = if display.chars().count() > w {
             format!("{}…", display.chars().take(w - 1).collect::<String>())
         } else {
@@ -251,8 +254,7 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
 
     for (row_idx, tuple) in tuples.iter().enumerate() {
         print!("│ {:>width$} │", row_idx + 1, width = row_num_width);
-        for idx in 0..col_count {
-            let w = col_widths[idx];
+        for (idx, &w) in col_widths.iter().enumerate() {
             let display = match tuple.values.get(idx).and_then(|v| v.as_ref()) {
                 Some(val) => format!("{}", val),
                 None => "NULL".to_string(),
@@ -278,10 +280,7 @@ pub fn display_tuples(tuples: &[Tuple], schema: &[ColumnInfo]) -> usize {
 /// The returned bytes can be written to a temp file and later deserialized
 /// back into a Tuple using `deserialize_tuple_from_bytes` with the same schema.
 pub fn serialize_tuple_to_bytes(tuple: &Tuple, schema: &[ColumnInfo]) -> Result<Vec<u8>, String> {
-    let schema_types: Vec<DataType> = schema
-        .iter()
-        .map(|c| c.data_type.clone())
-        .collect();
+    let schema_types: Vec<DataType> = schema.iter().map(|c| c.data_type.clone()).collect();
     serialize_nullable_typed_row(&schema_types, &tuple.values)
 }
 

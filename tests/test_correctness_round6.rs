@@ -29,9 +29,7 @@ use rook_ast::QueryPlan;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::planner::plan_query;
 use storage_manager::types::datatype::DataType;
@@ -95,7 +93,11 @@ fn fmt_rows(tuples: &[Tuple]) -> Vec<Vec<String>> {
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -122,9 +124,7 @@ fn correlated_not_in_with_null_in_subquery_is_unknown() {
     use std::cell::RefCell;
     use std::rc::Rc;
     use storage_manager::backend::error::RookResult;
-    use storage_manager::backend::executor::physical::expr::{
-        evaluate_predicate, Expr, Predicate,
-    };
+    use storage_manager::backend::executor::physical::expr::{Expr, Predicate, evaluate_predicate};
     use storage_manager::backend::executor::physical::operators::FilterOperator;
     use storage_manager::backend::executor::physical::operators::PhysicalOperator;
     use storage_manager::backend::executor::physical::tuple::{ColumnInfo, Tuple};
@@ -191,7 +191,10 @@ fn correlated_not_in_with_null_in_subquery_is_unknown() {
         inner_plan,
         params: vec![param],
         outer_col_indices: vec![0],
-        lhs_expr: Expr::Column { table: None, column: "x".into() },
+        lhs_expr: Expr::Column {
+            table: None,
+            column: "x".into(),
+        },
         negated: true,
     };
 
@@ -216,7 +219,10 @@ fn control_correlated_not_in_without_nulls() {
         &mut catalog,
         "t6db",
         "users",
-        vec![col("id", DataType::Int, false), col("name", DataType::Varchar(30), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("name", DataType::Varchar(30), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
@@ -240,10 +246,20 @@ fn control_correlated_not_in_without_nulls() {
     );
     let names: Vec<String> = tuples
         .iter()
-        .map(|t| t.values[0].as_ref().map(|d| format!("{}", d)).unwrap_or_default())
+        .map(|t| {
+            t.values[0]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_default()
+        })
         .collect();
     // DataValue::Display decorates VARCHAR with one wrapping quote pair.
-    assert_eq!(names, vec!["'bob'"], "control: only bob is not blocked; got {:?}", names);
+    assert_eq!(
+        names,
+        vec!["'bob'"],
+        "control: only bob is not blocked; got {:?}",
+        names
+    );
 }
 
 // ── Finding U: ADD/DROP COLUMN file swap without cache eviction ─────────────
@@ -295,10 +311,14 @@ fn add_column_backfill_then_insert_is_durable() {
         let mut migrated: Vec<Vec<u8>> = Vec::new();
         for result in old_heap.scan() {
             let (_p, _s, raw) = result.unwrap();
-            let vals = storage_manager::types::row::deserialize_nullable_row(&old_schema, &raw).unwrap();
+            let vals =
+                storage_manager::types::row::deserialize_nullable_row(&old_schema, &raw).unwrap();
             let mut nv = vals;
             nv.push(None);
-            migrated.push(storage_manager::types::row::serialize_nullable_typed_row(&new_schema, &nv).unwrap());
+            migrated.push(
+                storage_manager::types::row::serialize_nullable_typed_row(&new_schema, &nv)
+                    .unwrap(),
+            );
         }
         drop(old_heap);
 
@@ -315,7 +335,10 @@ fn add_column_backfill_then_insert_is_durable() {
     }
 
     let new_inode = std::fs::metadata(&dat_path).unwrap().ino();
-    assert_ne!(old_inode, new_inode, "test setup: file must actually be replaced");
+    assert_ne!(
+        old_inode, new_inode,
+        "test setup: file must actually be replaced"
+    );
 
     // Update the catalog schema to match (as the CLI does BEFORE the backfill:
     // the new column is pushed into the catalog and saved).
@@ -340,7 +363,12 @@ fn add_column_backfill_then_insert_is_durable() {
     let tuples = run_select(&catalog, "t6db", "SELECT id FROM t");
     let ids: Vec<String> = tuples
         .iter()
-        .map(|t| t.values[0].as_ref().map(|d| format!("{}", d)).unwrap_or_default())
+        .map(|t| {
+            t.values[0]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_default()
+        })
         .collect();
     assert!(
         ids.contains(&"2".to_string()),
@@ -377,7 +405,10 @@ fn varchar_leading_and_trailing_apostrophe_roundtrip() {
         &mut catalog,
         "t6db",
         "t",
-        vec![col("id", DataType::Int, false), col("s", DataType::Varchar(50), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("s", DataType::Varchar(50), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -403,10 +434,7 @@ fn varchar_leading_and_trailing_apostrophe_roundtrip() {
     // stored values `'abc` / `ends'` render as `''abc'` / `'ends''`.
     assert_eq!(
         fmt_rows(&tuples),
-        vec![
-            vec!["''abc'".to_string()],
-            vec!["'ends''".to_string()],
-        ],
+        vec![vec!["''abc'".to_string()], vec!["'ends''".to_string()],],
         "quote roundtrip broken: got {:?}",
         fmt_rows(&tuples)
     );

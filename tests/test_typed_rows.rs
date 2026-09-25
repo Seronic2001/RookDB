@@ -56,10 +56,15 @@ fn mixed_typed_row_roundtrip_covers_all_datatypes() {
     assert_eq!(values[0], Some(DataValue::SmallInt(-12)));
     assert_eq!(values[1], Some(DataValue::Int(42)));
     assert_eq!(values[2], Some(DataValue::BigInt(-9000000000)));
-    assert_eq!(values[3], Some(DataValue::Real(storage_manager::types::OrderedF32(3.25))));
+    assert_eq!(
+        values[3],
+        Some(DataValue::Real(storage_manager::types::OrderedF32(3.25)))
+    );
     assert_eq!(
         values[4],
-        Some(DataValue::DoublePrecision(storage_manager::types::OrderedF64(2.5)))
+        Some(DataValue::DoublePrecision(
+            storage_manager::types::OrderedF64(2.5)
+        ))
     );
     assert_eq!(
         values[5],
@@ -81,7 +86,9 @@ fn mixed_typed_row_roundtrip_covers_all_datatypes() {
     assert_eq!(values[10], Some(DataValue::Varchar("rookdb".to_string())));
     assert_eq!(
         values[11],
-        Some(DataValue::Date(NaiveDate::from_ymd_opt(2026, 3, 26).unwrap()))
+        Some(DataValue::Date(
+            NaiveDate::from_ymd_opt(2026, 3, 26).unwrap()
+        ))
     );
     assert_eq!(
         values[12],
@@ -105,7 +112,8 @@ fn row_set_get_serialize_deserialize() {
     let mut row = Row::new(schema.clone());
 
     row.set_value(0, &DataValue::Int(101)).unwrap();
-    row.set_value(1, &DataValue::Varchar("alice".to_string())).unwrap();
+    row.set_value(1, &DataValue::Varchar("alice".to_string()))
+        .unwrap();
     row.set_value(2, &DataValue::Bool(true)).unwrap();
     assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Int(101)));
 
@@ -130,44 +138,97 @@ fn test_varlen_resizing_shifts_offsets() {
     let mut row = Row::new(schema.clone());
 
     // Populate: A, 42, B, C
-    row.set_value(0, &DataValue::Varchar("A".to_string())).unwrap();
+    row.set_value(0, &DataValue::Varchar("A".to_string()))
+        .unwrap();
     row.set_value(1, &DataValue::Int(42)).unwrap();
-    row.set_value(2, &DataValue::Varchar("B".to_string())).unwrap();
-    row.set_value(3, &DataValue::Varchar("C".to_string())).unwrap();
+    row.set_value(2, &DataValue::Varchar("B".to_string()))
+        .unwrap();
+    row.set_value(3, &DataValue::Varchar("C".to_string()))
+        .unwrap();
 
     // Verify initial
-    assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Varchar("A".to_string())));
-    assert_eq!(row.get_value(2).unwrap(), Some(DataValue::Varchar("B".to_string())));
-    assert_eq!(row.get_value(3).unwrap(), Some(DataValue::Varchar("C".to_string())));
+    assert_eq!(
+        row.get_value(0).unwrap(),
+        Some(DataValue::Varchar("A".to_string()))
+    );
+    assert_eq!(
+        row.get_value(2).unwrap(),
+        Some(DataValue::Varchar("B".to_string()))
+    );
+    assert_eq!(
+        row.get_value(3).unwrap(),
+        Some(DataValue::Varchar("C".to_string()))
+    );
 
     // Expand B
-    row.set_value(2, &DataValue::Varchar("B_longer".to_string())).unwrap();
-    assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Varchar("A".to_string())));
-    assert_eq!(row.get_value(2).unwrap(), Some(DataValue::Varchar("B_longer".to_string())));
-    assert_eq!(row.get_value(3).unwrap(), Some(DataValue::Varchar("C".to_string())));
+    row.set_value(2, &DataValue::Varchar("B_longer".to_string()))
+        .unwrap();
+    assert_eq!(
+        row.get_value(0).unwrap(),
+        Some(DataValue::Varchar("A".to_string()))
+    );
+    assert_eq!(
+        row.get_value(2).unwrap(),
+        Some(DataValue::Varchar("B_longer".to_string()))
+    );
+    assert_eq!(
+        row.get_value(3).unwrap(),
+        Some(DataValue::Varchar("C".to_string()))
+    );
 
     // Shrink B
-    row.set_value(2, &DataValue::Varchar("b".to_string())).unwrap();
-    assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Varchar("A".to_string())));
-    assert_eq!(row.get_value(2).unwrap(), Some(DataValue::Varchar("b".to_string())));
-    assert_eq!(row.get_value(3).unwrap(), Some(DataValue::Varchar("C".to_string())));
+    row.set_value(2, &DataValue::Varchar("b".to_string()))
+        .unwrap();
+    assert_eq!(
+        row.get_value(0).unwrap(),
+        Some(DataValue::Varchar("A".to_string()))
+    );
+    assert_eq!(
+        row.get_value(2).unwrap(),
+        Some(DataValue::Varchar("b".to_string()))
+    );
+    assert_eq!(
+        row.get_value(3).unwrap(),
+        Some(DataValue::Varchar("C".to_string()))
+    );
 
     // Nullify A
     row.set_null(0).unwrap();
     assert_eq!(row.get_value(0).unwrap(), None);
-    assert_eq!(row.get_value(2).unwrap(), Some(DataValue::Varchar("b".to_string())));
-    assert_eq!(row.get_value(3).unwrap(), Some(DataValue::Varchar("C".to_string())));
+    assert_eq!(
+        row.get_value(2).unwrap(),
+        Some(DataValue::Varchar("b".to_string()))
+    );
+    assert_eq!(
+        row.get_value(3).unwrap(),
+        Some(DataValue::Varchar("C".to_string()))
+    );
 
     // Set A back to completely new layout size
-    row.set_value(0, &DataValue::Varchar("reborn".to_string())).unwrap();
-    assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Varchar("reborn".to_string())));
-    assert_eq!(row.get_value(2).unwrap(), Some(DataValue::Varchar("b".to_string())));
-    assert_eq!(row.get_value(3).unwrap(), Some(DataValue::Varchar("C".to_string())));
-    
+    row.set_value(0, &DataValue::Varchar("reborn".to_string()))
+        .unwrap();
+    assert_eq!(
+        row.get_value(0).unwrap(),
+        Some(DataValue::Varchar("reborn".to_string()))
+    );
+    assert_eq!(
+        row.get_value(2).unwrap(),
+        Some(DataValue::Varchar("b".to_string()))
+    );
+    assert_eq!(
+        row.get_value(3).unwrap(),
+        Some(DataValue::Varchar("C".to_string()))
+    );
+
     // Nullify C
     row.set_null(3).unwrap();
-    assert_eq!(row.get_value(0).unwrap(), Some(DataValue::Varchar("reborn".to_string())));
-    assert_eq!(row.get_value(2).unwrap(), Some(DataValue::Varchar("b".to_string())));
+    assert_eq!(
+        row.get_value(0).unwrap(),
+        Some(DataValue::Varchar("reborn".to_string()))
+    );
+    assert_eq!(
+        row.get_value(2).unwrap(),
+        Some(DataValue::Varchar("b".to_string()))
+    );
     assert_eq!(row.get_value(3).unwrap(), None);
 }
-

@@ -35,7 +35,9 @@ pub fn parse_where_text(text: &str) -> crate::backend::error::RookResult<Option<
     if let Some(parser) = WHERE_PARSER.get() {
         parser(trimmed).map_err(RookError::Internal)
     } else {
-        Err(RookError::Internal("No WHERE-clause parser registered".to_string()))
+        Err(RookError::Internal(
+            "No WHERE-clause parser registered".to_string(),
+        ))
     }
 }
 
@@ -69,8 +71,9 @@ pub fn select_matching_pointers(
 
     let logical = crate::planner::plan_query(&QueryPlan::Select(select), catalog, db_name)
         .map_err(|e| e.to_string())?;
-    let tuples =
-        crate::backend::executor::physical::engine::execute_plan_collect(&logical, catalog, db_name)?;
+    let tuples = crate::backend::executor::physical::engine::execute_plan_collect(
+        &logical, catalog, db_name,
+    )?;
 
     let mut out = Vec::with_capacity(tuples.len());
     for t in tuples {
@@ -79,7 +82,7 @@ pub fn select_matching_pointers(
             _ => {
                 return Err(RookError::Internal(
                     "engine returned rows without heap locations (operator bug)".to_string(),
-                ))
+                ));
             }
         }
     }

@@ -7,15 +7,15 @@
 
 mod common;
 
+use common::TestWorkspace;
 use rook_ast::QueryPlan;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-use common::TestWorkspace;
 
 fn col(name: &str, ty: DataType) -> Column {
     Column {
@@ -75,12 +75,8 @@ fn run_select(catalog: &Catalog, db: &str, sql: &str) -> Vec<Vec<String>> {
         Ok(QueryPlan::Select(select)) => select,
         other => panic!("expected Select plan, got {:?}", other.err()),
     };
-    let logical = storage_manager::planner::plan_query(
-        &QueryPlan::Select(select),
-        catalog,
-        db,
-    )
-    .expect("logical planning failed");
+    let logical = storage_manager::planner::plan_query(&QueryPlan::Select(select), catalog, db)
+        .expect("logical planning failed");
 
     let tuples: Vec<Tuple> =
         execute_plan_collect(&logical, catalog, db).expect("physical execution failed");
@@ -132,10 +128,7 @@ fn aliased_columns_in_projection_and_where() {
     rows.sort();
     assert_eq!(
         rows,
-        vec![
-            vec!["'Alice'", "85000"],
-            vec!["'Cara'", "75000"],
-        ]
+        vec![vec!["'Alice'", "85000"], vec!["'Cara'", "75000"],]
     );
 }
 
@@ -204,10 +197,7 @@ fn mixed_alias_and_bare_references() {
     rows.sort();
     assert_eq!(
         rows,
-        vec![
-            vec!["'Alice'", "'eng'"],
-            vec!["'Cara'", "'eng'"],
-        ]
+        vec![vec!["'Alice'", "'eng'"], vec!["'Cara'", "'eng'"],]
     );
 }
 
@@ -226,10 +216,6 @@ fn group_by_with_alias_qualifiers() {
     rows.sort();
     assert_eq!(
         rows,
-        vec![
-            vec!["'eng'", "2"],
-            vec!["'hr'", "1"],
-            vec!["'sales'", "1"],
-        ]
+        vec![vec!["'eng'", "2"], vec!["'hr'", "1"], vec!["'sales'", "1"],]
     );
 }

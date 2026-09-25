@@ -10,13 +10,11 @@
 use std::path::Path;
 mod common;
 
-
 use storage_manager::catalog::{
     create_database, create_table, init_catalog, load_catalog, save_catalog,
 };
 use storage_manager::layout::{CATALOG_FILE, SYSTEM_DIR};
 use storage_manager::types::DataType;
-
 
 #[test]
 fn init_bootstraps_system_tables() {

@@ -110,7 +110,11 @@ fn run_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -193,7 +197,14 @@ fn a_fk_restrict_blocks_delete_of_numeric_parent_key() {
         &mut catalog,
         "db9",
         "parent",
-        vec![col("id", DataType::Numeric { precision: 10, scale: 2 }, false)],
+        vec![col(
+            "id",
+            DataType::Numeric {
+                precision: 10,
+                scale: 2,
+            },
+            false,
+        )],
     );
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
@@ -201,7 +212,14 @@ fn a_fk_restrict_blocks_delete_of_numeric_parent_key() {
         &mut catalog,
         "db9",
         "child",
-        vec![col("pid", DataType::Numeric { precision: 10, scale: 2 }, true)],
+        vec![col(
+            "pid",
+            DataType::Numeric {
+                precision: 10,
+                scale: 2,
+            },
+            true,
+        )],
     );
     save_catalog(&catalog).unwrap();
 
@@ -239,14 +257,31 @@ fn control_a_fk_restrict_still_blocks_int_parent_key() {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db9"), "create db");
     let mut catalog = load_catalog();
-    create_table(&mut catalog, "db9", "parent", vec![col("id", DataType::Int, false)]);
+    create_table(
+        &mut catalog,
+        "db9",
+        "parent",
+        vec![col("id", DataType::Int, false)],
+    );
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
-    create_table(&mut catalog, "db9", "child", vec![col("pid", DataType::Int, true)]);
+    create_table(
+        &mut catalog,
+        "db9",
+        "child",
+        vec![col("pid", DataType::Int, true)],
+    );
     save_catalog(&catalog).unwrap();
 
-    insert_constraint_metadata("db9", "child", "FOREIGN KEY", "pid", Some("parent"), Some("id"))
-        .expect("insert FK metadata");
+    insert_constraint_metadata(
+        "db9",
+        "child",
+        "FOREIGN KEY",
+        "pid",
+        Some("parent"),
+        Some("id"),
+    )
+    .expect("insert FK metadata");
 
     let catalog = load_catalog();
     assert!(insert_single_tuple(&catalog, "db9", "parent", &["7"]).unwrap());
@@ -271,14 +306,31 @@ fn a_update_restrict_blocks_bigint_parent_key_change() {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db9"), "create db");
     let mut catalog = load_catalog();
-    create_table(&mut catalog, "db9", "parent", vec![col("id", DataType::BigInt, false)]);
+    create_table(
+        &mut catalog,
+        "db9",
+        "parent",
+        vec![col("id", DataType::BigInt, false)],
+    );
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
-    create_table(&mut catalog, "db9", "child", vec![col("pid", DataType::BigInt, true)]);
+    create_table(
+        &mut catalog,
+        "db9",
+        "child",
+        vec![col("pid", DataType::BigInt, true)],
+    );
     save_catalog(&catalog).unwrap();
 
-    insert_constraint_metadata("db9", "child", "FOREIGN KEY", "pid", Some("parent"), Some("id"))
-        .expect("insert FK metadata");
+    insert_constraint_metadata(
+        "db9",
+        "child",
+        "FOREIGN KEY",
+        "pid",
+        Some("parent"),
+        Some("id"),
+    )
+    .expect("insert FK metadata");
 
     let catalog = load_catalog();
     assert!(insert_single_tuple(&catalog, "db9", "parent", &["7"]).unwrap());
@@ -313,16 +365,28 @@ fn b_round_smallint_negative_places_does_not_wrap() {
              instead of erroring or widening",
             v
         ),
-        Err(e) => { /* acceptable: explicit overflow error */ let _ = e; }
+        Err(e) => {
+            /* acceptable: explicit overflow error */
+            let _ = e;
+        }
     }
 }
 
 /// Control: in-range negative-places rounding is half-away-from-zero.
 #[test]
 fn control_b_round_int_negative_places() {
-    assert_eq!(round(&DataValue::Int(123), -1).unwrap(), DataValue::Int(120));
-    assert_eq!(round(&DataValue::Int(125), -1).unwrap(), DataValue::Int(130));
-    assert_eq!(round(&DataValue::Int(-125), -1).unwrap(), DataValue::Int(-130));
+    assert_eq!(
+        round(&DataValue::Int(123), -1).unwrap(),
+        DataValue::Int(120)
+    );
+    assert_eq!(
+        round(&DataValue::Int(125), -1).unwrap(),
+        DataValue::Int(130)
+    );
+    assert_eq!(
+        round(&DataValue::Int(-125), -1).unwrap(),
+        DataValue::Int(-130)
+    );
 }
 
 // ── Finding C: NUMERIC index keys encode raw, decode as BCD ─────────────────
@@ -338,13 +402,26 @@ fn control_b_round_int_negative_places() {
 #[test]
 fn c_numeric_index_key_roundtrip_via_codec_primitives() {
     // What the index stores (encode_key → to_bytes):
-    let key = DataValue::Numeric(NumericValue { unscaled: 550, scale: 2 });
+    let key = DataValue::Numeric(NumericValue {
+        unscaled: 550,
+        scale: 2,
+    });
     let encoded = key.to_bytes();
-    assert_eq!(encoded.len(), 17, "test premise: Numeric::to_bytes is 17 raw bytes");
+    assert_eq!(
+        encoded.len(),
+        17,
+        "test premise: Numeric::to_bytes is 17 raw bytes"
+    );
 
     // What every tree comparison must do (decode_key → from_bytes with the
     // column type), per cmp_encoded_keys / cmp_encoded_vs_values:
-    let decoded = DataValue::from_bytes(&DataType::Numeric { precision: 10, scale: 2 }, &encoded);
+    let decoded = DataValue::from_bytes(
+        &DataType::Numeric {
+            precision: 10,
+            scale: 2,
+        },
+        &encoded,
+    );
     match decoded {
         Ok(dv) => assert_eq!(
             dv.compare(&key).unwrap(),
@@ -392,7 +469,14 @@ fn c_numeric_index_point_lookup_returns_row() {
         "items",
         vec![
             col("id", DataType::Int, false),
-            col("price", DataType::Numeric { precision: 10, scale: 2 }, true),
+            col(
+                "price",
+                DataType::Numeric {
+                    precision: 10,
+                    scale: 2,
+                },
+                true,
+            ),
         ],
     );
     save_catalog(&catalog).unwrap();
@@ -409,7 +493,13 @@ fn c_numeric_index_point_lookup_returns_row() {
         "control: the predicate is answerable without an index"
     );
 
-    let built = create_index(&catalog, "db9", "items", "idx_items_price", &["price".to_string()]);
+    let built = create_index(
+        &catalog,
+        "db9",
+        "items",
+        "idx_items_price",
+        &["price".to_string()],
+    );
     if let Err(e) = built {
         let msg = format!("{}", e);
         assert!(
@@ -452,5 +542,9 @@ fn n1_int_vs_double_precision_is_comparable() {
 #[test]
 fn n3_bit_literal_with_embedded_quote_is_rejected() {
     let r = DataValue::parse_and_encode(&DataType::Bit(4), "B'10\"10'");
-    assert!(r.is_err(), "embedded-quote BIT literal must be rejected, got {:?}", r);
+    assert!(
+        r.is_err(),
+        "embedded-quote BIT literal must be rejected, got {:?}",
+        r
+    );
 }

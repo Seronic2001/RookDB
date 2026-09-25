@@ -125,7 +125,11 @@ fn try_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect())
@@ -141,7 +145,11 @@ fn k1_hash_join_real_vs_double_inner_join_loses_all_rows() {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db11k1"), "create db");
     make_table("db11k1", "reals", vec![col("r", DataType::Real, true)]);
-    make_table("db11k1", "doubs", vec![col("d", DataType::DoublePrecision, true)]);
+    make_table(
+        "db11k1",
+        "doubs",
+        vec![col("d", DataType::DoublePrecision, true)],
+    );
     insert("db11k1", "reals", &["1.5"]);
     insert("db11k1", "reals", &["2.0"]);
     insert("db11k1", "doubs", &["1.5"]);
@@ -192,7 +200,14 @@ fn k2_hash_join_numeric_vs_int_inner_join_loses_all_rows() {
     make_table(
         "db11k2",
         "nums",
-        vec![col("n", DataType::Numeric { precision: 10, scale: 2 }, true)],
+        vec![col(
+            "n",
+            DataType::Numeric {
+                precision: 10,
+                scale: 2,
+            },
+            true,
+        )],
     );
     make_table("db11k2", "ints", vec![col("i", DataType::Int, true)]);
     insert("db11k2", "nums", &["42.00"]);
@@ -238,7 +253,11 @@ fn k3_hash_join_date_vs_timestamp_inner_join_loses_all_rows() {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "db11k3"), "create db");
     make_table("db11k3", "dates", vec![col("d", DataType::Date, true)]);
-    make_table("db11k3", "stamps", vec![col("ts", DataType::Timestamp, true)]);
+    make_table(
+        "db11k3",
+        "stamps",
+        vec![col("ts", DataType::Timestamp, true)],
+    );
     insert("db11k3", "dates", &["2024-01-01"]);
     insert("db11k3", "stamps", &["2024-01-01 00:00:00"]);
     let catalog = load_catalog();

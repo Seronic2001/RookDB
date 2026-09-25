@@ -4,7 +4,6 @@ use crate::catalog::types::Catalog;
 
 use super::*;
 
-
 /// Persist the in-memory catalog to system table heap files.
 ///
 /// Deletes and recreates all system table files from scratch to prevent
@@ -21,73 +20,87 @@ pub fn save_catalog_to_system(catalog: &Catalog) -> std::io::Result<()> {
     let constr_path = sys_path("constraints");
     if constr_path.exists() {
         // Also load sys_tables to resolve table_id → table_name
-        let mut tbl_id_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+        let mut tbl_id_to_name: std::collections::HashMap<i32, String> =
+            std::collections::HashMap::new();
         let tbl_path = sys_path("tables");
         if tbl_path.exists()
-            && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path) {
-                for result in heap.scan() {
-                    if let Ok((_, _, raw_bytes)) = result
-                        && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
-                            && decoded.len() >= 3
-                                && let Some(Some(crate::types::DataValue::Int(tid))) = decoded.first() {
-                                    let name_opt = match decoded.get(2) {
-                                        Some(Some(crate::types::DataValue::Varchar(name))) => Some(name.clone()),
-                                        Some(Some(crate::types::DataValue::Char(name))) => Some(name.clone()),
-                                        _ => None,
-                                    };
-                                    if let Some(name) = name_opt {
-                                        tbl_id_to_name.insert(*tid, name);
-                                    }
-                                }
+            && let Ok(heap) = crate::backend::heap::HeapManager::open(tbl_path)
+        {
+            for result in heap.scan() {
+                if let Ok((_, _, raw_bytes)) = result
+                    && let Ok(decoded) =
+                        crate::types::deserialize_nullable_row(SYS_TABLES_SCHEMA, &raw_bytes)
+                    && decoded.len() >= 3
+                    && let Some(Some(crate::types::DataValue::Int(tid))) = decoded.first()
+                {
+                    let name_opt = match decoded.get(2) {
+                        Some(Some(crate::types::DataValue::Varchar(name))) => Some(name.clone()),
+                        Some(Some(crate::types::DataValue::Char(name))) => Some(name.clone()),
+                        _ => None,
+                    };
+                    if let Some(name) = name_opt {
+                        tbl_id_to_name.insert(*tid, name);
+                    }
                 }
             }
+        }
 
         if let Ok(heap) = crate::backend::heap::HeapManager::open(constr_path.clone()) {
             for result in heap.scan() {
                 if let Ok((_, _, raw_bytes)) = result
-                    && let Ok(decoded) = crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
-                        && decoded.len() >= 6 {
-                            let constr_type = match &decoded[2] {
-                                Some(crate::types::DataValue::Varchar(s)) => s.as_str(),
-                                Some(crate::types::DataValue::Char(s)) => s.as_str(),
-                                _ => "",
-                            };
-                            if constr_type.to_uppercase().contains("FOREIGN KEY") {
-                                // Resolve numeric table_id → table name for the CHILD table
-                                let old_table_id = match &decoded[1] {
-                                    Some(crate::types::DataValue::Int(id)) => *id,
-                                    _ => 0,
-                                };
-                                let child_table_name = tbl_id_to_name.get(&old_table_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("<table_id={}>", old_table_id));
+                    && let Ok(decoded) =
+                        crate::types::deserialize_nullable_row(SYS_CONSTRAINTS_SCHEMA, &raw_bytes)
+                    && decoded.len() >= 6
+                {
+                    let constr_type = match &decoded[2] {
+                        Some(crate::types::DataValue::Varchar(s)) => s.as_str(),
+                        Some(crate::types::DataValue::Char(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    if constr_type.to_uppercase().contains("FOREIGN KEY") {
+                        // Resolve numeric table_id → table name for the CHILD table
+                        let old_table_id = match &decoded[1] {
+                            Some(crate::types::DataValue::Int(id)) => *id,
+                            _ => 0,
+                        };
+                        let child_table_name = tbl_id_to_name
+                            .get(&old_table_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("<table_id={}>", old_table_id));
 
-                                let constraint_type = decoded[2].as_ref().map(value_to_string);
-                                let columns = decoded[3].as_ref().map(value_to_string);
-                                let ref_table = decoded[4].as_ref().map(value_to_string);
-                                let ref_columns = decoded[5].as_ref().map(value_to_string);
+                        let constraint_type = decoded[2].as_ref().map(value_to_string);
+                        let columns = decoded[3].as_ref().map(value_to_string);
+                        let ref_table = decoded[4].as_ref().map(value_to_string);
+                        let ref_columns = decoded[5].as_ref().map(value_to_string);
 
-                                // Store CHILD TABLE NAME as the "table_id" field.
-                                // After rebuilding, populate_system_tables will resolve
-                                // this name back to a numeric table_id. We use a special
-                                // "NAME:" prefix to distinguish name-based entries from
-                                // legacy numeric entries loaded by older code paths.
-                                fk_rows.push(vec![
-                                    None,                                      // constraint_id (auto-assigned)
-                                    Some(format!("TABLE_NAME:{}", child_table_name)),  // resolved by name
-                                    constraint_type,
-                                    columns,
-                                    ref_table,
-                                    ref_columns,
-                                ]);
-                            }
-                        }
+                        // Store CHILD TABLE NAME as the "table_id" field.
+                        // After rebuilding, populate_system_tables will resolve
+                        // this name back to a numeric table_id. We use a special
+                        // "NAME:" prefix to distinguish name-based entries from
+                        // legacy numeric entries loaded by older code paths.
+                        fk_rows.push(vec![
+                            None,                                             // constraint_id (auto-assigned)
+                            Some(format!("TABLE_NAME:{}", child_table_name)), // resolved by name
+                            constraint_type,
+                            columns,
+                            ref_table,
+                            ref_columns,
+                        ]);
+                    }
+                }
             }
         }
     }
 
     // Delete existing system table files to start fresh
-    for name in &["databases", "tables", "columns", "constraints", "indexes", "views"] {
+    for name in &[
+        "databases",
+        "tables",
+        "columns",
+        "constraints",
+        "indexes",
+        "views",
+    ] {
         let path = sys_path(name);
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -121,7 +134,8 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
     // Build a table_name → table_id mapping BEFORE processing FK rows.
     // This is populated during the table iteration below, then used to
     // resolve "TABLE_NAME:xxx" entries in constr_rows.
-    let mut table_name_to_new_id: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    let mut table_name_to_new_id: std::collections::HashMap<String, i32> =
+        std::collections::HashMap::new();
 
     // First pass: collect table names and assign table_ids (needed for FK
     // name resolution).  The iteration order matches the main loop below
@@ -146,9 +160,10 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
     // Compute the next available constraint_id from existing rows
     let mut next_constr_id = constr_rows.iter().fold(1i32, |max_id, row| {
         if let Some(Some(id_str)) = row.first()
-            && let Ok(id) = id_str.parse::<i32>() {
-                return std::cmp::max(max_id, id + 1);
-            }
+            && let Ok(id) = id_str.parse::<i32>()
+        {
+            return std::cmp::max(max_id, id + 1);
+        }
         max_id
     });
 
@@ -171,10 +186,7 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
         let db_id = next_db_id;
         next_db_id += 1;
 
-        db_rows.push(vec![
-            Some(db_id.to_string()),
-            Some(db_name.clone()),
-        ]);
+        db_rows.push(vec![Some(db_id.to_string()), Some(db_name.clone())]);
 
         let mut tbl_names: Vec<&String> = database.tables.keys().collect();
         tbl_names.sort();
@@ -265,20 +277,19 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
             continue;
         }
         if let Some(Some(table_id_str)) = &row.get(1).cloned()
-            && let Some(table_name) = table_id_str.strip_prefix("TABLE_NAME:") {
-                let resolved_id = table_name_to_new_id.get(table_name)
-                    .cloned()
-                    .unwrap_or(0);
-                row[1] = if resolved_id != 0 {
-                    Some(resolved_id.to_string())
-                } else {
-                    log::warn!(
-                        "[SystemCatalog] Could not resolve table name '{}' for FK constraint, using table_id=0",
-                        table_name
-                    );
-                    Some("0".to_string())
-                };
-            }
+            && let Some(table_name) = table_id_str.strip_prefix("TABLE_NAME:")
+        {
+            let resolved_id = table_name_to_new_id.get(table_name).cloned().unwrap_or(0);
+            row[1] = if resolved_id != 0 {
+                Some(resolved_id.to_string())
+            } else {
+                log::warn!(
+                    "[SystemCatalog] Could not resolve table name '{}' for FK constraint, using table_id=0",
+                    table_name
+                );
+                Some("0".to_string())
+            };
+        }
     }
 
     // Batch-write each system table
@@ -297,34 +308,37 @@ pub(crate) fn populate_system_tables(catalog: &Catalog, mut constr_rows: Vec<Vec
 
     // ── Populate sys_indexes by scanning .idx.meta files on disk ────────
     // Build a table_name → table_id mapping for index rows.
-    let mut table_name_to_id: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    let mut table_name_to_id: std::collections::HashMap<String, i32> =
+        std::collections::HashMap::new();
     for row in &tbl_rows {
         // tbl_rows: [table_id, db_id, name, file_path]
         if let (Some(table_id_str), Some(table_name)) = (&row[0], &row[2])
-            && let Ok(tid) = table_id_str.parse::<i32>() {
-                table_name_to_id.insert(table_name.clone(), tid);
-            }
+            && let Ok(tid) = table_id_str.parse::<i32>()
+        {
+            table_name_to_id.insert(table_name.clone(), tid);
+        }
     }
     // ── Populate sys_views ──────────────────────────────────────────────
     let mut view_rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut next_view_id = 1i32;
     for (db_name, database) in sorted_databases(catalog) {
-        let db_id = db_rows.iter().find_map(|row| {
-            match (&row[0], &row[1]) {
+        let db_id = db_rows
+            .iter()
+            .find_map(|row| match (&row[0], &row[1]) {
                 (Some(id_str), Some(name)) if name == db_name => id_str.parse::<i32>().ok(),
                 _ => None,
-            }
-        }).unwrap_or(1);
+            })
+            .unwrap_or(1);
 
         let mut view_names: Vec<&String> = database.views.keys().collect();
         view_names.sort();
         for view_name in view_names {
             let view_def = &database.views[view_name];
             view_rows.push(vec![
-                Some(next_view_id.to_string()), // view_id
-                Some(db_id.to_string()),        // db_id
-                Some(view_name.clone()),        // name
-                Some(view_def.query_json.clone()),   // query_json
+                Some(next_view_id.to_string()),    // view_id
+                Some(db_id.to_string()),           // db_id
+                Some(view_name.clone()),           // name
+                Some(view_def.query_json.clone()), // query_json
             ]);
             next_view_id += 1;
         }
@@ -402,7 +416,10 @@ fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<Strin
                 Some(s) => s.to_string_lossy().to_string(),
                 None => continue,
             };
-            let stripped = filename.strip_suffix(".idx").unwrap_or(&filename).to_string();
+            let stripped = filename
+                .strip_suffix(".idx")
+                .unwrap_or(&filename)
+                .to_string();
 
             // Determine if this is a named or legacy format by checking for extra dots
             let (table_name, index_name) = if stripped.contains('.') {
@@ -424,7 +441,10 @@ fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<Strin
             let table_id = match table_name_to_id.get(&table_name) {
                 Some(id) => *id,
                 None => {
-                    log::warn!("[SystemCatalog] Index meta references unknown table '{}', skipping", table_name);
+                    log::warn!(
+                        "[SystemCatalog] Index meta references unknown table '{}', skipping",
+                        table_name
+                    );
                     continue;
                 }
             };
@@ -495,21 +515,22 @@ fn populate_indexes_from_meta(table_name_to_id: &std::collections::HashMap<Strin
             // SYS_INDEXES_SCHEMA: [index_id:INT, table_id:INT, name:VARCHAR(255),
             //                     is_unique:BOOL, is_primary:BOOL, columns:VARCHAR(255)]
             idx_rows.push(vec![
-                Some(next_idx_id.to_string()),           // index_id
-                Some(table_id.to_string()),              // table_id
-                Some(idx_name),                          // name
-                Some(meta.is_unique.to_string()),        // is_unique (persisted in .idx.meta)
-                Some(meta.is_primary.to_string()),       // is_primary
-                Some(columns_field),                     // columns (full composite list)
+                Some(next_idx_id.to_string()),     // index_id
+                Some(table_id.to_string()),        // table_id
+                Some(idx_name),                    // name
+                Some(meta.is_unique.to_string()),  // is_unique (persisted in .idx.meta)
+                Some(meta.is_primary.to_string()), // is_primary
+                Some(columns_field),               // columns (full composite list)
             ]);
             next_idx_id += 1;
         }
     }
 
     if !idx_rows.is_empty()
-        && let Err(e) = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &idx_rows) {
-            log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
-        }
+        && let Err(e) = insert_system_rows("indexes", SYS_INDEXES_SCHEMA, &idx_rows)
+    {
+        log::error!("[SystemCatalog] Failed to write sys_indexes: {}", e);
+    }
 }
 
 /// Strip the `CHECK(...)` wrapper from a sys_constraints `columns` field.

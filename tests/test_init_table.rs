@@ -23,7 +23,8 @@ fn test_init_table() {
     let _bin_cleanup = BinCleanup;
 
     // Initialize table
-    let _hm = HeapManager::create(std::path::PathBuf::from(TEST_FILE)).expect("Failed to create map manager");
+    let _hm = HeapManager::create(std::path::PathBuf::from(TEST_FILE))
+        .expect("Failed to create map manager");
 
     // Open file with read + write
     let mut file = OpenOptions::new()

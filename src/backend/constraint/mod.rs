@@ -12,10 +12,10 @@
 //! validate_row_insert(catalog, db, table, &str_values)?;
 //! ```
 
-pub mod validation;
-pub mod loaders;
-pub mod value_lookup;
 pub mod fk_actions;
+pub mod loaders;
+pub mod validation;
+pub mod value_lookup;
 
 #[cfg(test)]
 pub mod tests;
@@ -40,14 +40,20 @@ pub fn validate_row_insert(
     table_name: &str,
     values: &[&str],
 ) -> Result<(), RookError> {
-    let db = catalog.databases.get(db_name).ok_or_else(|| RookError::NotFound {
-        entity: "Database",
-        name: db_name.to_string(),
-    })?;
-    let table = db.tables.get(table_name).ok_or_else(|| RookError::NotFound {
-        entity: "Table",
-        name: format!("{}.{}", db_name, table_name),
-    })?;
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        })?;
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Table",
+            name: format!("{}.{}", db_name, table_name),
+        })?;
 
     let columns = &table.columns;
 
@@ -59,10 +65,24 @@ pub fn validate_row_insert(
     let meta = crate::backend::cache::metadata(db_name, table_name);
 
     // 2. UNIQUE (via B+ Tree if index exists) — inserts have no self-row
-    validation::check_unique_insert_meta(db_name, table_name, columns, values, &[], meta.as_deref())?;
+    validation::check_unique_insert_meta(
+        db_name,
+        table_name,
+        columns,
+        values,
+        &[],
+        meta.as_deref(),
+    )?;
 
     // 3. FOREIGN KEY (parent key must exist)
-    validation::check_foreign_key_insert_meta(catalog, db_name, table_name, columns, values, meta.as_deref())?;
+    validation::check_foreign_key_insert_meta(
+        catalog,
+        db_name,
+        table_name,
+        columns,
+        values,
+        meta.as_deref(),
+    )?;
 
     // 4. CHECK constraints
     validation::check_constraints_meta(db_name, table_name, columns, values, meta.as_deref())?;
@@ -101,7 +121,8 @@ pub fn validate_row_delete(
         let action_type = &fk.4;
 
         // Find the parent column value from the decoded tuple
-        let parent_value_str = column_values.iter()
+        let parent_value_str = column_values
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
             .map(|(_, val)| match val {
                 crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
@@ -110,33 +131,62 @@ pub fn validate_row_delete(
             })
             .unwrap_or_default();
 
-        if parent_value_str.is_empty() || parent_value_str.eq_ignore_ascii_case("null") || parent_value_str.eq_ignore_ascii_case("NULL") {
+        if parent_value_str.is_empty()
+            || parent_value_str.eq_ignore_ascii_case("null")
+            || parent_value_str.eq_ignore_ascii_case("NULL")
+        {
             continue;
         }
 
         let action_upper = action_type.to_uppercase();
         if action_upper.contains("ON DELETE CASCADE") || action_upper == "FOREIGN KEY CASCADE" {
             // CASCADE: delete all child rows that reference this parent value
-            let mut visited: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+            let mut visited: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
             visited.insert((child_table.clone(), parent_value_str.clone()));
             fk_actions::cascade_delete_child_rows(
-                catalog, db_name, child_table, child_col, &parent_value_str, &mut visited,
+                catalog,
+                db_name,
+                child_table,
+                child_col,
+                &parent_value_str,
+                &mut visited,
             )?;
-        } else if action_upper.contains("ON DELETE SET NULL") || action_upper == "FOREIGN KEY SET NULL" {
+        } else if action_upper.contains("ON DELETE SET NULL")
+            || action_upper == "FOREIGN KEY SET NULL"
+        {
             // SET NULL: set the FK column to NULL in all referencing child rows
-            let mut visited: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+            let mut visited: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
             visited.insert((child_table.clone(), parent_value_str.clone()));
-            fk_actions::set_null_child_rows(catalog, db_name, child_table, child_col, &parent_value_str, &mut visited)?;
+            fk_actions::set_null_child_rows(
+                catalog,
+                db_name,
+                child_table,
+                child_col,
+                &parent_value_str,
+                &mut visited,
+            )?;
         } else {
             // RESTRICT (default): block the DELETE if child rows exist
-            if value_lookup::child_has_referencing_row(db_name, child_table, child_col, &parent_value_str)? {
+            if value_lookup::child_has_referencing_row(
+                db_name,
+                child_table,
+                child_col,
+                &parent_value_str,
+            )? {
                 return Err(RookError::constraint(
                     ConstraintKind::ForeignKey,
                     table_name,
                     Some(parent_col),
                     format!(
                         "FOREIGN KEY constraint violated: cannot delete from '{}' because value '{}' is referenced by '{}' (column '{}' referencing '{}.{}')",
-                        table_name, parent_value_str, child_table, child_col, table_name, parent_col
+                        table_name,
+                        parent_value_str,
+                        child_table,
+                        child_col,
+                        table_name,
+                        parent_col
                     ),
                 ));
             }
@@ -175,7 +225,8 @@ pub fn propagate_update_to_children(
         let action_type = &fk.4;
 
         // Find the OLD value of the parent column
-        let old_val = old_decoded.iter()
+        let old_val = old_decoded
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
             .map(|(_, v)| match v {
                 crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
@@ -184,12 +235,16 @@ pub fn propagate_update_to_children(
             })
             .unwrap_or_default();
 
-        if old_val.is_empty() || old_val.eq_ignore_ascii_case("null") || old_val.eq_ignore_ascii_case("NULL") {
+        if old_val.is_empty()
+            || old_val.eq_ignore_ascii_case("null")
+            || old_val.eq_ignore_ascii_case("NULL")
+        {
             continue;
         }
 
         // Find the NEW value of the parent column
-        let new_val = new_decoded.iter()
+        let new_val = new_decoded
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
             .map(|(_, v)| match v {
                 crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
@@ -206,18 +261,35 @@ pub fn propagate_update_to_children(
         let action_upper = action_type.to_uppercase();
 
         if action_upper.contains("ON UPDATE CASCADE") {
-            if !new_val.is_empty() && !new_val.eq_ignore_ascii_case("null") && !new_val.eq_ignore_ascii_case("NULL") {
-                let mut visited: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+            if !new_val.is_empty()
+                && !new_val.eq_ignore_ascii_case("null")
+                && !new_val.eq_ignore_ascii_case("NULL")
+            {
+                let mut visited: std::collections::HashSet<(String, String)> =
+                    std::collections::HashSet::new();
                 visited.insert((child_table.clone(), old_val.clone()));
                 fk_actions::update_child_rows_fk(
-                    catalog, db_name, child_table, child_col,
-                    &old_val, &new_val, &mut visited,
+                    catalog,
+                    db_name,
+                    child_table,
+                    child_col,
+                    &old_val,
+                    &new_val,
+                    &mut visited,
                 )?;
             }
         } else if action_upper.contains("ON UPDATE SET NULL") {
-            let mut visited: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+            let mut visited: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
             visited.insert((child_table.clone(), old_val.clone()));
-            fk_actions::set_null_child_rows(catalog, db_name, child_table, child_col, &old_val, &mut visited)?;
+            fk_actions::set_null_child_rows(
+                catalog,
+                db_name,
+                child_table,
+                child_col,
+                &old_val,
+                &mut visited,
+            )?;
         } else {
             // RESTRICT (default): block the UPDATE if child rows reference the old value
             if value_lookup::child_has_referencing_row(db_name, child_table, child_col, &old_val)? {
@@ -259,12 +331,14 @@ pub fn validate_update_restrict(
         let action_type = &fk.4;
 
         let action_upper = action_type.to_uppercase();
-        if action_upper.contains("ON UPDATE CASCADE") || action_upper.contains("ON UPDATE SET NULL") {
+        if action_upper.contains("ON UPDATE CASCADE") || action_upper.contains("ON UPDATE SET NULL")
+        {
             continue;
         }
 
         // Find the OLD value of the parent column
-        let old_val = old_decoded.iter()
+        let old_val = old_decoded
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
             .map(|(_, v)| match v {
                 crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
@@ -278,7 +352,8 @@ pub fn validate_update_restrict(
         }
 
         // Find the NEW value of the parent column
-        let new_val = new_decoded.iter()
+        let new_val = new_decoded
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(parent_col))
             .map(|(_, v)| match v {
                 crate::backend::executor::delete::ColumnValue::Int(n) => n.to_string(),
@@ -340,14 +415,20 @@ pub fn validate_row_update_with_excludes(
     new_values: &[&str],
     exclude_ptrs: &[(u32, u32)],
 ) -> Result<(), RookError> {
-    let db = catalog.databases.get(db_name).ok_or_else(|| RookError::NotFound {
-        entity: "Database",
-        name: db_name.to_string(),
-    })?;
-    let table = db.tables.get(table_name).ok_or_else(|| RookError::NotFound {
-        entity: "Table",
-        name: format!("{}.{}", db_name, table_name),
-    })?;
+    let db = catalog
+        .databases
+        .get(db_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Database",
+            name: db_name.to_string(),
+        })?;
+    let table = db
+        .tables
+        .get(table_name)
+        .ok_or_else(|| RookError::NotFound {
+            entity: "Table",
+            name: format!("{}.{}", db_name, table_name),
+        })?;
 
     let columns = &table.columns;
 
@@ -358,10 +439,24 @@ pub fn validate_row_update_with_excludes(
     validation::check_not_null(table_name, columns, new_values)?;
 
     // 2. UNIQUE — self/batch matches excluded via `exclude_ptrs`
-    validation::check_unique_insert_meta(db_name, table_name, columns, new_values, exclude_ptrs, meta.as_deref())?;
+    validation::check_unique_insert_meta(
+        db_name,
+        table_name,
+        columns,
+        new_values,
+        exclude_ptrs,
+        meta.as_deref(),
+    )?;
 
     // 3. FOREIGN KEY (parent key must exist)
-    validation::check_foreign_key_insert_meta(catalog, db_name, table_name, columns, new_values, meta.as_deref())?;
+    validation::check_foreign_key_insert_meta(
+        catalog,
+        db_name,
+        table_name,
+        columns,
+        new_values,
+        meta.as_deref(),
+    )?;
 
     // 4. CHECK constraints
     validation::check_constraints_meta(db_name, table_name, columns, new_values, meta.as_deref())?;

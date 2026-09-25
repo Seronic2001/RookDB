@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 mod common;
 use storage_manager::catalog::{Column, Database, Table, init_catalog, load_catalog, save_catalog};
 use storage_manager::types::DataType;
@@ -83,12 +83,9 @@ fn test_save_catalog() {
     );
 
     assert!(users_table.columns.iter().all(|c| c.nullable));
-    assert!(
-        users_table
-            .columns
-            .iter()
-            .all(|c| !c.constraints.not_null && !c.constraints.unique && c.constraints.default.is_none())
-    );
+    assert!(users_table.columns.iter().all(|c| !c.constraints.not_null
+        && !c.constraints.unique
+        && c.constraints.default.is_none()));
 
     // Step 7: Clean up (optional)
     if Path::new(CATALOG_FILE).exists() {

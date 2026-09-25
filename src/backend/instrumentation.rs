@@ -1,5 +1,5 @@
 //! Instrumentation module for counting FSM and Heap operations
-//! 
+//!
 //! This module provides atomic counters that track function calls
 //! without impacting performance. Enable verbose output via env_logger
 //! or use `get_stats()` for programmatic access.
@@ -76,7 +76,9 @@ impl StatsSnapshot {
             fsm_read_page: FSM_METRICS.fsm_read_page_calls.load(Ordering::Relaxed),
             fsm_write_page: FSM_METRICS.fsm_write_page_calls.load(Ordering::Relaxed),
             fsm_serialize_page: FSM_METRICS.fsm_serialize_page_calls.load(Ordering::Relaxed),
-            fsm_deserialize_page: FSM_METRICS.fsm_deserialize_page_calls.load(Ordering::Relaxed),
+            fsm_deserialize_page: FSM_METRICS
+                .fsm_deserialize_page_calls
+                .load(Ordering::Relaxed),
             fsm_set_avail: FSM_METRICS.fsm_set_avail_calls.load(Ordering::Relaxed),
             fsm_vacuum_update: FSM_METRICS.fsm_vacuum_update_calls.load(Ordering::Relaxed),
             heap_insert_tuple: HEAP_METRICS.insert_tuple_calls.load(Ordering::Relaxed),
@@ -90,20 +92,32 @@ impl StatsSnapshot {
 
     /// Reset all counters to zero
     pub fn reset_all() {
-        FSM_METRICS.fsm_search_avail_calls.store(0, Ordering::Relaxed);
-        FSM_METRICS.fsm_search_tree_calls.store(0, Ordering::Relaxed);
+        FSM_METRICS
+            .fsm_search_avail_calls
+            .store(0, Ordering::Relaxed);
+        FSM_METRICS
+            .fsm_search_tree_calls
+            .store(0, Ordering::Relaxed);
         FSM_METRICS.fsm_read_page_calls.store(0, Ordering::Relaxed);
         FSM_METRICS.fsm_write_page_calls.store(0, Ordering::Relaxed);
-        FSM_METRICS.fsm_serialize_page_calls.store(0, Ordering::Relaxed);
-        FSM_METRICS.fsm_deserialize_page_calls.store(0, Ordering::Relaxed);
+        FSM_METRICS
+            .fsm_serialize_page_calls
+            .store(0, Ordering::Relaxed);
+        FSM_METRICS
+            .fsm_deserialize_page_calls
+            .store(0, Ordering::Relaxed);
         FSM_METRICS.fsm_set_avail_calls.store(0, Ordering::Relaxed);
-        FSM_METRICS.fsm_vacuum_update_calls.store(0, Ordering::Relaxed);
+        FSM_METRICS
+            .fsm_vacuum_update_calls
+            .store(0, Ordering::Relaxed);
         HEAP_METRICS.insert_tuple_calls.store(0, Ordering::Relaxed);
         HEAP_METRICS.get_tuple_calls.store(0, Ordering::Relaxed);
         HEAP_METRICS.allocate_page_calls.store(0, Ordering::Relaxed);
         HEAP_METRICS.write_page_calls.store(0, Ordering::Relaxed);
         HEAP_METRICS.read_page_calls.store(0, Ordering::Relaxed);
-        HEAP_METRICS.page_free_space_calls.store(0, Ordering::Relaxed);
+        HEAP_METRICS
+            .page_free_space_calls
+            .store(0, Ordering::Relaxed);
     }
 
     /// Print stats in a formatted table
@@ -112,22 +126,64 @@ impl StatsSnapshot {
         println!("║                    OPERATION METRICS                         ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║ FSM Operations:                                              ║");
-        println!("║  - fsm_search_avail:     {:8} calls                      ║", self.fsm_search_avail);
-        println!("║  - fsm_search_tree:      {:8} calls                      ║", self.fsm_search_tree);
-        println!("║  - fsm_read_page:        {:8} calls                      ║", self.fsm_read_page);
-        println!("║  - fsm_write_page:       {:8} calls                      ║", self.fsm_write_page);
-        println!("║  - fsm_serialize_page:   {:8} calls                      ║", self.fsm_serialize_page);
-        println!("║  - fsm_deserialize_page: {:8} calls                      ║", self.fsm_deserialize_page);
-        println!("║  - fsm_set_avail:        {:8} calls                      ║", self.fsm_set_avail);
-        println!("║  - fsm_vacuum_update:    {:8} calls                      ║", self.fsm_vacuum_update);
+        println!(
+            "║  - fsm_search_avail:     {:8} calls                      ║",
+            self.fsm_search_avail
+        );
+        println!(
+            "║  - fsm_search_tree:      {:8} calls                      ║",
+            self.fsm_search_tree
+        );
+        println!(
+            "║  - fsm_read_page:        {:8} calls                      ║",
+            self.fsm_read_page
+        );
+        println!(
+            "║  - fsm_write_page:       {:8} calls                      ║",
+            self.fsm_write_page
+        );
+        println!(
+            "║  - fsm_serialize_page:   {:8} calls                      ║",
+            self.fsm_serialize_page
+        );
+        println!(
+            "║  - fsm_deserialize_page: {:8} calls                      ║",
+            self.fsm_deserialize_page
+        );
+        println!(
+            "║  - fsm_set_avail:        {:8} calls                      ║",
+            self.fsm_set_avail
+        );
+        println!(
+            "║  - fsm_vacuum_update:    {:8} calls                      ║",
+            self.fsm_vacuum_update
+        );
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║ Heap Operations:                                             ║");
-        println!("║  - insert_tuple:         {:8} calls                      ║", self.heap_insert_tuple);
-        println!("║  - get_tuple:            {:8} calls                      ║", self.heap_get_tuple);
-        println!("║  - allocate_page:        {:8} calls                      ║", self.heap_allocate_page);
-        println!("║  - write_page:           {:8} calls                      ║", self.heap_write_page);
-        println!("║  - read_page:            {:8} calls                      ║", self.heap_read_page);
-        println!("║  - page_free_space:      {:8} calls                      ║", self.heap_page_free_space);
+        println!(
+            "║  - insert_tuple:         {:8} calls                      ║",
+            self.heap_insert_tuple
+        );
+        println!(
+            "║  - get_tuple:            {:8} calls                      ║",
+            self.heap_get_tuple
+        );
+        println!(
+            "║  - allocate_page:        {:8} calls                      ║",
+            self.heap_allocate_page
+        );
+        println!(
+            "║  - write_page:           {:8} calls                      ║",
+            self.heap_write_page
+        );
+        println!(
+            "║  - read_page:            {:8} calls                      ║",
+            self.heap_read_page
+        );
+        println!(
+            "║  - page_free_space:      {:8} calls                      ║",
+            self.heap_page_free_space
+        );
         println!("╚══════════════════════════════════════════════════════════════╝\n");
     }
 }

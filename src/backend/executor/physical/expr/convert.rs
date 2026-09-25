@@ -5,21 +5,21 @@ use crate::backend::error::{RookError, RookResult};
 use crate::types::value::DataValue;
 
 use super::Expr;
-use super::predicate::{Predicate, ComparisonOp, BooleanTest};
+use super::predicate::{BooleanTest, ComparisonOp, Predicate};
 
 /// Convert a `rook_ast::ExprNode` into a physical `Expr`, resolving column
 /// names against a schema.
-pub fn expr_from_ast(
-    node: &rook_ast::ExprNode,
-    column_names: &[String],
-) -> RookResult<Expr> {
+pub fn expr_from_ast(node: &rook_ast::ExprNode, column_names: &[String]) -> RookResult<Expr> {
     match node {
         rook_ast::ExprNode::Column(name) => {
             // Unqualified column reference — just store the column name.
             // Resolution happens at evaluation time against the tuple's schema.
             // Verify the column exists in the schema for early error detection.
             if !column_names.iter().any(|c| c == name) {
-                return Err(RookError::NotFound { entity: "Column", name: name.clone() });
+                return Err(RookError::NotFound {
+                    entity: "Column",
+                    name: name.clone(),
+                });
             }
             Ok(Expr::Column {
                 table: None,
@@ -28,9 +28,9 @@ pub fn expr_from_ast(
         }
         rook_ast::ExprNode::Compound(parts) => {
             // Qualified column reference — extract table and column name.
-            let column = parts.last().ok_or_else(|| {
-                RookError::Internal("Empty compound identifier".to_string())
-            })?;
+            let column = parts
+                .last()
+                .ok_or_else(|| RookError::Internal("Empty compound identifier".to_string()))?;
             let table = if parts.len() >= 2 {
                 Some(parts[parts.len() - 2].clone())
             } else {
@@ -38,19 +38,20 @@ pub fn expr_from_ast(
             };
             // Verify the column exists in the schema for early error detection.
             if !column_names.iter().any(|c| c == column) {
-                return Err(RookError::NotFound { entity: "Column", name: column.clone() });
+                return Err(RookError::NotFound {
+                    entity: "Column",
+                    name: column.clone(),
+                });
             }
             Ok(Expr::Column {
                 table,
                 column: column.clone(),
             })
         }
-        rook_ast::ExprNode::Constant(cv) => {
-            constant_from_ast(cv).map(|c| match c {
-                Some(dv) => Expr::Constant(dv),
-                None => Expr::Null,
-            })
-        }
+        rook_ast::ExprNode::Constant(cv) => constant_from_ast(cv).map(|c| match c {
+            Some(dv) => Expr::Constant(dv),
+            None => Expr::Null,
+        }),
         rook_ast::ExprNode::Binary { left, op, right } => {
             let l = expr_from_ast(left, column_names)?;
             let r = expr_from_ast(right, column_names)?;
@@ -63,23 +64,28 @@ pub fn expr_from_ast(
         }
         rook_ast::ExprNode::Cast { expr, data_type } => {
             let inner = expr_from_ast(expr, column_names)?;
-            let target_dt: crate::types::datatype::DataType = data_type.parse()
-                .map_err(|e: String| RookError::TypeMismatch(format!(
-                    "Invalid CAST target type '{}': {}", data_type, e
-                )))?;
+            let target_dt: crate::types::datatype::DataType =
+                data_type.parse().map_err(|e: String| {
+                    RookError::TypeMismatch(format!(
+                        "Invalid CAST target type '{}': {}",
+                        data_type, e
+                    ))
+                })?;
             Ok(Expr::Cast(Box::new(inner), target_dt))
         }
         // Scalar subqueries should be materialized before reaching this function.
-        rook_ast::ExprNode::ScalarSubquery(_) => {
-            Err(RookError::Internal(
-                "Scalar subqueries must be materialized before expr_from_ast".to_string(),
-            ))
-        }
+        rook_ast::ExprNode::ScalarSubquery(_) => Err(RookError::Internal(
+            "Scalar subqueries must be materialized before expr_from_ast".to_string(),
+        )),
         // Scalar function calls — convert each argument and create an Expr::Function.
         // Aggregate functions (COUNT, SUM, AVG, MIN, MAX) are handled by the
         // AggregateOperator and should not reach this path (the physical planner
         // strips them from projection expressions before calling expr_from_ast).
-        rook_ast::ExprNode::Function { name, args, distinct: _ } => {
+        rook_ast::ExprNode::Function {
+            name,
+            args,
+            distinct: _,
+        } => {
             let mut expr_args = Vec::new();
             for arg in args {
                 match arg {
@@ -202,14 +208,13 @@ pub fn predicate_from_ast(
         }
         rook_ast::PredicateNode::InList { expr, list } => {
             let e = expr_from_ast(expr, column_names)?;
-            let items: RookResult<Vec<Expr>> = list.iter()
+            let items: RookResult<Vec<Expr>> = list
+                .iter()
                 .map(|item| expr_from_ast(item, column_names))
                 .collect();
             let items = items?;
             // x IN (a, b, c) → (x = a) OR (x = b) OR (x = c)
-            let mut or_pred = Predicate::Compare(
-                e.clone(), ComparisonOp::Equals, items[0].clone(),
-            );
+            let mut or_pred = Predicate::Compare(e.clone(), ComparisonOp::Equals, items[0].clone());
             for item in &items[1..] {
                 or_pred = Predicate::or(
                     or_pred,
@@ -218,7 +223,11 @@ pub fn predicate_from_ast(
             }
             Ok(or_pred)
         }
-        rook_ast::PredicateNode::Like { expr, pattern, escape_char } => {
+        rook_ast::PredicateNode::Like {
+            expr,
+            pattern,
+            escape_char,
+        } => {
             let e = expr_from_ast(expr, column_names)?;
             Ok(Predicate::Like(e, pattern.clone(), *escape_char))
         }
@@ -264,7 +273,7 @@ fn constant_from_ast(cv: &rook_ast::ConstantValue) -> RookResult<Option<DataValu
             } else {
                 Ok(Some(DataValue::BigInt(*i)))
             }
-        },
+        }
         rook_ast::ConstantValue::Float(f) => Ok(Some(DataValue::DoublePrecision(
             crate::types::value::OrderedF64(*f),
         ))),

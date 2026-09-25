@@ -7,8 +7,8 @@ use crate::catalog::{Catalog, Column, Constraints, Database, Table};
 use crate::types::DataType;
 
 use super::super::collect_labels;
-use super::helpers::*;
 use super::Optimizer;
+use super::helpers::*;
 
 use rook_ast::logical::*;
 use rook_ast::*;
@@ -17,46 +17,110 @@ use std::collections::HashMap;
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
 fn make_test_catalog() -> Catalog {
-    let mut catalog = Catalog { databases: HashMap::new() };
+    let mut catalog = Catalog {
+        databases: HashMap::new(),
+    };
     let users_table = Table {
         columns: vec![
-            Column { name: "id".to_string(), data_type: DataType::Int, nullable: false, constraints: Constraints::default() },
-            Column { name: "name".to_string(), data_type: DataType::Varchar(100), nullable: true, constraints: Constraints::default() },
-            Column { name: "age".to_string(), data_type: DataType::Int, nullable: true, constraints: Constraints::default() },
-            Column { name: "email".to_string(), data_type: DataType::Varchar(255), nullable: true, constraints: Constraints::default() },
+            Column {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+                nullable: false,
+                constraints: Constraints::default(),
+            },
+            Column {
+                name: "name".to_string(),
+                data_type: DataType::Varchar(100),
+                nullable: true,
+                constraints: Constraints::default(),
+            },
+            Column {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+                nullable: true,
+                constraints: Constraints::default(),
+            },
+            Column {
+                name: "email".to_string(),
+                data_type: DataType::Varchar(255),
+                nullable: true,
+                constraints: Constraints::default(),
+            },
         ],
     };
     let orders_table = Table {
         columns: vec![
-            Column { name: "id".to_string(), data_type: DataType::Int, nullable: false, constraints: Constraints::default() },
-            Column { name: "user_id".to_string(), data_type: DataType::Int, nullable: true, constraints: Constraints::default() },
-            Column { name: "amount".to_string(), data_type: DataType::DoublePrecision, nullable: true, constraints: Constraints::default() },
+            Column {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+                nullable: false,
+                constraints: Constraints::default(),
+            },
+            Column {
+                name: "user_id".to_string(),
+                data_type: DataType::Int,
+                nullable: true,
+                constraints: Constraints::default(),
+            },
+            Column {
+                name: "amount".to_string(),
+                data_type: DataType::DoublePrecision,
+                nullable: true,
+                constraints: Constraints::default(),
+            },
         ],
     };
     let mut tables = HashMap::new();
     tables.insert("users".to_string(), users_table);
     tables.insert("orders".to_string(), orders_table);
-    catalog.databases.insert("test_db".to_string(), Database { tables, views: HashMap::new() });
+    catalog.databases.insert(
+        "test_db".to_string(),
+        Database {
+            tables,
+            views: HashMap::new(),
+        },
+    );
     catalog
 }
 
-fn column(name: &str) -> ExprNode { ExprNode::Column(name.to_string()) }
-fn constant_int(value: i64) -> ExprNode { ExprNode::Constant(ConstantValue::Int(value)) }
-fn constant_float(value: f64) -> ExprNode { ExprNode::Constant(ConstantValue::Float(value)) }
+fn column(name: &str) -> ExprNode {
+    ExprNode::Column(name.to_string())
+}
+fn constant_int(value: i64) -> ExprNode {
+    ExprNode::Constant(ConstantValue::Int(value))
+}
+fn constant_float(value: f64) -> ExprNode {
+    ExprNode::Constant(ConstantValue::Float(value))
+}
 
 fn gt_pred(left: ExprNode, right: ExprNode) -> PredicateNode {
-    PredicateNode::Compare { left: Box::new(left), op: ComparisonOp::Gt, right: Box::new(right) }
+    PredicateNode::Compare {
+        left: Box::new(left),
+        op: ComparisonOp::Gt,
+        right: Box::new(right),
+    }
 }
 fn eq_pred(left: ExprNode, right: ExprNode) -> PredicateNode {
-    PredicateNode::Compare { left: Box::new(left), op: ComparisonOp::Eq, right: Box::new(right) }
+    PredicateNode::Compare {
+        left: Box::new(left),
+        op: ComparisonOp::Eq,
+        right: Box::new(right),
+    }
 }
 
 fn make_table_scan(table: &str, columns: &[&str]) -> LogicalPlan {
     LogicalPlan::TableScan(LogicalTableScan {
-        table: table.to_string(), alias: None,
+        table: table.to_string(),
+        alias: None,
         schema: ColumnSchema {
-            columns: columns.iter().map(|c| ColumnInfo {
-                name: c.to_string(), data_type: "INT".to_string(), nullable: true }).collect(),
+            columns: columns
+                .iter()
+                .map(|c| ColumnInfo {
+                    name: c.to_string(),
+                    data_type: "INT".to_string(),
+                    nullable: true,
+                })
+                .collect(),
         },
         system_table_name: None,
     })
@@ -67,7 +131,9 @@ fn make_table_scan(table: &str, columns: &[&str]) -> LogicalPlan {
 #[test]
 fn test_fold_simple_arithmetic() {
     let expr = ExprNode::Binary {
-        left: Box::new(constant_int(2)), op: ArithOp::Add, right: Box::new(constant_int(3)),
+        left: Box::new(constant_int(2)),
+        op: ArithOp::Add,
+        right: Box::new(constant_int(3)),
     };
     assert_eq!(fold_expr(&expr), ExprNode::Constant(ConstantValue::Int(5)));
 }
@@ -75,10 +141,14 @@ fn test_fold_simple_arithmetic() {
 #[test]
 fn test_fold_complex_expression() {
     let inner = ExprNode::Binary {
-        left: Box::new(constant_int(2)), op: ArithOp::Add, right: Box::new(constant_int(3)),
+        left: Box::new(constant_int(2)),
+        op: ArithOp::Add,
+        right: Box::new(constant_int(3)),
     };
     let expr = ExprNode::Binary {
-        left: Box::new(inner), op: ArithOp::Mul, right: Box::new(constant_int(4)),
+        left: Box::new(inner),
+        op: ArithOp::Mul,
+        right: Box::new(constant_int(4)),
     };
     assert_eq!(fold_expr(&expr), ExprNode::Constant(ConstantValue::Int(20)));
 }
@@ -86,23 +156,34 @@ fn test_fold_complex_expression() {
 #[test]
 fn test_fold_float_arithmetic() {
     let expr = ExprNode::Binary {
-        left: Box::new(constant_float(1.5)), op: ArithOp::Add, right: Box::new(constant_float(2.5)),
+        left: Box::new(constant_float(1.5)),
+        op: ArithOp::Add,
+        right: Box::new(constant_float(2.5)),
     };
-    assert_eq!(fold_expr(&expr), ExprNode::Constant(ConstantValue::Float(4.0)));
+    assert_eq!(
+        fold_expr(&expr),
+        ExprNode::Constant(ConstantValue::Float(4.0))
+    );
 }
 
 #[test]
 fn test_fold_mixed_types() {
     let expr = ExprNode::Binary {
-        left: Box::new(constant_int(3)), op: ArithOp::Add, right: Box::new(constant_float(2.5)),
+        left: Box::new(constant_int(3)),
+        op: ArithOp::Add,
+        right: Box::new(constant_float(2.5)),
     };
-    assert_eq!(fold_expr(&expr), ExprNode::Constant(ConstantValue::Float(5.5)));
+    assert_eq!(
+        fold_expr(&expr),
+        ExprNode::Constant(ConstantValue::Float(5.5))
+    );
 }
 
 #[test]
 fn test_fold_null_propagation() {
     let expr = ExprNode::Binary {
-        left: Box::new(constant_int(5)), op: ArithOp::Add,
+        left: Box::new(constant_int(5)),
+        op: ArithOp::Add,
         right: Box::new(ExprNode::Constant(ConstantValue::Null)),
     };
     assert_eq!(fold_expr(&expr), ExprNode::Constant(ConstantValue::Null));
@@ -111,7 +192,9 @@ fn test_fold_null_propagation() {
 #[test]
 fn test_fold_division_by_zero() {
     let expr = ExprNode::Binary {
-        left: Box::new(constant_int(5)), op: ArithOp::Div, right: Box::new(constant_int(0)),
+        left: Box::new(constant_int(5)),
+        op: ArithOp::Div,
+        right: Box::new(constant_int(0)),
     };
     assert_eq!(fold_expr(&expr), ExprNode::Constant(ConstantValue::Null));
 }
@@ -119,12 +202,16 @@ fn test_fold_division_by_zero() {
 #[test]
 fn test_fold_identity_ops() {
     let expr = ExprNode::Binary {
-        left: Box::new(column("age")), op: ArithOp::Add, right: Box::new(constant_int(0)),
+        left: Box::new(column("age")),
+        op: ArithOp::Add,
+        right: Box::new(constant_int(0)),
     };
     assert_eq!(fold_expr(&expr), column("age"));
 
     let expr2 = ExprNode::Binary {
-        left: Box::new(column("age")), op: ArithOp::Mul, right: Box::new(constant_int(1)),
+        left: Box::new(column("age")),
+        op: ArithOp::Mul,
+        right: Box::new(constant_int(1)),
     };
     assert_eq!(fold_expr(&expr2), column("age"));
 }
@@ -132,10 +219,16 @@ fn test_fold_identity_ops() {
 #[test]
 fn test_fold_column_expression_unchanged() {
     let expr = ExprNode::Binary {
-        left: Box::new(column("age")), op: ArithOp::Sub, right: Box::new(constant_int(5)),
+        left: Box::new(column("age")),
+        op: ArithOp::Sub,
+        right: Box::new(constant_int(5)),
     };
     match fold_expr(&expr) {
-        ExprNode::Binary { ref left, op: _, ref right } => {
+        ExprNode::Binary {
+            ref left,
+            op: _,
+            ref right,
+        } => {
             assert_eq!(*left.as_ref(), column("age"));
             assert_eq!(*right.as_ref(), constant_int(5));
         }
@@ -150,13 +243,20 @@ fn test_push_filter_through_sort() {
     let plan = LogicalPlan::Filter(LogicalFilter {
         predicate: gt_pred(column("age"), constant_int(18)),
         child: Box::new(LogicalPlan::Sort(LogicalSort {
-            order_by: vec![OrderByExpr { expr: column("name"), ascending: true }],
-            child: Box::new(make_table_scan("users", &["id", "name", "age"])), limit: None,
+            order_by: vec![OrderByExpr {
+                expr: column("name"),
+                ascending: true,
+            }],
+            child: Box::new(make_table_scan("users", &["id", "name", "age"])),
+            limit: None,
         })),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.predicate_pushdown(plan);
-    assert_eq!(collect_labels(&optimized), vec!["Sort", "Filter", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Sort", "Filter", "TableScan"]
+    );
 }
 
 #[test]
@@ -169,7 +269,10 @@ fn test_push_filter_through_distinct() {
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.predicate_pushdown(plan);
-    assert_eq!(collect_labels(&optimized), vec!["Distinct", "Filter", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Distinct", "Filter", "TableScan"]
+    );
 }
 
 #[test]
@@ -192,16 +295,28 @@ fn test_push_filter_through_project_passthrough() {
         predicate: gt_pred(column("age"), constant_int(18)),
         child: Box::new(LogicalPlan::Project(LogicalProject {
             expressions: vec![
-                NamedExpr { name: "id".to_string(), expr: column("id") },
-                NamedExpr { name: "name".to_string(), expr: column("name") },
-                NamedExpr { name: "age".to_string(), expr: column("age") },
+                NamedExpr {
+                    name: "id".to_string(),
+                    expr: column("id"),
+                },
+                NamedExpr {
+                    name: "name".to_string(),
+                    expr: column("name"),
+                },
+                NamedExpr {
+                    name: "age".to_string(),
+                    expr: column("age"),
+                },
             ],
             child: Box::new(make_table_scan("users", &["id", "name", "age"])),
         })),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.predicate_pushdown(plan);
-    assert_eq!(collect_labels(&optimized), vec!["Project", "Filter", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Project", "Filter", "TableScan"]
+    );
 }
 
 #[test]
@@ -209,13 +324,17 @@ fn test_cannot_push_filter_through_limit() {
     let plan = LogicalPlan::Filter(LogicalFilter {
         predicate: gt_pred(column("age"), constant_int(18)),
         child: Box::new(LogicalPlan::Limit(LogicalLimit {
-            limit: 10, offset: 0,
+            limit: 10,
+            offset: 0,
             child: Box::new(make_table_scan("users", &["id", "name", "age"])),
         })),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.predicate_pushdown(plan);
-    assert_eq!(collect_labels(&optimized), vec!["Filter", "Limit", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Filter", "Limit", "TableScan"]
+    );
 }
 
 // ─── Limit Pushdown Tests ─────────────────────────────────────────────────────
@@ -223,52 +342,84 @@ fn test_cannot_push_filter_through_limit() {
 #[test]
 fn test_limit_pushdown_through_sort() {
     let plan = LogicalPlan::Limit(LogicalLimit {
-        limit: 10, offset: 0,
+        limit: 10,
+        offset: 0,
         child: Box::new(LogicalPlan::Sort(LogicalSort {
-            order_by: vec![OrderByExpr { expr: column("name"), ascending: true }],
-            child: Box::new(make_table_scan("users", &["id", "name"])), limit: None,
+            order_by: vec![OrderByExpr {
+                expr: column("name"),
+                ascending: true,
+            }],
+            child: Box::new(make_table_scan("users", &["id", "name"])),
+            limit: None,
         })),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.limit_pushdown(plan);
     assert_eq!(collect_labels(&optimized), vec!["Sort", "TableScan"]);
-    if let LogicalPlan::Sort(s) = &optimized { assert_eq!(s.limit, Some(10)); }
-    else { panic!("Expected Sort node"); }
+    if let LogicalPlan::Sort(s) = &optimized {
+        assert_eq!(s.limit, Some(10));
+    } else {
+        panic!("Expected Sort node");
+    }
 }
 
 #[test]
 fn test_limit_with_offset_not_pushed() {
     let plan = LogicalPlan::Limit(LogicalLimit {
-        limit: 10, offset: 5,
+        limit: 10,
+        offset: 5,
         child: Box::new(LogicalPlan::Sort(LogicalSort {
-            order_by: vec![OrderByExpr { expr: column("name"), ascending: true }],
-            child: Box::new(make_table_scan("users", &["id", "name"])), limit: None,
+            order_by: vec![OrderByExpr {
+                expr: column("name"),
+                ascending: true,
+            }],
+            child: Box::new(make_table_scan("users", &["id", "name"])),
+            limit: None,
         })),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.limit_pushdown(plan);
-    assert_eq!(collect_labels(&optimized), vec!["Limit", "Sort", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Limit", "Sort", "TableScan"]
+    );
 }
 
 #[test]
 fn test_limit_pushdown_with_project() {
     let plan = LogicalPlan::Limit(LogicalLimit {
-        limit: 5, offset: 0,
+        limit: 5,
+        offset: 0,
         child: Box::new(LogicalPlan::Project(LogicalProject {
-            expressions: vec![NamedExpr { name: "age".to_string(), expr: column("age") }],
+            expressions: vec![NamedExpr {
+                name: "age".to_string(),
+                expr: column("age"),
+            }],
             child: Box::new(LogicalPlan::Sort(LogicalSort {
-                order_by: vec![OrderByExpr { expr: column("name"), ascending: true }],
-                child: Box::new(make_table_scan("users", &["id", "name", "age"])), limit: None,
+                order_by: vec![OrderByExpr {
+                    expr: column("name"),
+                    ascending: true,
+                }],
+                child: Box::new(make_table_scan("users", &["id", "name", "age"])),
+                limit: None,
             })),
         })),
     });
     let optimizer = Optimizer::new();
     let optimized = optimizer.limit_pushdown(plan);
-    assert_eq!(collect_labels(&optimized), vec!["Project", "Sort", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Project", "Sort", "TableScan"]
+    );
     if let LogicalPlan::Project(p) = &optimized {
-        if let LogicalPlan::Sort(s) = &*p.child { assert_eq!(s.limit, Some(5)); }
-        else { panic!("Expected Sort under Project"); }
-    } else { panic!("Expected Project root"); }
+        if let LogicalPlan::Sort(s) = &*p.child {
+            assert_eq!(s.limit, Some(5));
+        } else {
+            panic!("Expected Sort under Project");
+        }
+    } else {
+        panic!("Expected Project root");
+    }
 }
 
 // ─── Full Optimizer Pipeline Tests ───────────────────────────────────────────
@@ -277,20 +428,40 @@ fn test_limit_pushdown_with_project() {
 fn test_full_optimizer_pipeline() {
     let catalog = make_test_catalog();
     let table_scan = LogicalPlan::TableScan(LogicalTableScan {
-        table: "users".to_string(), alias: None,
+        table: "users".to_string(),
+        alias: None,
         schema: ColumnSchema {
-            columns: catalog.databases.get("test_db").unwrap().tables.get("users").unwrap().columns.iter().map(|c| {
-                ColumnInfo { name: c.name.clone(), data_type: c.data_type.to_string(), nullable: c.nullable }
-            }).collect(),
+            columns: catalog
+                .databases
+                .get("test_db")
+                .unwrap()
+                .tables
+                .get("users")
+                .unwrap()
+                .columns
+                .iter()
+                .map(|c| ColumnInfo {
+                    name: c.name.clone(),
+                    data_type: c.data_type.to_string(),
+                    nullable: c.nullable,
+                })
+                .collect(),
         },
         system_table_name: None,
     });
     let plan = LogicalPlan::Limit(LogicalLimit {
-        limit: 10, offset: 0,
+        limit: 10,
+        offset: 0,
         child: Box::new(LogicalPlan::Sort(LogicalSort {
-            order_by: vec![OrderByExpr { expr: column("name"), ascending: true }],
+            order_by: vec![OrderByExpr {
+                expr: column("name"),
+                ascending: true,
+            }],
             child: Box::new(LogicalPlan::Project(LogicalProject {
-                expressions: vec![NamedExpr { name: "name".to_string(), expr: column("name") }],
+                expressions: vec![NamedExpr {
+                    name: "name".to_string(),
+                    expr: column("name"),
+                }],
                 child: Box::new(LogicalPlan::Filter(LogicalFilter {
                     predicate: gt_pred(column("age"), constant_int(18)),
                     child: Box::new(table_scan),
@@ -299,40 +470,60 @@ fn test_full_optimizer_pipeline() {
             limit: None,
         })),
     });
-    assert_eq!(collect_labels(&plan), vec!["Limit", "Sort", "Project", "Filter", "TableScan"]);
+    assert_eq!(
+        collect_labels(&plan),
+        vec!["Limit", "Sort", "Project", "Filter", "TableScan"]
+    );
 
     let optimizer = Optimizer::new();
     let optimized = optimizer.optimize(plan);
     // The sort-hoisting pass rewrites Sort(Project(Filter(scan))) into
     // Project(Sort(Filter(scan))) so ORDER BY can use columns that the
     // SELECT list drops; limit_pushdown then folds LIMIT 10 into the Sort.
-    assert_eq!(collect_labels(&optimized), vec!["Project", "Sort", "Filter", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Project", "Sort", "Filter", "TableScan"]
+    );
 
     if let LogicalPlan::Project(p) = &optimized {
-        if let LogicalPlan::Sort(s) = &*p.child { assert_eq!(s.limit, Some(10)); }
-        else { panic!("Expected Sort under Project"); }
-    } else { panic!("Expected Project root"); }
+        if let LogicalPlan::Sort(s) = &*p.child {
+            assert_eq!(s.limit, Some(10));
+        } else {
+            panic!("Expected Sort under Project");
+        }
+    } else {
+        panic!("Expected Project root");
+    }
 }
 
 #[test]
 fn test_constant_folding_in_predicate() {
     let folded_pred = fold_predicate(&gt_pred(column("age"), {
         ExprNode::Binary {
-            left: Box::new(constant_int(5)), op: ArithOp::Add, right: Box::new(constant_int(3)),
+            left: Box::new(constant_int(5)),
+            op: ArithOp::Add,
+            right: Box::new(constant_int(3)),
         }
     }));
     if let PredicateNode::Compare { left, op: _, right } = &folded_pred {
         assert_eq!(*left.as_ref(), column("age"));
         assert_eq!(*right.as_ref(), constant_int(8));
-    } else { panic!("Expected Compare predicate"); }
+    } else {
+        panic!("Expected Compare predicate");
+    }
 }
 
 #[test]
 fn test_constant_folding_entire_plan() {
     let plan = LogicalPlan::Filter(LogicalFilter {
-        predicate: gt_pred(column("age"), ExprNode::Binary {
-            left: Box::new(constant_int(5)), op: ArithOp::Add, right: Box::new(constant_int(3)),
-        }),
+        predicate: gt_pred(
+            column("age"),
+            ExprNode::Binary {
+                left: Box::new(constant_int(5)),
+                op: ArithOp::Add,
+                right: Box::new(constant_int(3)),
+            },
+        ),
         child: Box::new(make_table_scan("users", &["id", "name", "age"])),
     });
     let optimizer = Optimizer::new();
@@ -342,7 +533,9 @@ fn test_constant_folding_entire_plan() {
             PredicateNode::Compare { right, .. } => assert_eq!(*right.as_ref(), constant_int(8)),
             _ => panic!("Expected Compare predicate"),
         }
-    } else { panic!("Expected Filter node"); }
+    } else {
+        panic!("Expected Filter node");
+    }
 }
 
 // ─── Projection Pruning Tests ─────────────────────────────────────────────────
@@ -350,7 +543,10 @@ fn test_constant_folding_entire_plan() {
 #[test]
 fn test_projection_pruning_single_column() {
     let plan = LogicalPlan::Project(LogicalProject {
-        expressions: vec![NamedExpr { name: "name".to_string(), expr: column("name") }],
+        expressions: vec![NamedExpr {
+            name: "name".to_string(),
+            expr: column("name"),
+        }],
         child: Box::new(make_table_scan("users", &["id", "name", "age", "email"])),
     });
     let optimizer = Optimizer::new();
@@ -359,8 +555,12 @@ fn test_projection_pruning_single_column() {
         if let LogicalPlan::TableScan(t) = &*p.child {
             let col_names: Vec<&str> = t.schema.columns.iter().map(|c| c.name.as_str()).collect();
             assert_eq!(col_names, vec!["name"]);
-        } else { panic!("Expected TableScan under Project"); }
-    } else { panic!("Expected Project root"); }
+        } else {
+            panic!("Expected TableScan under Project");
+        }
+    } else {
+        panic!("Expected Project root");
+    }
 }
 
 // ─── Projection Pruning with Insert Tests ─────────────────────────────────
@@ -385,18 +585,31 @@ fn test_projection_pruning_through_insert_single_column() {
     let optimized = optimizer.projection_pruning(plan);
 
     // Structure should be preserved: Insert -> Project -> TableScan
-    assert_eq!(collect_labels(&optimized), vec!["Insert", "Project", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Insert", "Project", "TableScan"]
+    );
 
     // TableScan should only have 'name' column
     if let LogicalPlan::Insert(inp) = &optimized {
         if let LogicalPlan::Project(p) = &*inp.child {
             if let LogicalPlan::TableScan(t) = &*p.child {
-                let col_names: Vec<&str> = t.schema.columns.iter().map(|c| c.name.as_str()).collect();
-                assert_eq!(col_names, vec!["name"],
-                    "Unreferenced columns should be pruned through Insert");
-            } else { panic!("Expected TableScan under Project"); }
-        } else { panic!("Expected Project under Insert"); }
-    } else { panic!("Expected Insert root"); }
+                let col_names: Vec<&str> =
+                    t.schema.columns.iter().map(|c| c.name.as_str()).collect();
+                assert_eq!(
+                    col_names,
+                    vec!["name"],
+                    "Unreferenced columns should be pruned through Insert"
+                );
+            } else {
+                panic!("Expected TableScan under Project");
+            }
+        } else {
+            panic!("Expected Project under Insert");
+        }
+    } else {
+        panic!("Expected Insert root");
+    }
 }
 
 #[test]
@@ -408,10 +621,22 @@ fn test_projection_pruning_through_insert_all_columns() {
         columns: vec![],
         child: Box::new(LogicalPlan::Project(LogicalProject {
             expressions: vec![
-                NamedExpr { name: "id".to_string(), expr: column("id") },
-                NamedExpr { name: "name".to_string(), expr: column("name") },
-                NamedExpr { name: "age".to_string(), expr: column("age") },
-                NamedExpr { name: "email".to_string(), expr: column("email") },
+                NamedExpr {
+                    name: "id".to_string(),
+                    expr: column("id"),
+                },
+                NamedExpr {
+                    name: "name".to_string(),
+                    expr: column("name"),
+                },
+                NamedExpr {
+                    name: "age".to_string(),
+                    expr: column("age"),
+                },
+                NamedExpr {
+                    name: "email".to_string(),
+                    expr: column("email"),
+                },
             ],
             child: Box::new(make_table_scan("users", &["id", "name", "age", "email"])),
         })),
@@ -420,22 +645,35 @@ fn test_projection_pruning_through_insert_all_columns() {
     let optimizer = Optimizer::new();
     let optimized = optimizer.projection_pruning(plan);
 
-    assert_eq!(collect_labels(&optimized), vec!["Insert", "Project", "TableScan"]);
+    assert_eq!(
+        collect_labels(&optimized),
+        vec!["Insert", "Project", "TableScan"]
+    );
 
     // All 4 columns referenced in Project → none pruned from TableScan
     if let LogicalPlan::Insert(inp) = &optimized {
         if let LogicalPlan::Project(p) = &*inp.child {
             if let LogicalPlan::TableScan(t) = &*p.child {
-                assert_eq!(t.schema.columns.len(), 4, "All 4 columns should be retained");
+                assert_eq!(
+                    t.schema.columns.len(),
+                    4,
+                    "All 4 columns should be retained"
+                );
                 let col_names: Vec<&str> =
                     t.schema.columns.iter().map(|c| c.name.as_str()).collect();
                 assert!(col_names.contains(&"id"));
                 assert!(col_names.contains(&"name"));
                 assert!(col_names.contains(&"age"));
                 assert!(col_names.contains(&"email"));
-            } else { panic!("Expected TableScan under Project"); }
-        } else { panic!("Expected Project under Insert"); }
-    } else { panic!("Expected Insert root"); }
+            } else {
+                panic!("Expected TableScan under Project");
+            }
+        } else {
+            panic!("Expected Project under Insert");
+        }
+    } else {
+        panic!("Expected Insert root");
+    }
 }
 
 #[test]
@@ -475,10 +713,18 @@ fn test_projection_pruning_through_insert_with_filter() {
                     assert_eq!(col_names.len(), 2, "Should keep name+age, prune id+email");
                     assert!(col_names.contains(&"name"));
                     assert!(col_names.contains(&"age"));
-                } else { panic!("Expected TableScan under Filter"); }
-            } else { panic!("Expected Filter under Project"); }
-        } else { panic!("Expected Project under Insert"); }
-    } else { panic!("Expected Insert root"); }
+                } else {
+                    panic!("Expected TableScan under Filter");
+                }
+            } else {
+                panic!("Expected Filter under Project");
+            }
+        } else {
+            panic!("Expected Project under Insert");
+        }
+    } else {
+        panic!("Expected Insert root");
+    }
 }
 
 #[test]
@@ -489,9 +735,13 @@ fn test_optimizer_pipeline_preserves_insert() {
         table: "target".to_string(),
         columns: vec!["name".to_string()],
         child: Box::new(LogicalPlan::Limit(LogicalLimit {
-            limit: 10, offset: 0,
+            limit: 10,
+            offset: 0,
             child: Box::new(LogicalPlan::Sort(LogicalSort {
-                order_by: vec![OrderByExpr { expr: column("name"), ascending: true }],
+                order_by: vec![OrderByExpr {
+                    expr: column("name"),
+                    ascending: true,
+                }],
                 child: Box::new(LogicalPlan::Project(LogicalProject {
                     expressions: vec![NamedExpr {
                         name: "name".to_string(),
@@ -512,8 +762,10 @@ fn test_optimizer_pipeline_preserves_insert() {
     let optimized = optimizer.optimize(plan);
 
     // Insert should still be at root
-    assert!(matches!(&optimized, LogicalPlan::Insert(_)),
-        "Insert should remain at root after optimization");
+    assert!(
+        matches!(&optimized, LogicalPlan::Insert(_)),
+        "Insert should remain at root after optimization"
+    );
 
     // Structure should be: Insert -> Sort (limit pushed) -> Project -> Filter -> TableScan
     // (Limit is pushed into Sort, TableScan columns pruned to name+age)
@@ -528,7 +780,9 @@ fn test_optimizer_pipeline_preserves_insert() {
     if let LogicalPlan::Insert(inp) = &optimized {
         if let LogicalPlan::Sort(s) = &*inp.child {
             assert_eq!(s.limit, Some(10), "Limit should be pushed into Sort");
-        } else { panic!("Expected Sort under Insert"); }
+        } else {
+            panic!("Expected Sort under Insert");
+        }
     }
 }
 
@@ -538,17 +792,35 @@ fn test_optimizer_pipeline_preserves_insert() {
 fn test_join_ordering_smaller_on_left() {
     let mut stats = HashMap::new();
     let large = crate::statistics::TableStatistics {
-        total_tuple_count: 1000, total_pages: 10, data_pages: 9, file_size_bytes: 81920,
-        total_tuple_bytes: 50000, total_slot_bytes: 4000, total_header_bytes: 9 * 128,
-        total_free_bytes: 30000, pages_with_tuples: 9, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
+        total_tuple_count: 1000,
+        total_pages: 10,
+        data_pages: 9,
+        file_size_bytes: 81920,
+        total_tuple_bytes: 50000,
+        total_slot_bytes: 4000,
+        total_header_bytes: 9 * 128,
+        total_free_bytes: 30000,
+        pages_with_tuples: 9,
+        min_page_free_bytes: 100,
+        max_page_free_bytes: 5000,
+        min_tuple_bytes: 20,
+        max_tuple_bytes: 100,
         page_breakdown: vec![],
     };
     let small = crate::statistics::TableStatistics {
-        total_tuple_count: 100, total_pages: 2, data_pages: 1, file_size_bytes: 16384,
-        total_tuple_bytes: 5000, total_slot_bytes: 400, total_header_bytes: 128,
-        total_free_bytes: 10000, pages_with_tuples: 1, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
+        total_tuple_count: 100,
+        total_pages: 2,
+        data_pages: 1,
+        file_size_bytes: 16384,
+        total_tuple_bytes: 5000,
+        total_slot_bytes: 400,
+        total_header_bytes: 128,
+        total_free_bytes: 10000,
+        pages_with_tuples: 1,
+        min_page_free_bytes: 100,
+        max_page_free_bytes: 5000,
+        min_tuple_bytes: 20,
+        max_tuple_bytes: 100,
         page_breakdown: vec![],
     };
     stats.insert("users".to_string(), large);
@@ -564,12 +836,24 @@ fn test_join_ordering_smaller_on_left() {
     let optimized = optimizer.join_ordering(plan);
     if let LogicalPlan::Join(j) = &optimized {
         if let LogicalPlan::TableScan(left_scan) = &*j.left {
-            assert_eq!(left_scan.table, "orders", "Smaller table should be on the left");
-        } else { panic!("Expected TableScan on left side"); }
+            assert_eq!(
+                left_scan.table, "orders",
+                "Smaller table should be on the left"
+            );
+        } else {
+            panic!("Expected TableScan on left side");
+        }
         if let LogicalPlan::TableScan(right_scan) = &*j.right {
-            assert_eq!(right_scan.table, "users", "Larger table should be on the right");
-        } else { panic!("Expected TableScan on right side"); }
-    } else { panic!("Expected Join root"); }
+            assert_eq!(
+                right_scan.table, "users",
+                "Larger table should be on the right"
+            );
+        } else {
+            panic!("Expected TableScan on right side");
+        }
+    } else {
+        panic!("Expected Join root");
+    }
 }
 
 #[test]
@@ -578,17 +862,35 @@ fn test_join_ordering_preserves_left_join() {
     // Swapping would change LEFT JOIN semantics (preserve-left becomes preserve-right).
     let mut stats = HashMap::new();
     let large = crate::statistics::TableStatistics {
-        total_tuple_count: 1000, total_pages: 10, data_pages: 9, file_size_bytes: 81920,
-        total_tuple_bytes: 50000, total_slot_bytes: 4000, total_header_bytes: 9 * 128,
-        total_free_bytes: 30000, pages_with_tuples: 9, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
+        total_tuple_count: 1000,
+        total_pages: 10,
+        data_pages: 9,
+        file_size_bytes: 81920,
+        total_tuple_bytes: 50000,
+        total_slot_bytes: 4000,
+        total_header_bytes: 9 * 128,
+        total_free_bytes: 30000,
+        pages_with_tuples: 9,
+        min_page_free_bytes: 100,
+        max_page_free_bytes: 5000,
+        min_tuple_bytes: 20,
+        max_tuple_bytes: 100,
         page_breakdown: vec![],
     };
     let small = crate::statistics::TableStatistics {
-        total_tuple_count: 100, total_pages: 2, data_pages: 1, file_size_bytes: 16384,
-        total_tuple_bytes: 5000, total_slot_bytes: 400, total_header_bytes: 128,
-        total_free_bytes: 10000, pages_with_tuples: 1, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
+        total_tuple_count: 100,
+        total_pages: 2,
+        data_pages: 1,
+        file_size_bytes: 16384,
+        total_tuple_bytes: 5000,
+        total_slot_bytes: 400,
+        total_header_bytes: 128,
+        total_free_bytes: 10000,
+        pages_with_tuples: 1,
+        min_page_free_bytes: 100,
+        max_page_free_bytes: 5000,
+        min_tuple_bytes: 20,
+        max_tuple_bytes: 100,
         page_breakdown: vec![],
     };
     // users is LARGE (should stay on left for LEFT JOIN), orders is SMALL
@@ -606,10 +908,16 @@ fn test_join_ordering_preserves_left_join() {
     let optimized = optimizer.join_ordering(plan);
     if let LogicalPlan::Join(j) = &optimized {
         if let LogicalPlan::TableScan(left_scan) = &*j.left {
-            assert_eq!(left_scan.table, "users",
-                "LEFT JOIN should keep large table on left (preserve-left semantics)");
-        } else { panic!("Expected TableScan on left side"); }
-    } else { panic!("Expected Join root"); }
+            assert_eq!(
+                left_scan.table, "users",
+                "LEFT JOIN should keep large table on left (preserve-left semantics)"
+            );
+        } else {
+            panic!("Expected TableScan on left side");
+        }
+    } else {
+        panic!("Expected Join root");
+    }
 }
 
 #[test]
@@ -618,17 +926,35 @@ fn test_join_ordering_preserves_right_join() {
     // Swapping would change RIGHT JOIN semantics (preserve-right becomes preserve-left).
     let mut stats = HashMap::new();
     let large = crate::statistics::TableStatistics {
-        total_tuple_count: 1000, total_pages: 10, data_pages: 9, file_size_bytes: 81920,
-        total_tuple_bytes: 50000, total_slot_bytes: 4000, total_header_bytes: 9 * 128,
-        total_free_bytes: 30000, pages_with_tuples: 9, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
+        total_tuple_count: 1000,
+        total_pages: 10,
+        data_pages: 9,
+        file_size_bytes: 81920,
+        total_tuple_bytes: 50000,
+        total_slot_bytes: 4000,
+        total_header_bytes: 9 * 128,
+        total_free_bytes: 30000,
+        pages_with_tuples: 9,
+        min_page_free_bytes: 100,
+        max_page_free_bytes: 5000,
+        min_tuple_bytes: 20,
+        max_tuple_bytes: 100,
         page_breakdown: vec![],
     };
     let small = crate::statistics::TableStatistics {
-        total_tuple_count: 100, total_pages: 2, data_pages: 1, file_size_bytes: 16384,
-        total_tuple_bytes: 5000, total_slot_bytes: 400, total_header_bytes: 128,
-        total_free_bytes: 10000, pages_with_tuples: 1, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
+        total_tuple_count: 100,
+        total_pages: 2,
+        data_pages: 1,
+        file_size_bytes: 16384,
+        total_tuple_bytes: 5000,
+        total_slot_bytes: 400,
+        total_header_bytes: 128,
+        total_free_bytes: 10000,
+        pages_with_tuples: 1,
+        min_page_free_bytes: 100,
+        max_page_free_bytes: 5000,
+        min_tuple_bytes: 20,
+        max_tuple_bytes: 100,
         page_breakdown: vec![],
     };
     // orders is SMALL (on right), users is LARGE (on left) — for RIGHT JOIN, the
@@ -646,30 +972,60 @@ fn test_join_ordering_preserves_right_join() {
     let optimized = optimizer.join_ordering(plan);
     if let LogicalPlan::Join(j) = &optimized {
         if let LogicalPlan::TableScan(right_scan) = &*j.right {
-            assert_eq!(right_scan.table, "orders",
-                "RIGHT JOIN should keep small table on right (preserve-right semantics)");
-        } else { panic!("Expected TableScan on right side"); }
-    } else { panic!("Expected Join root"); }
+            assert_eq!(
+                right_scan.table, "orders",
+                "RIGHT JOIN should keep small table on right (preserve-right semantics)"
+            );
+        } else {
+            panic!("Expected TableScan on right side");
+        }
+    } else {
+        panic!("Expected Join root");
+    }
 }
 
 #[test]
 fn test_join_ordering_reorders_inner_join() {
     // INNER JOIN is commutative — should be reordered when right is smaller.
     let mut stats = HashMap::new();
-    stats.insert("users".to_string(), crate::statistics::TableStatistics {
-        total_tuple_count: 1000, total_pages: 10, data_pages: 9, file_size_bytes: 81920,
-        total_tuple_bytes: 50000, total_slot_bytes: 4000, total_header_bytes: 9 * 128,
-        total_free_bytes: 30000, pages_with_tuples: 9, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
-        page_breakdown: vec![],
-    });
-    stats.insert("orders".to_string(), crate::statistics::TableStatistics {
-        total_tuple_count: 100, total_pages: 2, data_pages: 1, file_size_bytes: 16384,
-        total_tuple_bytes: 5000, total_slot_bytes: 400, total_header_bytes: 128,
-        total_free_bytes: 10000, pages_with_tuples: 1, min_page_free_bytes: 100,
-        max_page_free_bytes: 5000, min_tuple_bytes: 20, max_tuple_bytes: 100,
-        page_breakdown: vec![],
-    });
+    stats.insert(
+        "users".to_string(),
+        crate::statistics::TableStatistics {
+            total_tuple_count: 1000,
+            total_pages: 10,
+            data_pages: 9,
+            file_size_bytes: 81920,
+            total_tuple_bytes: 50000,
+            total_slot_bytes: 4000,
+            total_header_bytes: 9 * 128,
+            total_free_bytes: 30000,
+            pages_with_tuples: 9,
+            min_page_free_bytes: 100,
+            max_page_free_bytes: 5000,
+            min_tuple_bytes: 20,
+            max_tuple_bytes: 100,
+            page_breakdown: vec![],
+        },
+    );
+    stats.insert(
+        "orders".to_string(),
+        crate::statistics::TableStatistics {
+            total_tuple_count: 100,
+            total_pages: 2,
+            data_pages: 1,
+            file_size_bytes: 16384,
+            total_tuple_bytes: 5000,
+            total_slot_bytes: 400,
+            total_header_bytes: 128,
+            total_free_bytes: 10000,
+            pages_with_tuples: 1,
+            min_page_free_bytes: 100,
+            max_page_free_bytes: 5000,
+            min_tuple_bytes: 20,
+            max_tuple_bytes: 100,
+            page_breakdown: vec![],
+        },
+    );
 
     // INNER JOIN: large (users) left, small (orders) right — should swap
     let plan = LogicalPlan::Join(LogicalJoin {
@@ -682,10 +1038,16 @@ fn test_join_ordering_reorders_inner_join() {
     let optimized = optimizer.join_ordering(plan);
     if let LogicalPlan::Join(j) = &optimized {
         if let LogicalPlan::TableScan(left_scan) = &*j.left {
-            assert_eq!(left_scan.table, "orders",
-                "INNER JOIN should move smaller table (orders) to left");
-        } else { panic!("Expected TableScan on left side"); }
-    } else { panic!("Expected Join root"); }
+            assert_eq!(
+                left_scan.table, "orders",
+                "INNER JOIN should move smaller table (orders) to left"
+            );
+        } else {
+            panic!("Expected TableScan on left side");
+        }
+    } else {
+        panic!("Expected Join root");
+    }
 }
 
 // ─── Predicate Pushdown Into Join Conditions (M3) ──────────────────────────
@@ -718,15 +1080,20 @@ fn test_push_filter_with_both_side_predicate_merged_into_inner_join_condition() 
     // so the structure should be: Join (not Filter(Join)).
     // collect_labels includes children: Join -> TableScan(left), TableScan(right)
     let labels = collect_labels(&optimized);
-    assert_eq!(labels, vec!["Join", "TableScan", "TableScan"],
-        "Cross-side predicate with INNER join should be merged into join condition");
+    assert_eq!(
+        labels,
+        vec!["Join", "TableScan", "TableScan"],
+        "Cross-side predicate with INNER join should be merged into join condition"
+    );
 
     // Verify the join condition has been extended with the new predicate
     if let LogicalPlan::Join(j) = &optimized {
         assert!(j.condition.is_some(), "Join should have a condition");
         // The condition should be an AND of the original + new predicate
         match &j.condition.as_ref().unwrap() {
-            PredicateNode::BinaryOp { op: BinaryOp::And, .. } => {
+            PredicateNode::BinaryOp {
+                op: BinaryOp::And, ..
+            } => {
                 // Condition was merged — correct
             }
             other => panic!("Expected merged AND condition, got {:?}", other),
@@ -763,8 +1130,11 @@ fn test_push_cross_side_predicate_stays_above_left_join() {
     // For LEFT JOIN, the cross-side predicate should stay above as Filter.
     // collect_labels includes children: Filter -> Join -> TableScan(left), TableScan(right)
     let labels = collect_labels(&optimized);
-    assert_eq!(labels, vec!["Filter", "Join", "TableScan", "TableScan"],
-        "Cross-side predicate with LEFT JOIN should stay above as Filter");
+    assert_eq!(
+        labels,
+        vec!["Filter", "Join", "TableScan", "TableScan"],
+        "Cross-side predicate with LEFT JOIN should stay above as Filter"
+    );
 }
 
 #[test]
@@ -790,8 +1160,11 @@ fn test_push_cross_side_predicate_stays_above_right_join() {
 
     // collect_labels includes children: Filter -> Join -> TableScan(left), TableScan(right)
     let labels = collect_labels(&optimized);
-    assert_eq!(labels, vec!["Filter", "Join", "TableScan", "TableScan"],
-        "Cross-side predicate with RIGHT JOIN should stay above as Filter");
+    assert_eq!(
+        labels,
+        vec!["Filter", "Join", "TableScan", "TableScan"],
+        "Cross-side predicate with RIGHT JOIN should stay above as Filter"
+    );
 }
 
 #[test]
@@ -815,8 +1188,11 @@ fn test_push_single_side_predicate_pushed_through_join() {
 
     // Single-side predicate pushed to left child → Join(Filter(users), orders)
     let labels = collect_labels(&optimized);
-    assert_eq!(labels, vec!["Join", "Filter", "TableScan", "TableScan"],
-        "Single-side predicate should be pushed through join to correct side");
+    assert_eq!(
+        labels,
+        vec!["Join", "Filter", "TableScan", "TableScan"],
+        "Single-side predicate should be pushed through join to correct side"
+    );
 }
 
 #[test]
@@ -845,11 +1221,17 @@ fn test_push_cross_side_predicate_merged_into_cross_join() {
     // Cross join with no existing condition — the predicate becomes the condition.
     // collect_labels includes children: Join -> TableScan(left), TableScan(right)
     let labels = collect_labels(&optimized);
-    assert_eq!(labels, vec!["Join", "TableScan", "TableScan"],
-        "Cross-side predicate with CROSS JOIN should be merged into condition");
+    assert_eq!(
+        labels,
+        vec!["Join", "TableScan", "TableScan"],
+        "Cross-side predicate with CROSS JOIN should be merged into condition"
+    );
 
     if let LogicalPlan::Join(j) = &optimized {
-        assert!(j.condition.is_some(), "CROSS JOIN should have a condition after merge");
+        assert!(
+            j.condition.is_some(),
+            "CROSS JOIN should have a condition after merge"
+        );
         assert_eq!(j.join_type, JoinType::Cross);
     } else {
         panic!("Expected Join node");
@@ -862,10 +1244,22 @@ fn test_push_cross_side_predicate_merged_into_cross_join() {
 fn test_optimize_simple_select_star() {
     let plan = LogicalPlan::Project(LogicalProject {
         expressions: vec![
-            NamedExpr { name: "id".to_string(), expr: column("id") },
-            NamedExpr { name: "name".to_string(), expr: column("name") },
-            NamedExpr { name: "age".to_string(), expr: column("age") },
-            NamedExpr { name: "email".to_string(), expr: column("email") },
+            NamedExpr {
+                name: "id".to_string(),
+                expr: column("id"),
+            },
+            NamedExpr {
+                name: "name".to_string(),
+                expr: column("name"),
+            },
+            NamedExpr {
+                name: "age".to_string(),
+                expr: column("age"),
+            },
+            NamedExpr {
+                name: "email".to_string(),
+                expr: column("email"),
+            },
         ],
         child: Box::new(make_table_scan("users", &["id", "name", "age", "email"])),
     });
@@ -886,11 +1280,18 @@ fn test_optimize_identity_no_changes() {
 fn test_multiple_optimization_passes() {
     let table_scan = make_table_scan("users", &["id", "name", "age", "email"]);
     let plan = LogicalPlan::Limit(LogicalLimit {
-        limit: 10, offset: 0,
+        limit: 10,
+        offset: 0,
         child: Box::new(LogicalPlan::Sort(LogicalSort {
-            order_by: vec![OrderByExpr { expr: column("name"), ascending: true }],
+            order_by: vec![OrderByExpr {
+                expr: column("name"),
+                ascending: true,
+            }],
             child: Box::new(LogicalPlan::Project(LogicalProject {
-                expressions: vec![NamedExpr { name: "name".to_string(), expr: column("name") }],
+                expressions: vec![NamedExpr {
+                    name: "name".to_string(),
+                    expr: column("name"),
+                }],
                 child: Box::new(LogicalPlan::Filter(LogicalFilter {
                     predicate: gt_pred(column("age"), constant_int(18)),
                     child: Box::new(table_scan),
@@ -915,7 +1316,10 @@ fn test_distinct_prevents_limit_pushdown_to_sort() {
         offset: 2,
         child: Box::new(LogicalPlan::Distinct(LogicalDistinct {
             child: Box::new(LogicalPlan::Sort(LogicalSort {
-                order_by: vec![OrderByExpr { expr: column("category"), ascending: true }],
+                order_by: vec![OrderByExpr {
+                    expr: column("category"),
+                    ascending: true,
+                }],
                 child: Box::new(table_scan),
                 limit: None,
             })),
@@ -932,7 +1336,10 @@ fn test_distinct_prevents_limit_pushdown_to_sort() {
             match *l.child {
                 LogicalPlan::Distinct(d) => match *d.child {
                     LogicalPlan::Sort(s) => {
-                        assert_eq!(s.limit, None, "Sort under Distinct must NOT have top-k limit injected");
+                        assert_eq!(
+                            s.limit, None,
+                            "Sort under Distinct must NOT have top-k limit injected"
+                        );
                     }
                     other => panic!("expected Sort under Distinct, got {:?}", other),
                 },
@@ -942,5 +1349,3 @@ fn test_distinct_prevents_limit_pushdown_to_sort() {
         other => panic!("expected Limit at top, got {:?}", other),
     }
 }
-
-

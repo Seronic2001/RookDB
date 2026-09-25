@@ -16,7 +16,7 @@ use crate::catalog::types::Catalog;
 use crate::disk::{read_page, write_page};
 use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, SLOT_FLAG_DELETED};
 use crate::table::{increment_dead_tuple_count, page_count, write_dead_tuple_count};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -77,10 +77,7 @@ fn decode_tuple(
     result
 }
 
-fn delete_log_details(
-    deleted_count: Option<usize>,
-    error: Option<&str>,
-) -> Value {
+fn delete_log_details(deleted_count: Option<usize>, error: Option<&str>) -> Value {
     json!({
         "timestamp": current_timestamp_iso(),
         "deleted_count": deleted_count,
@@ -257,10 +254,16 @@ pub fn delete_by_pointers(
     pointers: &[(u32, u32)],
 ) -> io::Result<DeleteResult> {
     let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database '{}' not found", db_name),
+        )
     })?;
     let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Table '{}' not found", table_name),
+        )
     })?;
     let columns = &table.columns;
 
@@ -300,11 +303,12 @@ pub fn delete_by_pointers(
         let decoded = decode_tuple(&tuple_data, columns);
 
         // FOREIGN KEY constraint check
-        if let Err(e) = crate::backend::constraint::validate_row_delete(
-            catalog, db_name, table_name, &decoded,
-        ) {
+        if let Err(e) =
+            crate::backend::constraint::validate_row_delete(catalog, db_name, table_name, &decoded)
+        {
             log::warn!(
-                "[DeleteByPointers] Skipping row due to FOREIGN KEY constraint: {}", e
+                "[DeleteByPointers] Skipping row due to FOREIGN KEY constraint: {}",
+                e
             );
             continue;
         }
@@ -316,7 +320,12 @@ pub fn delete_by_pointers(
 
         // Update any existing B+ Tree index
         if let Err(e) = update_index_on_delete(
-            db_name, table_name, columns, &tuple_data, page_num, slot_idx,
+            db_name,
+            table_name,
+            columns,
+            &tuple_data,
+            page_num,
+            slot_idx,
         ) {
             log::warn!("Failed to update index for deleted tuple: {}", e);
         }
@@ -331,18 +340,22 @@ pub fn delete_by_pointers(
 
         log::info!(
             "[Delete] Soft-deleted slot (page={}, slot={}), updated index and cleared VM",
-            page_num, slot_idx
+            page_num,
+            slot_idx
         );
 
         returning_rows.push(
-            decoded.iter().map(|(col, val)| {
-                let s = match val {
-                    ColumnValue::Int(n) => n.to_string(),
-                    ColumnValue::Text(t) => t.clone(),
-                    ColumnValue::List(_) => String::from("[list]"),
-                };
-                (col.clone(), s)
-            }).collect()
+            decoded
+                .iter()
+                .map(|(col, val)| {
+                    let s = match val {
+                        ColumnValue::Int(n) => n.to_string(),
+                        ColumnValue::Text(t) => t.clone(),
+                        ColumnValue::List(_) => String::from("[list]"),
+                    };
+                    (col.clone(), s)
+                })
+                .collect(),
         );
 
         deleted_count += 1;
@@ -352,7 +365,10 @@ pub fn delete_by_pointers(
         increment_dead_tuple_count(&mut file, deleted_count as u32)?;
     }
 
-    let result = DeleteResult { deleted_count, returning_rows };
+    let result = DeleteResult {
+        deleted_count,
+        returning_rows,
+    };
     let details = delete_log_details(Some(result.deleted_count), None);
     let _ = log_delete(db_name, table_name, details, "success");
 

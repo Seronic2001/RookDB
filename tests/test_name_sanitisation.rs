@@ -10,7 +10,7 @@ mod common;
 use storage_manager::backend::name_validation::{
     validate_database_name, validate_index_name, validate_table_name,
 };
-use storage_manager::catalog::{create_database, create_table, load_catalog, Column};
+use storage_manager::catalog::{Column, create_database, create_table, load_catalog};
 use storage_manager::types::DataType;
 
 fn plain_col(name: &str) -> Column {
@@ -27,7 +27,15 @@ fn engine_rejects_traversal_database_names() {
     let _ws = common::TestWorkspace::new("sanitize", "db");
 
     let mut catalog = load_catalog();
-    for bad in ["../evil", "base/../../../tmp/x", "a\\b", "..", ".", "a/b", "nul\0"] {
+    for bad in [
+        "../evil",
+        "base/../../../tmp/x",
+        "a\\b",
+        "..",
+        ".",
+        "a/b",
+        "nul\0",
+    ] {
         assert!(
             !create_database(&mut catalog, bad),
             "create_database must reject '{}'",
@@ -69,19 +77,45 @@ fn engine_accepts_ordinary_names() {
     let mut catalog = load_catalog();
     assert!(create_database(&mut catalog, "prod_2024"));
     let mut catalog = load_catalog();
-    create_table(&mut catalog, "prod_2024", "order-items", vec![plain_col("id")]);
-    assert!(catalog.databases["prod_2024"].tables.contains_key("order-items"));
+    create_table(
+        &mut catalog,
+        "prod_2024",
+        "order-items",
+        vec![plain_col("id")],
+    );
+    assert!(
+        catalog.databases["prod_2024"]
+            .tables
+            .contains_key("order-items")
+    );
 }
 
 #[test]
 fn validator_rules() {
     // Accepted
     for good in ["users", "my_db", "order-items", "T1", "a..b"] {
-        assert!(validate_table_name(good).is_ok(), "'{}' should be valid", good);
+        assert!(
+            validate_table_name(good).is_ok(),
+            "'{}' should be valid",
+            good
+        );
     }
     // Rejected
-    for bad in ["", "../x", "a/b", "a\\b", "..", ".hidden", "a\0b", &"x".repeat(256)] {
-        assert!(validate_table_name(bad).is_err(), "'{}' should be rejected", bad);
+    for bad in [
+        "",
+        "../x",
+        "a/b",
+        "a\\b",
+        "..",
+        ".hidden",
+        "a\0b",
+        &"x".repeat(256),
+    ] {
+        assert!(
+            validate_table_name(bad).is_err(),
+            "'{}' should be rejected",
+            bad
+        );
         assert!(validate_database_name(bad).is_err());
     }
     assert!(validate_index_name("idx_1").is_ok());

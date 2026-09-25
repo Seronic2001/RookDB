@@ -8,7 +8,7 @@
 mod common;
 
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column, Constraints,
+    Catalog, Column, Constraints, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
@@ -90,7 +90,10 @@ fn unique_flag_survives_save_load_cycle() {
 
     assert!(insert_single_tuple(&reloaded, "uq_db", "t2", &["1", "a"]).unwrap());
     let dup = insert_single_tuple(&reloaded, "uq_db", "t2", &["1", "b"]).unwrap();
-    assert!(!dup, "duplicate value in UNIQUE column must be rejected after reload");
+    assert!(
+        !dup,
+        "duplicate value in UNIQUE column must be rejected after reload"
+    );
 }
 
 #[test]
@@ -150,7 +153,9 @@ fn default_value_survives_save_load_cycle() {
             DataType::Varchar(20),
             true,
             Constraints {
-                default: Some(storage_manager::types::DataValue::Varchar("active".to_string())),
+                default: Some(storage_manager::types::DataValue::Varchar(
+                    "active".to_string(),
+                )),
                 ..Default::default()
             },
         )],
@@ -161,7 +166,9 @@ fn default_value_survives_save_load_cycle() {
     let c = &reloaded.databases["def_db"].tables["t4"].columns[0];
     assert_eq!(
         c.constraints.default,
-        Some(storage_manager::types::DataValue::Varchar("active".to_string())),
+        Some(storage_manager::types::DataValue::Varchar(
+            "active".to_string()
+        )),
         "DEFAULT value must round-trip through sys_columns"
     );
 }
@@ -193,7 +200,11 @@ fn flags_round_trip_through_repeated_cycles() {
         // freshly loaded catalog must keep exactly two NOT NULL rows
         // (columns `id` and `label` are both NOT NULL).
         let rows = count_constraint_rows("inv", "items", "NOT NULL");
-        assert_eq!(rows, 2, "cycle {}: expected exactly two NOT NULL rows", cycle);
+        assert_eq!(
+            rows, 2,
+            "cycle {}: expected exactly two NOT NULL rows",
+            cycle
+        );
     }
 }
 
@@ -204,7 +215,10 @@ fn count_constraint_rows(db: &str, table: &str, ctype: &str) -> usize {
         Ok(x) => x,
         Err(_) => return 0,
     };
-    let path = std::path::PathBuf::from(format!("{}/constraints.dat", storage_manager::layout::SYSTEM_DIR));
+    let path = std::path::PathBuf::from(format!(
+        "{}/constraints.dat",
+        storage_manager::layout::SYSTEM_DIR
+    ));
     if !path.exists() {
         return 0;
     }
@@ -217,24 +231,27 @@ fn count_constraint_rows(db: &str, table: &str, ctype: &str) -> usize {
         if let Ok((_, _, raw)) = result
             && let Ok(decoded) =
                 storage_manager::types::deserialize_nullable_row(st::SYS_CONSTRAINTS_SCHEMA, &raw)
-            {
-                let tid = matches!(&decoded.get(1), Some(Some(storage_manager::types::DataValue::Int(_))));
-                let t = decoded.get(2).map(|v| match v {
-                    Some(storage_manager::types::DataValue::Varchar(s)) => s.clone(),
-                    _ => String::new(),
-                });
-                if tid && t.as_deref() == Some(ctype) {
-                    let _ = db_id;
-                    n += 1;
-                }
+        {
+            let tid = matches!(
+                &decoded.get(1),
+                Some(Some(storage_manager::types::DataValue::Int(_)))
+            );
+            let t = decoded.get(2).map(|v| match v {
+                Some(storage_manager::types::DataValue::Varchar(s)) => s.clone(),
+                _ => String::new(),
+            });
+            if tid && t.as_deref() == Some(ctype) {
+                let _ = db_id;
+                n += 1;
             }
+        }
     }
     n
 }
 
 #[test]
 fn violations_are_reported_as_typed_errors() {
-    use storage_manager::backend::constraint::{validate_row_insert, ConstraintKind, RookError};
+    use storage_manager::backend::constraint::{ConstraintKind, RookError, validate_row_insert};
 
     let _ws = common::TestWorkspace::new("conpersist", "typed");
 
@@ -269,7 +286,7 @@ fn violations_are_reported_as_typed_errors() {
 
 #[test]
 fn update_can_rewrite_row_without_self_unique_collision() {
-    use storage_manager::backend::constraint::{validate_row_update, ConstraintKind};
+    use storage_manager::backend::constraint::{ConstraintKind, validate_row_update};
 
     let _ws = common::TestWorkspace::new("conpersist", "selfupd");
 
@@ -306,11 +323,23 @@ fn update_can_rewrite_row_without_self_unique_collision() {
     let catalog = load_catalog();
 
     // Rewriting row id=1 in place (same key) must NOT collide with itself.
-    validate_row_update(&catalog, "updb", "people", &["1", "Ann-Marie"], Some((1, 0)))
-        .expect("self-update of unchanged UNIQUE key must succeed");
+    validate_row_update(
+        &catalog,
+        "updb",
+        "people",
+        &["1", "Ann-Marie"],
+        Some((1, 0)),
+    )
+    .expect("self-update of unchanged UNIQUE key must succeed");
 
     // Changing id=1 to id=2 (a DIFFERENT row's key) must still be rejected.
-    let err = validate_row_update(&catalog, "updb", "people", &["2", "Ann-Marie"], Some((1, 0)))
-        .expect_err("taking another row's UNIQUE key must fail");
+    let err = validate_row_update(
+        &catalog,
+        "updb",
+        "people",
+        &["2", "Ann-Marie"],
+        Some((1, 0)),
+    )
+    .expect_err("taking another row's UNIQUE key must fail");
     assert_eq!(err.constraint_kind(), Some(ConstraintKind::Unique));
 }

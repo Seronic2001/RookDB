@@ -5,7 +5,6 @@ use super::trait_::PhysicalOperator;
 use crate::backend::error::RookResult;
 use crate::types::value::DataValue;
 
-
 // ── SetOp Type ────────────────────────────────────────────────────────────────
 
 /// Set operation type matching SQL semantics.
@@ -94,7 +93,8 @@ impl SetOpOperator {
             }
 
             (SetOpType::Intersect, true) => {
-                let mut left_counts: HashMap<Vec<Option<DataValue>>, (usize, Tuple)> = HashMap::new();
+                let mut left_counts: HashMap<Vec<Option<DataValue>>, (usize, Tuple)> =
+                    HashMap::new();
                 let mut order: Vec<Vec<Option<DataValue>>> = Vec::new();
                 for tuple in self.left_tuples.drain(..) {
                     let key = tuple.values.clone();
@@ -108,10 +108,11 @@ impl SetOpOperator {
                 let mut results: HashMap<Vec<Option<DataValue>>, Vec<Tuple>> = HashMap::new();
                 for tuple in self.right_tuples.drain(..) {
                     if let Some((count, _)) = left_counts.get_mut(&tuple.values)
-                        && *count > 0 {
-                            *count -= 1;
-                            results.entry(tuple.values.clone()).or_default().push(tuple);
-                        }
+                        && *count > 0
+                    {
+                        *count -= 1;
+                        results.entry(tuple.values.clone()).or_default().push(tuple);
+                    }
                 }
 
                 for key in order {
@@ -133,7 +134,8 @@ impl SetOpOperator {
             }
 
             (SetOpType::Except, true) => {
-                let mut left_counts: HashMap<Vec<Option<DataValue>>, (usize, Vec<Tuple>)> = HashMap::new();
+                let mut left_counts: HashMap<Vec<Option<DataValue>>, (usize, Vec<Tuple>)> =
+                    HashMap::new();
                 let mut order: Vec<Vec<Option<DataValue>>> = Vec::new();
                 for tuple in self.left_tuples.drain(..) {
                     let key = tuple.values.clone();
@@ -147,9 +149,10 @@ impl SetOpOperator {
 
                 for tuple in self.right_tuples.drain(..) {
                     if let Some((count, _)) = left_counts.get_mut(&tuple.values)
-                        && *count > 0 {
-                            *count -= 1;
-                        }
+                        && *count > 0
+                    {
+                        *count -= 1;
+                    }
                 }
 
                 for key in order {

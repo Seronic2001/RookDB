@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 
-use crate::backend::error::RookResult;
-use super::super::tuple::{Tuple, ColumnInfo};
-use super::super::external_sort::{ExternalSortOperator, ExternalSortConfig};
-use super::trait_::PhysicalOperator;
+use super::super::external_sort::{ExternalSortConfig, ExternalSortOperator};
+use super::super::tuple::{ColumnInfo, Tuple};
 use super::filter_project::NullOperator;
+use super::trait_::PhysicalOperator;
+use crate::backend::error::RookResult;
 
 use crate::types::comparison::compare_nullable;
 
@@ -139,7 +139,11 @@ impl SortOperator {
         if self.external.is_none() {
             log::info!("[Sort] Switching to external merge sort");
             let config = ExternalSortConfig {
-                max_tuples_per_run: if self.external_threshold > 0 { self.external_threshold } else { 100 },
+                max_tuples_per_run: if self.external_threshold > 0 {
+                    self.external_threshold
+                } else {
+                    100
+                },
                 ..Default::default()
             };
             let child = std::mem::replace(&mut self.child, Box::new(NullOperator::new(Vec::new())));
@@ -189,7 +193,11 @@ impl SortOperator {
         // Check if child already satisfies ordering
         let already_sorted = if let Some(child_order) = self.child.ordering() {
             self.sort_keys.len() <= child_order.len()
-                && self.sort_keys.iter().zip(&child_order).all(|(req, actual)| req == actual)
+                && self
+                    .sort_keys
+                    .iter()
+                    .zip(&child_order)
+                    .all(|(req, actual)| req == actual)
         } else {
             false
         };
@@ -206,16 +214,18 @@ impl SortOperator {
                     let av = a.values.get(key_idx).and_then(|v| v.as_ref());
                     let bv = b.values.get(key_idx).and_then(|v| v.as_ref());
                     let ordering = match (av, bv) {
-                        (Some(a_val), Some(b_val)) => {
-                            compare_nullable(Some(a_val), Some(b_val))
-                                .unwrap_or(None)
-                                .unwrap_or(Ordering::Equal)
-                        }
+                        (Some(a_val), Some(b_val)) => compare_nullable(Some(a_val), Some(b_val))
+                            .unwrap_or(None)
+                            .unwrap_or(Ordering::Equal),
                         (None, None) => Ordering::Equal,
                         (None, Some(_)) => Ordering::Less,
                         (Some(_), None) => Ordering::Greater,
                     };
-                    let ordering = if descending { ordering.reverse() } else { ordering };
+                    let ordering = if descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    };
                     if ordering != Ordering::Equal {
                         return ordering;
                     }
@@ -288,9 +298,10 @@ impl PhysicalOperator for SortOperator {
 
     fn reset(&mut self) -> RookResult<()> {
         if self.use_external
-            && let Some(ref mut ext) = self.external {
-                return ext.reset();
-            }
+            && let Some(ref mut ext) = self.external
+        {
+            return ext.reset();
+        }
         self.child.reset()?;
         self.loaded = false;
         self.buffer.clear();
@@ -310,4 +321,3 @@ impl PhysicalOperator for SortOperator {
         Some(self.sort_keys.clone())
     }
 }
-

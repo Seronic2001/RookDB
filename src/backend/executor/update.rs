@@ -13,22 +13,22 @@
 
 use std::io;
 
-use crate::catalog::types::Catalog;
 use crate::backend::log::operation_log::current_timestamp_iso;
-use crate::page::{Page, PAGE_HEADER_SIZE, ITEM_ID_SIZE, SLOT_FLAG_DELETED};
 use crate::backend::page::page_lock::PageWriteLock;
-use serde_json::{Value, json};
-use crate::types::row::deserialize_nullable_row;
-use crate::types::value::{DataValue, OrderedF32, OrderedF64};
+use crate::catalog::types::Catalog;
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, Page, SLOT_FLAG_DELETED};
 use crate::types::datatype::DataType;
+use crate::types::row::deserialize_nullable_row;
 use crate::types::row::serialize_nullable_typed_row;
+use crate::types::value::{DataValue, OrderedF32, OrderedF64};
+use serde_json::{Value, json};
 
 use super::delete::ColumnValue;
 
 /// (page_num, slot_index) pair that uniquely identifies a stored tuple.
 #[derive(Debug, Clone, Copy)]
 struct TuplePointer {
-    page_id:    u32,
+    page_id: u32,
     slot_index: u16,
 }
 
@@ -67,9 +67,9 @@ pub enum SetExpr {
     /// `rhs_i` is used for integer Add / Sub.
     Expr {
         src_col: String,
-        op:      ArithOp,
-        rhs_i:   i64,   // used for Add/Sub
-        rhs_f:   f64,   // used for Mul/Div
+        op: ArithOp,
+        rhs_i: i64, // used for Add/Sub
+        rhs_f: f64, // used for Mul/Div
     },
 }
 
@@ -77,15 +77,15 @@ pub enum SetExpr {
 #[derive(Debug, Clone)]
 pub struct SetAssignment {
     pub column: String,
-    pub expr:   SetExpr,
+    pub expr: SetExpr,
 }
 
 /// Result returned by the UPDATE entry points.
 pub struct UpdateResult {
     /// How many rows were modified.
-    pub updated_count:   usize,
+    pub updated_count: usize,
     /// The rows **after** update (only populated when `returning = true`).
-    pub returning_rows:  Vec<Vec<(String, String)>>,
+    pub returning_rows: Vec<Vec<(String, String)>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -132,16 +132,23 @@ fn apply_assignments_typed(
             SetExpr::Literal(cv) => match cv {
                 ColumnValue::Int(n) => match target_type {
                     DataType::SmallInt => {
-                        let val = i16::try_from(*n).map_err(|_| format!("Value {} out of range for SMALLINT", n))?;
+                        let val = i16::try_from(*n)
+                            .map_err(|_| format!("Value {} out of range for SMALLINT", n))?;
                         Some(DataValue::SmallInt(val))
                     }
                     DataType::Int => Some(DataValue::Int(*n)),
                     DataType::BigInt => Some(DataValue::BigInt(*n as i64)),
                     DataType::Real => Some(DataValue::Real(OrderedF32(*n as f32))),
-                    DataType::DoublePrecision => Some(DataValue::DoublePrecision(OrderedF64(*n as f64))),
+                    DataType::DoublePrecision => {
+                        Some(DataValue::DoublePrecision(OrderedF64(*n as f64)))
+                    }
                     DataType::Numeric { scale, .. } | DataType::Decimal { scale, .. } => {
-                        let factor = 10_i128.checked_pow(*scale as u32).ok_or_else(|| "Numeric scale overflow".to_string())?;
-                        let unscaled = (*n as i128).checked_mul(factor).ok_or_else(|| "Numeric overflow".to_string())?;
+                        let factor = 10_i128
+                            .checked_pow(*scale as u32)
+                            .ok_or_else(|| "Numeric scale overflow".to_string())?;
+                        let unscaled = (*n as i128)
+                            .checked_mul(factor)
+                            .ok_or_else(|| "Numeric overflow".to_string())?;
                         Some(DataValue::Numeric(crate::types::value::NumericValue {
                             unscaled,
                             scale: *scale,
@@ -152,7 +159,11 @@ fn apply_assignments_typed(
                 ColumnValue::Text(s) => match target_type {
                     DataType::Char(n) | DataType::Character(n) => {
                         if s.len() > *n as usize {
-                            return Err(format!("CHAR payload length {} exceeds declared limit {}", s.len(), n));
+                            return Err(format!(
+                                "CHAR payload length {} exceeds declared limit {}",
+                                s.len(),
+                                n
+                            ));
                         }
                         let mut padded = s.clone();
                         if padded.len() < *n as usize {
@@ -162,22 +173,31 @@ fn apply_assignments_typed(
                     }
                     DataType::Varchar(max_len) => {
                         if s.len() > *max_len as usize {
-                            return Err(format!("VARCHAR payload length {} exceeds declared limit {}", s.len(), max_len));
+                            return Err(format!(
+                                "VARCHAR payload length {} exceeds declared limit {}",
+                                s.len(),
+                                max_len
+                            ));
                         }
                         Some(DataValue::Varchar(s.clone()))
                     }
-                    DataType::Numeric { precision, scale } | DataType::Decimal { precision, scale } => {
+                    DataType::Numeric { precision, scale }
+                    | DataType::Decimal { precision, scale } => {
                         let num = crate::types::value::parse_numeric_literal(s, *precision, *scale)
                             .map_err(|e| format!("Invalid numeric literal '{}': {}", s, e))?;
                         Some(DataValue::Numeric(num))
                     }
                     _ => {
                         let dv = super::create_index::parse_string_to_value(target_type, s)
-                            .map_err(|e| format!("Invalid value '{}' for type {:?}: {}", s, target_type, e))?;
+                            .map_err(|e| {
+                                format!("Invalid value '{}' for type {:?}: {}", s, target_type, e)
+                            })?;
                         Some(dv)
                     }
                 },
-                ColumnValue::List(_) => return Err("Cannot assign list literal to column".to_string()),
+                ColumnValue::List(_) => {
+                    return Err("Cannot assign list literal to column".to_string());
+                }
             },
             SetExpr::Column(src_col) => {
                 let src_idx = columns
@@ -186,7 +206,12 @@ fn apply_assignments_typed(
                     .ok_or_else(|| format!("Source column '{}' not found", src_col))?;
                 values[src_idx].clone()
             }
-            SetExpr::Expr { src_col, op, rhs_i, rhs_f } => {
+            SetExpr::Expr {
+                src_col,
+                op,
+                rhs_i,
+                rhs_f,
+            } => {
                 let src_idx = columns
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(src_col))
@@ -198,17 +223,25 @@ fn apply_assignments_typed(
                     Some(DataValue::Int(n)) => {
                         let result = match op {
                             ArithOp::Add => {
-                                let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer addition overflow".to_string())?;
-                                n.checked_add(rhs).ok_or_else(|| "Integer addition overflow".to_string())?
+                                let rhs = i32::try_from(*rhs_i)
+                                    .map_err(|_| "Integer addition overflow".to_string())?;
+                                n.checked_add(rhs)
+                                    .ok_or_else(|| "Integer addition overflow".to_string())?
                             }
                             ArithOp::Sub => {
-                                let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer subtraction overflow".to_string())?;
-                                n.checked_sub(rhs).ok_or_else(|| "Integer subtraction overflow".to_string())?
+                                let rhs = i32::try_from(*rhs_i)
+                                    .map_err(|_| "Integer subtraction overflow".to_string())?;
+                                n.checked_sub(rhs)
+                                    .ok_or_else(|| "Integer subtraction overflow".to_string())?
                             }
                             ArithOp::Mul => {
                                 if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer multiplication overflow".to_string())?;
-                                    n.checked_mul(rhs).ok_or_else(|| "Integer multiplication overflow".to_string())?
+                                    let rhs = i32::try_from(*rhs_i).map_err(|_| {
+                                        "Integer multiplication overflow".to_string()
+                                    })?;
+                                    n.checked_mul(rhs).ok_or_else(|| {
+                                        "Integer multiplication overflow".to_string()
+                                    })?
                                 } else {
                                     let f = (n as f64) * rhs_f;
                                     if f.is_nan() || f < i32::MIN as f64 || f > i32::MAX as f64 {
@@ -222,8 +255,10 @@ fn apply_assignments_typed(
                                     return Err("Division by zero".to_string());
                                 }
                                 if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i32::try_from(*rhs_i).map_err(|_| "Integer division overflow".to_string())?;
-                                    n.checked_div(rhs).ok_or_else(|| "Integer division overflow".to_string())?
+                                    let rhs = i32::try_from(*rhs_i)
+                                        .map_err(|_| "Integer division overflow".to_string())?;
+                                    n.checked_div(rhs)
+                                        .ok_or_else(|| "Integer division overflow".to_string())?
                                 } else {
                                     let f = (n as f64) / rhs_f;
                                     if f.is_nan() || f < i32::MIN as f64 || f > i32::MAX as f64 {
@@ -238,17 +273,25 @@ fn apply_assignments_typed(
                     Some(DataValue::SmallInt(n)) => {
                         let result = match op {
                             ArithOp::Add => {
-                                let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt addition overflow".to_string())?;
-                                n.checked_add(rhs).ok_or_else(|| "SmallInt addition overflow".to_string())?
+                                let rhs = i16::try_from(*rhs_i)
+                                    .map_err(|_| "SmallInt addition overflow".to_string())?;
+                                n.checked_add(rhs)
+                                    .ok_or_else(|| "SmallInt addition overflow".to_string())?
                             }
                             ArithOp::Sub => {
-                                let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt subtraction overflow".to_string())?;
-                                n.checked_sub(rhs).ok_or_else(|| "SmallInt subtraction overflow".to_string())?
+                                let rhs = i16::try_from(*rhs_i)
+                                    .map_err(|_| "SmallInt subtraction overflow".to_string())?;
+                                n.checked_sub(rhs)
+                                    .ok_or_else(|| "SmallInt subtraction overflow".to_string())?
                             }
                             ArithOp::Mul => {
                                 if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt multiplication overflow".to_string())?;
-                                    n.checked_mul(rhs).ok_or_else(|| "SmallInt multiplication overflow".to_string())?
+                                    let rhs = i16::try_from(*rhs_i).map_err(|_| {
+                                        "SmallInt multiplication overflow".to_string()
+                                    })?;
+                                    n.checked_mul(rhs).ok_or_else(|| {
+                                        "SmallInt multiplication overflow".to_string()
+                                    })?
                                 } else {
                                     let f = (n as f64) * rhs_f;
                                     if f.is_nan() || f < i16::MIN as f64 || f > i16::MAX as f64 {
@@ -262,8 +305,10 @@ fn apply_assignments_typed(
                                     return Err("Division by zero".to_string());
                                 }
                                 if *rhs_f == (*rhs_i as f64) {
-                                    let rhs = i16::try_from(*rhs_i).map_err(|_| "SmallInt division overflow".to_string())?;
-                                    n.checked_div(rhs).ok_or_else(|| "SmallInt division overflow".to_string())?
+                                    let rhs = i16::try_from(*rhs_i)
+                                        .map_err(|_| "SmallInt division overflow".to_string())?;
+                                    n.checked_div(rhs)
+                                        .ok_or_else(|| "SmallInt division overflow".to_string())?
                                 } else {
                                     let f = (n as f64) / rhs_f;
                                     if f.is_nan() || f < i16::MIN as f64 || f > i16::MAX as f64 {
@@ -277,11 +322,17 @@ fn apply_assignments_typed(
                     }
                     Some(DataValue::BigInt(n)) => {
                         let result = match op {
-                            ArithOp::Add => n.checked_add(*rhs_i).ok_or_else(|| "BigInt addition overflow".to_string())?,
-                            ArithOp::Sub => n.checked_sub(*rhs_i).ok_or_else(|| "BigInt subtraction overflow".to_string())?,
+                            ArithOp::Add => n
+                                .checked_add(*rhs_i)
+                                .ok_or_else(|| "BigInt addition overflow".to_string())?,
+                            ArithOp::Sub => n
+                                .checked_sub(*rhs_i)
+                                .ok_or_else(|| "BigInt subtraction overflow".to_string())?,
                             ArithOp::Mul => {
                                 if *rhs_f == (*rhs_i as f64) {
-                                    n.checked_mul(*rhs_i).ok_or_else(|| "BigInt multiplication overflow".to_string())?
+                                    n.checked_mul(*rhs_i).ok_or_else(|| {
+                                        "BigInt multiplication overflow".to_string()
+                                    })?
                                 } else {
                                     let f = (n as f64) * rhs_f;
                                     if f.is_nan() || f < i64::MIN as f64 || f > i64::MAX as f64 {
@@ -295,7 +346,8 @@ fn apply_assignments_typed(
                                     return Err("Division by zero".to_string());
                                 }
                                 if *rhs_f == (*rhs_i as f64) {
-                                    n.checked_div(*rhs_i).ok_or_else(|| "BigInt division overflow".to_string())?
+                                    n.checked_div(*rhs_i)
+                                        .ok_or_else(|| "BigInt division overflow".to_string())?
                                 } else {
                                     let f = (n as f64) / rhs_f;
                                     if f.is_nan() || f < i64::MIN as f64 || f > i64::MAX as f64 {
@@ -366,7 +418,8 @@ fn apply_assignments_typed(
                             }
                             _ => trimmed.to_string(),
                         };
-                        let width = if let DataType::Char(w) | DataType::Character(w) = target_type {
+                        let width = if let DataType::Char(w) | DataType::Character(w) = target_type
+                        {
                             *w as usize
                         } else {
                             result.len()
@@ -386,12 +439,20 @@ fn apply_assignments_typed(
             match (target_type, dv) {
                 (DataType::Varchar(max_len), DataValue::Varchar(s)) => {
                     if s.len() > *max_len as usize {
-                        return Err(format!("VARCHAR payload length {} exceeds declared limit {}", s.len(), max_len));
+                        return Err(format!(
+                            "VARCHAR payload length {} exceeds declared limit {}",
+                            s.len(),
+                            max_len
+                        ));
                     }
                 }
                 (DataType::Char(n) | DataType::Character(n), DataValue::Char(s)) => {
                     if s.len() > *n as usize {
-                        return Err(format!("CHAR payload length {} exceeds declared limit {}", s.len(), n));
+                        return Err(format!(
+                            "CHAR payload length {} exceeds declared limit {}",
+                            s.len(),
+                            n
+                        ));
                     }
                 }
                 _ => {}
@@ -417,10 +478,7 @@ struct PendingUpdate {
     updated_values: Vec<Option<DataValue>>,
 }
 
-fn update_log_details(
-    updated_count: Option<usize>,
-    error: Option<&str>,
-) -> Value {
+fn update_log_details(updated_count: Option<usize>, error: Option<&str>) -> Value {
     json!({
         "timestamp": current_timestamp_iso(),
         "updated_count": updated_count,
@@ -450,7 +508,9 @@ fn update_log_details(
 /// Returns `None` if the string is empty or no valid assignment could be parsed.
 pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
     let input = input.trim();
-    if input.is_empty() { return None; }
+    if input.is_empty() {
+        return None;
+    }
 
     let mut assignments = Vec::new();
 
@@ -461,7 +521,9 @@ pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
         let col = part[..eq_pos].trim().to_string();
         let rhs = part[eq_pos + 1..].trim();
 
-        if col.is_empty() || rhs.is_empty() { continue; }
+        if col.is_empty() || rhs.is_empty() {
+            continue;
+        }
 
         let expr = if rhs.starts_with('\'') && rhs.ends_with('\'') && rhs.len() >= 2 {
             let inner = &rhs[1..rhs.len() - 1];
@@ -474,7 +536,12 @@ pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
         } else if let Some((src, op, rhs_str)) = try_parse_arith_expr(rhs) {
             let rhs_f: f64 = rhs_str.parse().ok()?;
             let rhs_i: i64 = rhs_f as i64;
-            SetExpr::Expr { src_col: src, op, rhs_i, rhs_f }
+            SetExpr::Expr {
+                src_col: src,
+                op,
+                rhs_i,
+                rhs_f,
+            }
         } else if let Ok(n) = rhs.parse::<i32>() {
             SetExpr::Literal(ColumnValue::Int(n))
         } else if let Ok(n) = rhs.parse::<i64>() {
@@ -493,7 +560,11 @@ pub fn parse_set_clause(input: &str) -> Option<Vec<SetAssignment>> {
         assignments.push(SetAssignment { column: col, expr });
     }
 
-    if assignments.is_empty() { None } else { Some(assignments) }
+    if assignments.is_empty() {
+        None
+    } else {
+        Some(assignments)
+    }
 }
 
 /// Split a SET clause by commas, but NOT commas inside parentheses or string literals.
@@ -539,7 +610,9 @@ fn try_parse_arith_expr(rhs: &str) -> Option<(String, ArithOp, String)> {
 
     for (sym, op) in ops {
         if let Some(pos) = rhs.find(sym) {
-            if pos == 0 { continue; } // leading sign — not an expression
+            if pos == 0 {
+                continue;
+            } // leading sign — not an expression
             let src = rhs[..pos].trim().trim_matches('\'').to_string();
             let val = rhs[pos + sym.len()..].trim().trim_matches('\'').to_string();
             // src must look like a column name (non-numeric, non-empty)
@@ -550,7 +623,6 @@ fn try_parse_arith_expr(rhs: &str) -> Option<(String, ArithOp, String)> {
     }
     None
 }
-
 
 /// Update rows identified by explicit heap pointers (page_id, slot_id).
 ///
@@ -566,16 +638,29 @@ pub fn update_by_pointers(
     assignments: &[SetAssignment],
 ) -> io::Result<UpdateResult> {
     let db = catalog.databases.get(db_name).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("Database '{}' not found", db_name))
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Database '{}' not found", db_name),
+        )
     })?;
     let table = db.tables.get(table_name).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("Table '{}' not found", table_name))
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Table '{}' not found", table_name),
+        )
     })?;
     let columns = &table.columns;
 
     for asgn in assignments {
-        if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(&asgn.column)) {
-            log::warn!("[UpdateByPointers] Assignment column '{}' not found in table '{}'", asgn.column, table_name);
+        if !columns
+            .iter()
+            .any(|c| c.name.eq_ignore_ascii_case(&asgn.column))
+        {
+            log::warn!(
+                "[UpdateByPointers] Assignment column '{}' not found in table '{}'",
+                asgn.column,
+                table_name
+            );
             return Ok(UpdateResult {
                 updated_count: 0,
                 returning_rows: Vec::new(),
@@ -584,7 +669,11 @@ pub fn update_by_pointers(
         match &asgn.expr {
             SetExpr::Column(src_col) => {
                 if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) {
-                    log::warn!("[UpdateByPointers] Source column '{}' not found in table '{}'", src_col, table_name);
+                    log::warn!(
+                        "[UpdateByPointers] Source column '{}' not found in table '{}'",
+                        src_col,
+                        table_name
+                    );
                     return Ok(UpdateResult {
                         updated_count: 0,
                         returning_rows: Vec::new(),
@@ -593,7 +682,11 @@ pub fn update_by_pointers(
             }
             SetExpr::Expr { src_col, .. } => {
                 if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) {
-                    log::warn!("[UpdateByPointers] Source column '{}' not found in table '{}'", src_col, table_name);
+                    log::warn!(
+                        "[UpdateByPointers] Source column '{}' not found in table '{}'",
+                        src_col,
+                        table_name
+                    );
                     return Ok(UpdateResult {
                         updated_count: 0,
                         returning_rows: Vec::new(),
@@ -644,7 +737,10 @@ pub fn update_by_pointers(
         let updated_values = match apply_assignments_typed(columns, decoded.clone(), assignments) {
             Ok(v) => v,
             Err(e) => {
-                log::warn!("[UpdateByPointers] Aborting update due to assignment error: {}", e);
+                log::warn!(
+                    "[UpdateByPointers] Aborting update due to assignment error: {}",
+                    e
+                );
                 return Ok(UpdateResult {
                     updated_count: 0,
                     returning_rows: Vec::new(),
@@ -654,7 +750,10 @@ pub fn update_by_pointers(
         let new_bytes = match serialize_nullable_typed_row(&schema, &updated_values) {
             Ok(b) => b,
             Err(e) => {
-                log::warn!("[UpdateByPointers] Aborting update due to serialization error: {}", e);
+                log::warn!(
+                    "[UpdateByPointers] Aborting update due to serialization error: {}",
+                    e
+                );
                 return Ok(UpdateResult {
                     updated_count: 0,
                     returning_rows: Vec::new(),
@@ -666,19 +765,24 @@ pub fn update_by_pointers(
         let updated_decoded = values_to_column_values(columns, &updated_values);
 
         // Constraint validation against disk, excluding all pointers in this batch
-        let new_strings: Vec<String> = updated_values.iter().map(|val| {
-            match val {
+        let new_strings: Vec<String> = updated_values
+            .iter()
+            .map(|val| match val {
                 Some(dv) => dv.to_string(),
                 None => "NULL".to_string(),
-            }
-        }).collect();
+            })
+            .collect();
         let new_values: Vec<&str> = new_strings.iter().map(|s| s.as_str()).collect();
         if let Err(e) = crate::backend::constraint::validate_row_update_with_excludes(
-            catalog, db_name, table_name, &new_values,
+            catalog,
+            db_name,
+            table_name,
+            &new_values,
             pointers,
         ) {
             log::warn!(
-                "[UpdateByPointers] Aborting update due to constraint violation: {}", e
+                "[UpdateByPointers] Aborting update due to constraint violation: {}",
+                e
             );
             return Ok(UpdateResult {
                 updated_count: 0,
@@ -687,10 +791,14 @@ pub fn update_by_pointers(
         }
 
         if let Err(e) = crate::backend::constraint::validate_update_restrict(
-            db_name, table_name, &old_decoded, &updated_decoded,
+            db_name,
+            table_name,
+            &old_decoded,
+            &updated_decoded,
         ) {
             log::warn!(
-                "[UpdateByPointers] Aborting update due to FOREIGN KEY RESTRICT constraint: {}", e
+                "[UpdateByPointers] Aborting update due to FOREIGN KEY RESTRICT constraint: {}",
+                e
             );
             return Ok(UpdateResult {
                 updated_count: 0,
@@ -700,11 +808,16 @@ pub fn update_by_pointers(
 
         log::info!(
             "[Update] Validated row at (page={}, slot={}): updated_decoded={:?}",
-            page_num, slot_idx, updated_decoded
+            page_num,
+            slot_idx,
+            updated_decoded
         );
 
         pending_updates.push(PendingUpdate {
-            pointer: TuplePointer { page_id: page_num, slot_index },
+            pointer: TuplePointer {
+                page_id: page_num,
+                slot_index,
+            },
             old_tuple_data: tuple_data,
             new_bytes,
             old_decoded,
@@ -733,7 +846,8 @@ pub fn update_by_pointers(
                     has_intra_batch_conflict = true;
                     log::warn!(
                         "[UpdateByPointers] Batch UNIQUE violation on column '{}': duplicate value '{}'",
-                        col.name, dv
+                        col.name,
+                        dv
                     );
                     break;
                 }
@@ -745,45 +859,48 @@ pub fn update_by_pointers(
     }
 
     // Check unique indexes (including composite)
-    if !has_intra_batch_conflict {
-        if let Some(ref m) = meta {
-            for (idx_name, idx_cols) in &m.unique_indexes {
-                let col_indices: Vec<usize> = idx_cols
-                    .iter()
-                    .filter_map(|c| columns.iter().position(|col| col.name.eq_ignore_ascii_case(c)))
-                    .collect();
-                if col_indices.len() != idx_cols.len() {
-                    continue;
-                }
+    if !has_intra_batch_conflict && let Some(ref m) = meta {
+        for (idx_name, idx_cols) in &m.unique_indexes {
+            let col_indices: Vec<usize> = idx_cols
+                .iter()
+                .filter_map(|c| {
+                    columns
+                        .iter()
+                        .position(|col| col.name.eq_ignore_ascii_case(c))
+                })
+                .collect();
+            if col_indices.len() != idx_cols.len() {
+                continue;
+            }
 
-                let mut seen = std::collections::HashSet::new();
-                for pu in &pending_updates {
-                    let mut has_null = false;
-                    let mut key_parts = Vec::with_capacity(col_indices.len());
-                    for &idx in &col_indices {
-                        match pu.updated_values.get(idx) {
-                            Some(Some(dv)) => key_parts.push(dv.to_string()),
-                            _ => {
-                                has_null = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !has_null {
-                        let composite_key = key_parts.join("|||");
-                        if !seen.insert(composite_key) {
-                            has_intra_batch_conflict = true;
-                            log::warn!(
-                                "[UpdateByPointers] Batch UNIQUE violation on index '{}': duplicate key ({})",
-                                idx_name, key_parts.join(", ")
-                            );
+            let mut seen = std::collections::HashSet::new();
+            for pu in &pending_updates {
+                let mut has_null = false;
+                let mut key_parts = Vec::with_capacity(col_indices.len());
+                for &idx in &col_indices {
+                    match pu.updated_values.get(idx) {
+                        Some(Some(dv)) => key_parts.push(dv.to_string()),
+                        _ => {
+                            has_null = true;
                             break;
                         }
                     }
                 }
-                if has_intra_batch_conflict {
-                    break;
+                if !has_null {
+                    let composite_key = key_parts.join("|||");
+                    if !seen.insert(composite_key) {
+                        has_intra_batch_conflict = true;
+                        log::warn!(
+                            "[UpdateByPointers] Batch UNIQUE violation on index '{}': duplicate key ({})",
+                            idx_name,
+                            key_parts.join(", ")
+                        );
+                        break;
+                    }
                 }
+            }
+            if has_intra_batch_conflict {
+                break;
             }
         }
     }
@@ -801,45 +918,65 @@ pub fn update_by_pointers(
             let _page_lock = PageWriteLock::acquire(file_identity, update.pointer.page_id);
             let mut page = Page::new();
             crate::disk::read_page(&mut file, &mut page, update.pointer.page_id)?;
-            let base = (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
+            let base =
+                (PAGE_HEADER_SIZE + update.pointer.slot_index as u32 * ITEM_ID_SIZE) as usize;
             let mut flags = u16::from_le_bytes(page.data[base + 6..base + 8].try_into().unwrap());
             flags |= SLOT_FLAG_DELETED;
             page.data[base + 6..base + 8].copy_from_slice(&flags.to_le_bytes());
             crate::disk::write_page(&mut file, &mut page, update.pointer.page_id)?;
-            let _ = crate::backend::visibility_map::vm_clear_page(db_name, table_name, update.pointer.page_id);
+            let _ = crate::backend::visibility_map::vm_clear_page(
+                db_name,
+                table_name,
+                update.pointer.page_id,
+            );
         }
         crate::table::increment_dead_tuple_count(&mut file, pending_updates.len() as u32)?;
     }
 
     if !pending_updates.is_empty() {
         for update in &pending_updates {
-            let (new_page_id, new_slot_id) = crate::backend::executor::compaction_api::insert_raw_tuple(
-                db_name, table_name, &update.new_bytes,
-            )?;
+            let (new_page_id, new_slot_id) =
+                crate::backend::executor::compaction_api::insert_raw_tuple(
+                    db_name,
+                    table_name,
+                    &update.new_bytes,
+                )?;
 
             log::info!(
                 "[Update] Marked old slot (page={}, slot={}) as deleted, appended new version at (page={}, slot={})",
-                update.pointer.page_id, update.pointer.slot_index, new_page_id, new_slot_id
+                update.pointer.page_id,
+                update.pointer.slot_index,
+                new_page_id,
+                new_slot_id
             );
 
             if let Err(e) = crate::backend::executor::create_index::update_index_on_update(
-                db_name, table_name, columns,
-                &update.old_tuple_data, &update.new_bytes,
-                update.pointer.page_id, update.pointer.slot_index as u32,
-                new_page_id, new_slot_id,
+                db_name,
+                table_name,
+                columns,
+                &update.old_tuple_data,
+                &update.new_bytes,
+                update.pointer.page_id,
+                update.pointer.slot_index as u32,
+                new_page_id,
+                new_slot_id,
             ) {
                 log::warn!("Failed to update index for updated tuple: {}", e);
             }
 
             returning_rows.push(
-                update.updated_decoded.iter().map(|(col, val)| {
-                    let s = match val {
-                        ColumnValue::Int(n) => n.to_string(),
-                        ColumnValue::Text(t) => t.clone(),
-                        ColumnValue::List(_) => String::from("[list]"),
-                    };
-                    (col.clone(), s)
-                }).collect()
+                update
+                    .updated_decoded
+                    .iter()
+                    .map(|(col, val)| {
+                        let s = match val {
+                            ColumnValue::Int(n) => n.to_string(),
+                            ColumnValue::Text(t) => t.clone(),
+                            ColumnValue::List(_) => String::from("[list]"),
+                        };
+                        (col.clone(), s)
+                    })
+                    .collect(),
             );
         }
     }
@@ -848,17 +985,21 @@ pub fn update_by_pointers(
     if !pending_updates.is_empty() {
         for update in &pending_updates {
             if let Err(e) = crate::backend::constraint::propagate_update_to_children(
-                catalog, db_name, table_name,
-                &update.old_decoded, &update.updated_decoded,
+                catalog,
+                db_name,
+                table_name,
+                &update.old_decoded,
+                &update.updated_decoded,
             ) {
-                log::warn!(
-                    "[UpdateByPointers] Failed to propagate FK cascade: {}", e
-                );
+                log::warn!("[UpdateByPointers] Failed to propagate FK cascade: {}", e);
             }
         }
     }
 
-    let result = UpdateResult { updated_count, returning_rows };
+    let result = UpdateResult {
+        updated_count,
+        returning_rows,
+    };
     let details = update_log_details(Some(result.updated_count), None);
     let _ = crate::backend::log::operation_log::log_update(db_name, table_name, details, "success");
 

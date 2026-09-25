@@ -1,10 +1,10 @@
 use std::fs::File;
 use std::io::{self};
 
-use crate::catalog::types::Table;
 use crate::catalog::Catalog;
+use crate::catalog::types::Table;
 use crate::disk::read_page;
-use crate::page::{page_free_space, ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page};
+use crate::page::{ITEM_ID_SIZE, PAGE_HEADER_SIZE, PAGE_SIZE, Page, page_free_space};
 use crate::table::page_count;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +44,8 @@ impl TableStatistics {
     }
 
     pub fn used_bytes(&self) -> u64 {
-        self.data_capacity_bytes().saturating_sub(self.total_free_bytes)
+        self.data_capacity_bytes()
+            .saturating_sub(self.total_free_bytes)
     }
 
     pub fn fill_percent(&self) -> f64 {
@@ -177,7 +178,10 @@ pub fn collect_table_statistics_from_file(file: &mut File) -> io::Result<TableSt
 
 pub fn print_table_page_count(db_name: &str, table_name: &str) -> io::Result<()> {
     let stats = collect_table_statistics(db_name, table_name)?;
-    println!("Table '{}' has {} total pages.", table_name, stats.total_pages);
+    println!(
+        "Table '{}' has {} total pages.",
+        table_name, stats.total_pages
+    );
     Ok(())
 }
 
@@ -214,7 +218,10 @@ fn print_table_statistics_report(
     println!("Data pages: {}", stats.data_pages);
     println!("Tuples: {}", stats.total_tuple_count);
     println!("Pages with tuples: {}", stats.pages_with_tuples);
-    println!("Tuples per data page (avg): {:.2}", stats.avg_tuples_per_page());
+    println!(
+        "Tuples per data page (avg): {:.2}",
+        stats.avg_tuples_per_page()
+    );
     println!("Tuple width (avg): {:.2} bytes", stats.avg_tuple_bytes());
     println!(
         "Tuple width (min/max): {} / {} bytes",
@@ -224,7 +231,10 @@ fn print_table_statistics_report(
     println!("Slot directory bytes: {}", stats.total_slot_bytes);
     println!("Page header bytes: {}", stats.total_header_bytes);
     println!("Free space: {} bytes", stats.total_free_bytes);
-    println!("Average free space per data page: {:.2} bytes", stats.avg_page_free_bytes());
+    println!(
+        "Average free space per data page: {:.2} bytes",
+        stats.avg_page_free_bytes()
+    );
     println!("Page fill factor: {:.2}%", stats.fill_percent());
     println!(
         "Free space per data page (min/max): {} / {} bytes",

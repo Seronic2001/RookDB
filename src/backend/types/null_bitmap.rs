@@ -24,14 +24,16 @@ pub fn is_column_null_in_row(row_bytes: &[u8], column_index: usize) -> Result<bo
     let num_cols = u16::from_le_bytes([row_bytes[0], row_bytes[1]]) as usize;
     if column_index >= num_cols {
         return Err(format!(
-            "Column index {} out of bounds (num_cols={})", column_index, num_cols
+            "Column index {} out of bounds (num_cols={})",
+            column_index, num_cols
         ));
     }
     let bm_size = num_cols.div_ceil(8);
     if row_bytes.len() < 4 + bm_size {
         return Err(format!(
             "Row too short to contain null bitmap: need {} bytes, got {}",
-            4 + bm_size, row_bytes.len()
+            4 + bm_size,
+            row_bytes.len()
         ));
     }
     let byte_idx = column_index / 8;
@@ -79,7 +81,10 @@ impl NullBitmap {
 
     /// Mark logical column `column_index` as NULL (sets its bit to `1`).
     pub fn set_null(&mut self, column_index: usize) {
-        assert!(column_index < self.column_count, "column index out of range");
+        assert!(
+            column_index < self.column_count,
+            "column index out of range"
+        );
         let byte_idx = column_index / 8;
         let bit_idx = column_index % 8;
         self.data[byte_idx] |= 1 << bit_idx;
@@ -87,7 +92,10 @@ impl NullBitmap {
 
     /// Mark logical column `column_index` as non-NULL (clears its bit to `0`).
     pub fn clear_null(&mut self, column_index: usize) {
-        assert!(column_index < self.column_count, "column index out of range");
+        assert!(
+            column_index < self.column_count,
+            "column index out of range"
+        );
         let byte_idx = column_index / 8;
         let bit_idx = column_index % 8;
         self.data[byte_idx] &= !(1 << bit_idx);
@@ -95,7 +103,10 @@ impl NullBitmap {
 
     /// Returns `true` if logical column `column_index` is NULL.
     pub fn is_null(&self, column_index: usize) -> bool {
-        assert!(column_index < self.column_count, "column index out of range");
+        assert!(
+            column_index < self.column_count,
+            "column index out of range"
+        );
         let byte_idx = column_index / 8;
         let bit_idx = column_index % 8;
         (self.data[byte_idx] & (1 << bit_idx)) != 0

@@ -134,7 +134,11 @@ fn try_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect())
@@ -167,7 +171,12 @@ fn setup_emp_dept(db: &str) {
     for row in [["10", "'eng'"], ["20", "'ops'"], ["30", "'hr'"]] {
         insert(db, "dept", &row);
     }
-    for row in [["1", "10", "100"], ["2", "20", "200"], ["3", "20", "300"], ["4", "40", "400"]] {
+    for row in [
+        ["1", "10", "100"],
+        ["2", "20", "200"],
+        ["3", "20", "300"],
+        ["4", "40", "400"],
+    ] {
         insert(db, "emp", &row);
     }
 }
@@ -185,7 +194,13 @@ fn setup_t(db: &str) {
             col("b", DataType::Varchar(10), true),
         ],
     );
-    for row in [["1", "'x'"], ["2", "'y'"], ["NULL", "'z'"], ["2", "NULL"], ["1", "'x'"]] {
+    for row in [
+        ["1", "'x'"],
+        ["2", "'y'"],
+        ["NULL", "'z'"],
+        ["2", "NULL"],
+        ["1", "'x'"],
+    ] {
         insert(db, "t", &row);
     }
 }
@@ -543,7 +558,10 @@ fn x2_uncorrelated_subqueries_and_correlated_exists_still_work() {
     )
     .expect("uncorrelated scalar subquery in WHERE");
     // AVG = 250 → ids 3 (300) and 4 (400).
-    assert_eq!(where_scalar, vec![vec!["3".to_string()], vec!["4".to_string()]]);
+    assert_eq!(
+        where_scalar,
+        vec![vec!["3".to_string()], vec!["4".to_string()]]
+    );
 
     // Correlated EXISTS (different code path — works).
     let exists = try_select(
@@ -554,7 +572,11 @@ fn x2_uncorrelated_subqueries_and_correlated_exists_still_work() {
     .expect("correlated EXISTS");
     assert_eq!(
         exists,
-        vec![vec!["1".to_string()], vec!["2".to_string()], vec!["3".to_string()]]
+        vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()]
+        ]
     );
 }
 
@@ -607,12 +629,8 @@ fn x3_basic_cte_and_aggregate_null_semantics_still_work() {
     );
 
     // LIMIT edge cases.
-    let limit0 = try_select(
-        &catalog,
-        "db16x3",
-        "SELECT id FROM emp ORDER BY id LIMIT 0",
-    )
-    .expect("limit 0");
+    let limit0 =
+        try_select(&catalog, "db16x3", "SELECT id FROM emp ORDER BY id LIMIT 0").expect("limit 0");
     assert_eq!(limit0, Vec::<Vec<String>>::new());
     let limit_off = try_select(
         &catalog,

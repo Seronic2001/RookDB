@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use crate::backend::error::RookResult;
-use super::super::tuple::{Tuple, ColumnInfo};
 use super::super::expr::{Expr, Predicate, evaluate_predicate};
+use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
+use crate::backend::error::RookResult;
 
 use crate::types::datatype::DataType;
 use crate::types::value::DataValue;
@@ -96,7 +96,11 @@ pub struct CteScanOperator {
 impl CteScanOperator {
     /// Create a new CTE scan operator.
     pub fn new(tuples: Vec<Tuple>, schema: Vec<ColumnInfo>) -> Self {
-        Self { tuples, pos: 0, schema }
+        Self {
+            tuples,
+            pos: 0,
+            schema,
+        }
     }
 }
 
@@ -187,7 +191,9 @@ impl PhysicalOperator for FilterOperator {
                 }
             }
 
-            while self.buffer_pos < self.child_buffer.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+            while self.buffer_pos < self.child_buffer.len()
+                && batch.len() < super::trait_::DEFAULT_BATCH_SIZE
+            {
                 let tuple = &self.child_buffer[self.buffer_pos];
                 self.buffer_pos += 1;
                 match evaluate_predicate(&self.predicate, tuple, child_schema)? {
@@ -222,7 +228,6 @@ impl PhysicalOperator for FilterOperator {
     }
 }
 
-
 // ── Projection Operator ───────────────────────────────────────────────────────
 
 /// Evaluates expressions to produce projected output tuples.
@@ -241,7 +246,8 @@ impl ProjectionOperator {
         projections: Vec<(Expr, String, DataType)>,
     ) -> Self {
         let child_schema = child.schema().to_vec();
-        let output_schema: Vec<ColumnInfo> = projections.iter()
+        let output_schema: Vec<ColumnInfo> = projections
+            .iter()
             .map(|(_, name, dt)| ColumnInfo {
                 name: name.clone(),
                 data_type: dt.clone(),
@@ -267,11 +273,23 @@ impl ProjectionOperator {
         let mut projections = Vec::with_capacity(indices.len());
         for (i, &idx) in indices.iter().enumerate() {
             let name = names.get(i).cloned().unwrap_or_else(|| {
-                child_schema.get(idx).map(|c| c.name.clone()).unwrap_or_else(|| format!("col{}", idx))
+                child_schema
+                    .get(idx)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| format!("col{}", idx))
             });
-            let dt = child_schema.get(idx).map(|c| c.data_type.clone())
+            let dt = child_schema
+                .get(idx)
+                .map(|c| c.data_type.clone())
                 .ok_or_else(|| format!("Column index {} out of bounds", idx))?;
-            projections.push((Expr::Column { table: None, column: name.clone() }, name, dt));
+            projections.push((
+                Expr::Column {
+                    table: None,
+                    column: name.clone(),
+                },
+                name,
+                dt,
+            ));
         }
         Ok(Self::new(child, projections))
     }
@@ -286,8 +304,18 @@ impl ProjectionOperator {
 
     pub fn star(child: Box<dyn PhysicalOperator>) -> Self {
         let child_schema = child.schema().to_vec();
-        let projections: Vec<(Expr, String, DataType)> = child_schema.iter()
-            .map(|ci| (Expr::Column { table: ci.table.clone(), column: ci.name.clone() }, ci.name.clone(), ci.data_type.clone()))
+        let projections: Vec<(Expr, String, DataType)> = child_schema
+            .iter()
+            .map(|ci| {
+                (
+                    Expr::Column {
+                        table: ci.table.clone(),
+                        column: ci.name.clone(),
+                    },
+                    ci.name.clone(),
+                    ci.data_type.clone(),
+                )
+            })
             .collect();
         let output_schema = child_schema.clone();
         Self {
@@ -328,7 +356,9 @@ impl PhysicalOperator for ProjectionOperator {
         let child_schema = &self.child_schema;
 
         // Drain any remaining items in child_buffer
-        while self.buffer_pos < self.child_buffer.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+        while self.buffer_pos < self.child_buffer.len()
+            && batch.len() < super::trait_::DEFAULT_BATCH_SIZE
+        {
             let child_tuple = &self.child_buffer[self.buffer_pos];
             self.buffer_pos += 1;
             let mut values = Vec::with_capacity(self.projections.len());
@@ -351,7 +381,9 @@ impl PhysicalOperator for ProjectionOperator {
             return Ok(batch.len());
         }
 
-        while self.buffer_pos < self.child_buffer.len() && batch.len() < super::trait_::DEFAULT_BATCH_SIZE {
+        while self.buffer_pos < self.child_buffer.len()
+            && batch.len() < super::trait_::DEFAULT_BATCH_SIZE
+        {
             let child_tuple = &self.child_buffer[self.buffer_pos];
             self.buffer_pos += 1;
             let mut values = Vec::with_capacity(self.projections.len());
@@ -413,7 +445,13 @@ pub struct LimitOperator {
 
 impl LimitOperator {
     pub fn new(child: Box<dyn PhysicalOperator>, limit: usize, offset: usize) -> Self {
-        Self { child, limit, offset, emitted: 0, skipped: 0 }
+        Self {
+            child,
+            limit,
+            offset,
+            emitted: 0,
+            skipped: 0,
+        }
     }
 }
 

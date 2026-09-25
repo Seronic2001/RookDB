@@ -7,15 +7,15 @@
 
 mod common;
 
+use common::TestWorkspace;
 use rook_ast::QueryPlan;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::tuple::Tuple;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-use common::TestWorkspace;
 
 fn col(name: &str, ty: DataType) -> Column {
     Column {
@@ -26,7 +26,6 @@ fn col(name: &str, ty: DataType) -> Column {
     }
 }
 
-
 /// Parse a WHERE string with the real SQL grammar, select matching rows on
 /// the Volcano engine, then delete them by pointer.
 fn exec_delete(
@@ -35,9 +34,8 @@ fn exec_delete(
     table: &str,
     where_text: &str,
 ) -> storage_manager::executor::DeleteResult {
-    let selection =
-        storage_manager::backend::executor::row_select::parse_where_text(where_text)
-            .expect("parse WHERE");
+    let selection = storage_manager::backend::executor::row_select::parse_where_text(where_text)
+        .expect("parse WHERE");
     let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
         catalog, db, table, selection,
     )
@@ -67,7 +65,10 @@ fn setup(db: &str) -> Catalog {
 fn run_select(catalog: &Catalog, db: &str, sql: &str) -> Vec<Vec<String>> {
     let select = match rook_parser::parse_sql(sql) {
         Ok(QueryPlan::Select(select)) => select,
-        other => panic!("expected Select plan, got {:?}", other.map(|p| p.statement_type().to_string())),
+        other => panic!(
+            "expected Select plan, got {:?}",
+            other.map(|p| p.statement_type().to_string())
+        ),
     };
     let logical = storage_manager::planner::plan_query(&QueryPlan::Select(select), catalog, db)
         .expect("logical planning failed");
@@ -95,7 +96,10 @@ fn btree_composite_keys_sort_and_lookup() {
     let path = std::env::temp_dir().join(format!(
         "rookdb_comp_p{}_{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&path).unwrap();
     let idx_path = path.join("comp.idx");
@@ -238,11 +242,19 @@ fn composite_index_tracks_dml() {
     let catalog = load_catalog();
     // The deleted combination is gone; the inserted one is present.
     assert!(
-        run_select(&catalog, "ddb", "SELECT amount FROM orders WHERE cust_id = 1 AND region = 'b'")
-            .is_empty()
+        run_select(
+            &catalog,
+            "ddb",
+            "SELECT amount FROM orders WHERE cust_id = 1 AND region = 'b'"
+        )
+        .is_empty()
     );
     assert_eq!(
-        run_select(&catalog, "ddb", "SELECT amount FROM orders WHERE cust_id = 1 AND region = 'c'"),
+        run_select(
+            &catalog,
+            "ddb",
+            "SELECT amount FROM orders WHERE cust_id = 1 AND region = 'c'"
+        ),
         vec![vec!["40"]]
     );
 
@@ -277,7 +289,12 @@ fn composite_index_survives_vacuum_rebuild() {
                 &catalog,
                 "vdb",
                 "orders",
-                &[&(i % 3).to_string(), &format!("r{}", i % 2), &(i * 10).to_string(), ""],
+                &[
+                    &(i % 3).to_string(),
+                    &format!("r{}", i % 2),
+                    &(i * 10).to_string(),
+                    ""
+                ],
             )
             .unwrap(),
             "insert of row {} failed",
@@ -304,11 +321,19 @@ fn composite_index_survives_vacuum_rebuild() {
     // Surviving rows are i=6..11; only i=6 has cust_id=0 AND region='r0'.
     let catalog = load_catalog();
     assert_eq!(
-        run_select(&catalog, "vdb", "SELECT amount FROM orders WHERE cust_id = 0 AND region = 'r0'"),
+        run_select(
+            &catalog,
+            "vdb",
+            "SELECT amount FROM orders WHERE cust_id = 0 AND region = 'r0'"
+        ),
         vec![vec!["60"]]
     );
     assert_eq!(
-        run_select(&catalog, "vdb", "SELECT amount FROM orders WHERE cust_id = 1 AND region = 'r0'"),
+        run_select(
+            &catalog,
+            "vdb",
+            "SELECT amount FROM orders WHERE cust_id = 1 AND region = 'r0'"
+        ),
         vec![vec!["100"]]
     );
 }

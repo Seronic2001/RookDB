@@ -8,16 +8,14 @@
 
 mod common;
 
-
 use storage_manager::backend::constraint::validate_row_insert;
 use storage_manager::backend::system_table::insert_constraint_metadata;
 use storage_manager::catalog::{
-    create_database, create_table, init_catalog, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, init_catalog, load_catalog, save_catalog,
 };
 use storage_manager::executor::create_index::create_index;
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-
 
 fn column(name: &str, data_type: DataType) -> Column {
     Column {
@@ -42,7 +40,12 @@ fn not_null_rejects_missing_value() {
     let mut id_col = column("id", DataType::Int);
     id_col.constraints.not_null = true;
     id_col.nullable = false;
-    create_table(&mut catalog, "nn", "t", vec![id_col, column("note", DataType::Varchar(10))]);
+    create_table(
+        &mut catalog,
+        "nn",
+        "t",
+        vec![id_col, column("note", DataType::Varchar(10))],
+    );
     save_catalog(&catalog).unwrap();
     let catalog = load_catalog();
 
@@ -65,14 +68,25 @@ fn unique_with_index_rejects_duplicates() {
 
     let mut email = column("email", DataType::Varchar(50));
     email.constraints.unique = true;
-    create_table(&mut catalog, "uq", "users", vec![column("id", DataType::Int), email]);
+    create_table(
+        &mut catalog,
+        "uq",
+        "users",
+        vec![column("id", DataType::Int), email],
+    );
     save_catalog(&catalog).unwrap();
 
     // NOTE: like the CLI shell, we keep one in-memory catalog for the whole
     // session — constraint flags live in memory and in sys_constraints rows.
     insert_single_tuple(&catalog, "uq", "users", &["1", "a@x.io"]).unwrap();
 
-    let index = create_index(&catalog, "uq", "users", "by_email", &[String::from("email")]);
+    let index = create_index(
+        &catalog,
+        "uq",
+        "users",
+        "by_email",
+        &[String::from("email")],
+    );
     assert!(index.is_ok(), "index build should succeed: {:?}", index);
 
     assert!(
@@ -93,7 +107,12 @@ fn unique_without_index_falls_back_to_heap_scan() {
 
     let mut name = column("name", DataType::Varchar(50));
     name.constraints.unique = true;
-    create_table(&mut catalog, "uq2", "people", vec![column("id", DataType::Int), name]);
+    create_table(
+        &mut catalog,
+        "uq2",
+        "people",
+        vec![column("id", DataType::Int), name],
+    );
     save_catalog(&catalog).unwrap();
     insert_single_tuple(&catalog, "uq2", "people", &["1", "Zed"]).unwrap();
 
@@ -191,7 +210,10 @@ fn fk_restrict_blocks_parent_delete() {
 
     // RESTRICT: the referenced customer row is skipped by the executor...
     let result = delete_customers_by_id(&catalog, "fkr", 1);
-    assert_eq!(result.deleted_count, 0, "referenced parent must not be deletable");
+    assert_eq!(
+        result.deleted_count, 0,
+        "referenced parent must not be deletable"
+    );
 
     // ...while an unreferenced one deletes normally.
     let result = delete_customers_by_id(&catalog, "fkr", 2);
@@ -239,7 +261,9 @@ fn delete_customers_by_id(
     db: &str,
     id: i32,
 ) -> storage_manager::executor::delete::DeleteResult {
-    use storage_manager::backend::executor::row_select::{parse_where_text, select_matching_pointers};
+    use storage_manager::backend::executor::row_select::{
+        parse_where_text, select_matching_pointers,
+    };
 
     let selection = parse_where_text(&format!("id = {}", id)).unwrap();
     let pointers = select_matching_pointers(catalog, db, "customers", selection).unwrap();
@@ -248,7 +272,9 @@ fn delete_customers_by_id(
 
 /// Build the decoded-row representation `validate_row_delete` expects.
 #[allow(dead_code)]
-fn decoded_row(pairs: &[(&str, &str)]) -> Vec<(String, storage_manager::executor::delete::ColumnValue)> {
+fn decoded_row(
+    pairs: &[(&str, &str)],
+) -> Vec<(String, storage_manager::executor::delete::ColumnValue)> {
     use storage_manager::executor::delete::ColumnValue;
     pairs
         .iter()
@@ -268,7 +294,10 @@ fn decoded_row(pairs: &[(&str, &str)]) -> Vec<(String, storage_manager::executor
 fn deleted_customer_row(id: &str) -> Vec<(String, storage_manager::executor::delete::ColumnValue)> {
     // customers rows are (id, cname)
     let mut row = decoded_row(&[("id", id)]);
-    row.push(("cname".to_string(), storage_manager::executor::delete::ColumnValue::Text("Ann".to_string())));
+    row.push((
+        "cname".to_string(),
+        storage_manager::executor::delete::ColumnValue::Text("Ann".to_string()),
+    ));
     row
 }
 
@@ -279,9 +308,11 @@ fn count_orders(catalog: &Catalog, db: &str) -> usize {
         db,
     )
     .unwrap();
-    storage_manager::backend::executor::physical::engine::execute_plan_collect(&logical, catalog, db)
-        .unwrap()
-        .len()
+    storage_manager::backend::executor::physical::engine::execute_plan_collect(
+        &logical, catalog, db,
+    )
+    .unwrap()
+    .len()
 }
 
 fn query_orders_customer_ids(catalog: &Catalog, db: &str) -> Vec<String> {
@@ -291,12 +322,14 @@ fn query_orders_customer_ids(catalog: &Catalog, db: &str) -> Vec<String> {
         db,
     )
     .unwrap();
-    storage_manager::backend::executor::physical::engine::execute_plan_collect(&logical, catalog, db)
-        .unwrap()
-        .iter()
-        .map(|t| match &t.values[0] {
-            Some(v) => format!("{}", v),
-            None => "NULL".to_string(),
-        })
-        .collect()
+    storage_manager::backend::executor::physical::engine::execute_plan_collect(
+        &logical, catalog, db,
+    )
+    .unwrap()
+    .iter()
+    .map(|t| match &t.values[0] {
+        Some(v) => format!("{}", v),
+        None => "NULL".to_string(),
+    })
+    .collect()
 }

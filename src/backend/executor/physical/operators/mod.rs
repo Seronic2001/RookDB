@@ -18,35 +18,34 @@
 //! - `utils.rs`: normalise_value_for_key
 //! - `tests.rs`: unit tests (mock operator + operator behaviour)
 
-mod trait_;
-mod scans;
-mod joins;
-mod filter_project;
-mod sort;
 mod aggregate;
-mod set_op;
-mod subquery;
+mod filter_project;
 mod insert;
+mod joins;
+mod scans;
+mod set_op;
+mod sort;
+mod subquery;
+mod trait_;
 mod utils;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export everything from submodules
-pub use trait_::{PhysicalOperator, DEFAULT_BATCH_SIZE};
-pub use scans::{SeqScanOperator, IndexScanOperator, IndexScanMode};
-pub use joins::{NestedLoopJoinOperator, HashJoinOperator, IndexNestedLoopJoinOperator, JoinType};
 pub use insert::{InsertOperator, ValuesOperator};
+pub use joins::{HashJoinOperator, IndexNestedLoopJoinOperator, JoinType, NestedLoopJoinOperator};
+pub use scans::{IndexScanMode, IndexScanOperator, SeqScanOperator};
+pub use trait_::{DEFAULT_BATCH_SIZE, PhysicalOperator};
 
-pub use filter_project::{
-    SingleRowOperator, NullOperator, CteScanOperator,
-    FilterOperator, ProjectionOperator, LimitOperator, DistinctOperator,
-};
-pub use sort::SortOperator;
 pub use aggregate::{
-    AggregateOperator, AggregateFunction, AggregateInfo, PerGroupState,
-    infer_aggregate_output_type,
+    AggregateFunction, AggregateInfo, AggregateOperator, PerGroupState, infer_aggregate_output_type,
+};
+pub use filter_project::{
+    CteScanOperator, DistinctOperator, FilterOperator, LimitOperator, NullOperator,
+    ProjectionOperator, SingleRowOperator,
 };
 pub use set_op::{SetOpOperator, SetOpType};
+pub use sort::SortOperator;
 pub use subquery::{SubqueryExecOperator, SubqueryType};
 pub use utils::normalise_value_for_key;

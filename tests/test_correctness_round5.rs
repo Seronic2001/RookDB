@@ -34,17 +34,15 @@ use rook_ast::QueryPlan;
 
 use storage_manager::backend::error::RookResult;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
+use storage_manager::backend::executor::physical::expr::Expr;
+use storage_manager::backend::executor::physical::operators::SetOpType as PhysicalSetOpType;
 use storage_manager::backend::executor::physical::operators::{
     HashJoinOperator, JoinType, NestedLoopJoinOperator, PhysicalOperator, SetOpOperator,
     SortOperator,
 };
-use storage_manager::backend::executor::physical::operators::SetOpType as PhysicalSetOpType;
 use storage_manager::backend::executor::physical::tuple::{ColumnInfo, Tuple};
-use storage_manager::backend::executor::physical::expr::Expr;
 use storage_manager::catalog::types::{Column, Constraints};
-use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog,
-};
+use storage_manager::catalog::{create_database, create_table, load_catalog, save_catalog};
 use storage_manager::executor::load_csv::insert_single_tuple;
 use storage_manager::executor::update::parse_set_clause;
 use storage_manager::planner::plan_query;
@@ -110,7 +108,11 @@ fn fmt_rows(tuples: &[Tuple]) -> Vec<Vec<String>> {
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect()
@@ -132,7 +134,14 @@ fn set_numeric_column_preserves_value() {
         "t",
         vec![
             col("id", DataType::Int, false),
-            col("n", DataType::Numeric { precision: 10, scale: 2 }, true),
+            col(
+                "n",
+                DataType::Numeric {
+                    precision: 10,
+                    scale: 2,
+                },
+                true,
+            ),
         ],
     );
     save_catalog(&catalog).unwrap();
@@ -143,8 +152,8 @@ fn set_numeric_column_preserves_value() {
     use storage_manager::executor::update_by_pointers;
     let assignments = parse_set_clause("n = 9.75").expect("parse set");
 
-    let result = update_by_pointers(&catalog, "t5db", "t", &[(1, 0)], &assignments)
-        .expect("update failed");
+    let result =
+        update_by_pointers(&catalog, "t5db", "t", &[(1, 0)], &assignments).expect("update failed");
     assert_eq!(result.updated_count, 1, "row should be updated");
 
     let tuples = run_select(&catalog, "t5db", "SELECT n FROM t WHERE id = 1");
@@ -170,7 +179,10 @@ fn control_set_int_column_still_works() {
         &mut catalog,
         "t5db",
         "t",
-        vec![col("id", DataType::Int, false), col("n", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("n", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -179,8 +191,8 @@ fn control_set_int_column_still_works() {
 
     use storage_manager::executor::update_by_pointers;
     let assignments = parse_set_clause("n = 9").expect("parse set");
-    let result = update_by_pointers(&catalog, "t5db", "t", &[(1, 0)], &assignments)
-        .expect("update failed");
+    let result =
+        update_by_pointers(&catalog, "t5db", "t", &[(1, 0)], &assignments).expect("update failed");
     assert_eq!(result.updated_count, 1);
 
     let tuples = run_select(&catalog, "t5db", "SELECT n FROM t WHERE id = 1");
@@ -206,7 +218,10 @@ fn insert_select_roundtrip_trailing_apostrophe() {
         &mut catalog,
         "t5db",
         "src",
-        vec![col("id", DataType::Int, false), col("s", DataType::Varchar(50), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("s", DataType::Varchar(50), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
     let mut catalog = load_catalog();
@@ -214,7 +229,10 @@ fn insert_select_roundtrip_trailing_apostrophe() {
         &mut catalog,
         "t5db",
         "dst",
-        vec![col("id", DataType::Int, false), col("s", DataType::Varchar(50), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("s", DataType::Varchar(50), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -225,8 +243,8 @@ fn insert_select_roundtrip_trailing_apostrophe() {
         Ok(QueryPlan::Insert(i)) => i,
         other => panic!("parse failed: {:?}", other.err()),
     };
-    let logical = plan_query(&QueryPlan::Insert(ins), &catalog, "t5db")
-        .expect("plan insert failed");
+    let logical =
+        plan_query(&QueryPlan::Insert(ins), &catalog, "t5db").expect("plan insert failed");
     storage_manager::backend::executor::physical::engine::execute_plan_collect(
         &logical, &catalog, "t5db",
     )
@@ -245,14 +263,12 @@ fn insert_select_roundtrip_trailing_apostrophe() {
     );
 
     // INSERT INTO dst SELECT id, s FROM src — Display → reparse roundtrip.
-    let insert = match rook_parser::parse_sql(
-        "INSERT INTO dst SELECT id, s FROM src",
-    ) {
+    let insert = match rook_parser::parse_sql("INSERT INTO dst SELECT id, s FROM src") {
         Ok(QueryPlan::Insert(i)) => i,
         other => panic!("parse failed: {:?}", other.err()),
     };
-    let logical = plan_query(&QueryPlan::Insert(insert), &catalog, "t5db")
-        .expect("plan insert failed");
+    let logical =
+        plan_query(&QueryPlan::Insert(insert), &catalog, "t5db").expect("plan insert failed");
     storage_manager::backend::executor::physical::engine::execute_plan_collect(
         &logical, &catalog, "t5db",
     )
@@ -281,7 +297,10 @@ fn abs_min_int_returns_error_not_panic() {
         &mut catalog,
         "t5db",
         "t",
-        vec![col("id", DataType::Int, false), col("v", DataType::Int, true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("v", DataType::Int, true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -296,10 +315,11 @@ fn abs_min_int_returns_error_not_panic() {
         Ok(tuples) => {
             // If it executed, the value must be the SQL-correct 2147483648
             // (widened), not a wrapped negative.
-            let shown = format!(
-                "{}",
-                tuples[0].values[0].as_ref().map(|d| format!("{}", d)).unwrap_or_default()
-            );
+            let shown = tuples[0].values[0]
+                .as_ref()
+                .map(|d| format!("{}", d))
+                .unwrap_or_default()
+                .to_string();
             assert!(
                 shown == "2147483648",
                 "ABS(v) on i32::MIN produced {:?} — overflowed wrap-around",
@@ -326,7 +346,10 @@ fn substring_negative_length_returns_error_not_panic() {
         &mut catalog,
         "t5db",
         "t",
-        vec![col("id", DataType::Int, false), col("s", DataType::Varchar(50), true)],
+        vec![
+            col("id", DataType::Int, false),
+            col("s", DataType::Varchar(50), true),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -414,8 +437,16 @@ fn one_col(n: usize) -> (Vec<Tuple>, Vec<ColumnInfo>) {
 fn set_op_next_batch_clears_batch_per_contract() {
     let (lt, ls) = one_col(3);
     let (rt, rs) = one_col(2);
-    let left = ContractMock { tuples: lt, schema: ls, pos: 0 };
-    let right = ContractMock { tuples: rt, schema: rs, pos: 0 };
+    let left = ContractMock {
+        tuples: lt,
+        schema: ls,
+        pos: 0,
+    };
+    let right = ContractMock {
+        tuples: rt,
+        schema: rs,
+        pos: 0,
+    };
 
     let mut op = SetOpOperator::new(
         Box::new(left),
@@ -442,8 +473,16 @@ fn set_op_next_batch_clears_batch_per_contract() {
 fn nested_loop_join_next_batch_clears_batch_per_contract() {
     let (lt, ls) = one_col(3);
     let (rt, rs) = one_col(2);
-    let left = ContractMock { tuples: lt, schema: ls, pos: 0 };
-    let right = ContractMock { tuples: rt, schema: rs, pos: 0 };
+    let left = ContractMock {
+        tuples: lt,
+        schema: ls,
+        pos: 0,
+    };
+    let right = ContractMock {
+        tuples: rt,
+        schema: rs,
+        pos: 0,
+    };
 
     let mut op = NestedLoopJoinOperator::new(
         Box::new(left),
@@ -470,10 +509,21 @@ fn nested_loop_join_next_batch_clears_batch_per_contract() {
 fn hash_join_next_batch_clears_batch_per_contract() {
     let (bt, bs) = one_col(3);
     let (pt, ps) = one_col(2);
-    let build = ContractMock { tuples: bt, schema: bs, pos: 0 };
-    let probe = ContractMock { tuples: pt, schema: ps, pos: 0 };
+    let build = ContractMock {
+        tuples: bt,
+        schema: bs,
+        pos: 0,
+    };
+    let probe = ContractMock {
+        tuples: pt,
+        schema: ps,
+        pos: 0,
+    };
 
-    let key = Expr::Column { table: None, column: "v".into() };
+    let key = Expr::Column {
+        table: None,
+        column: "v".into(),
+    };
     let mut op = HashJoinOperator::new(
         Box::new(build),
         Box::new(probe),
@@ -484,7 +534,10 @@ fn hash_join_next_batch_clears_batch_per_contract() {
 
     let mut batch = Vec::new();
     let n1 = op.next_batch(&mut batch).expect("first next_batch");
-    assert_eq!(n1, 2, "inner join of sets 1..3 and 2..3 should yield 2 rows");
+    assert_eq!(
+        n1, 2,
+        "inner join of sets 1..3 and 2..3 should yield 2 rows"
+    );
 
     let n2 = op.next_batch(&mut batch).expect("second next_batch");
     assert_eq!(n2, 0, "exhausted");
@@ -501,7 +554,11 @@ fn hash_join_next_batch_clears_batch_per_contract() {
 #[test]
 fn control_sort_next_batch_still_clears() {
     let (tuples, schema) = one_col(5);
-    let src = ContractMock { tuples, schema, pos: 0 };
+    let src = ContractMock {
+        tuples,
+        schema,
+        pos: 0,
+    };
 
     let mut sort = SortOperator::new(Box::new(src), vec![(0, false)]);
 
@@ -511,7 +568,10 @@ fn control_sort_next_batch_still_clears() {
 
     let n2 = sort.next_batch(&mut batch).expect("second next_batch");
     assert_eq!(n2, 0);
-    assert!(batch.is_empty(), "regression: Sort next_batch no longer clears");
+    assert!(
+        batch.is_empty(),
+        "regression: Sort next_batch no longer clears"
+    );
 }
 
 // ── Additional Findings: NUMERIC arithmetic exactness & DISTINCT aggregates ──
@@ -530,8 +590,22 @@ fn numeric_arithmetic_preserves_exact_precision() {
         "t_num",
         vec![
             col("id", DataType::Int, false),
-            col("a", DataType::Numeric { precision: 30, scale: 2 }, true),
-            col("b", DataType::Numeric { precision: 30, scale: 2 }, true),
+            col(
+                "a",
+                DataType::Numeric {
+                    precision: 30,
+                    scale: 2,
+                },
+                true,
+            ),
+            col(
+                "b",
+                DataType::Numeric {
+                    precision: 30,
+                    scale: 2,
+                },
+                true,
+            ),
         ],
     );
     save_catalog(&catalog).unwrap();
@@ -546,7 +620,8 @@ fn numeric_arithmetic_preserves_exact_precision() {
             "t5db",
             "t_num",
             &["1", "1234567890123456789.12", "1000000000000000000.01"],
-        ).unwrap()
+        )
+        .unwrap()
     );
 
     let rows = run_select(&catalog, "t5db", "SELECT a + b, a - b FROM t_num");
@@ -573,7 +648,10 @@ fn distinct_aggregate_plans_and_executes_correctly() {
         &mut catalog,
         "t5db",
         "t_dist",
-        vec![col("grp", DataType::Int, false), col("val", DataType::Int, false)],
+        vec![
+            col("grp", DataType::Int, false),
+            col("val", DataType::Int, false),
+        ],
     );
     save_catalog(&catalog).unwrap();
 
@@ -582,7 +660,11 @@ fn distinct_aggregate_plans_and_executes_correctly() {
     assert!(insert_single_tuple(&catalog, "t5db", "t_dist", &["1", "10"]).unwrap());
     assert!(insert_single_tuple(&catalog, "t5db", "t_dist", &["1", "20"]).unwrap());
 
-    let rows = run_select(&catalog, "t5db", "SELECT grp, COUNT(DISTINCT val) FROM t_dist GROUP BY grp");
+    let rows = run_select(
+        &catalog,
+        "t5db",
+        "SELECT grp, COUNT(DISTINCT val) FROM t_dist GROUP BY grp",
+    );
     let formatted = fmt_rows(&rows);
     assert_eq!(
         formatted,
@@ -590,4 +672,3 @@ fn distinct_aggregate_plans_and_executes_correctly() {
         "COUNT(DISTINCT val) must count distinct values per group correctly"
     );
 }
-

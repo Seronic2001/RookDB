@@ -80,7 +80,12 @@ pub fn parse_date_part(s: &DataValue) -> Result<DatePart, String> {
     let upper = match s {
         DataValue::Varchar(s) => s.to_uppercase(),
         DataValue::Char(s) => s.to_uppercase(),
-        _ => return Err(format!("Invalid date part argument: expected string, got {:?}", s)),
+        _ => {
+            return Err(format!(
+                "Invalid date part argument: expected string, got {:?}",
+                s
+            ));
+        }
     };
     match upper.as_str() {
         "YEAR" => Ok(DatePart::Year),
@@ -141,7 +146,10 @@ pub fn substring(value: &DataValue, start: usize, len: usize) -> Result<DataValu
 
     // Convert 1-based SQL index to 0-based Rust index
     let from = start - 1;
-    let to = from.checked_add(len).map(|t| t.min(chars.len())).unwrap_or(chars.len());
+    let to = from
+        .checked_add(len)
+        .map(|t| t.min(chars.len()))
+        .unwrap_or(chars.len());
     let out: String = chars[from..to].iter().collect();
     Ok(DataValue::Varchar(out))
 }
@@ -319,7 +327,9 @@ pub fn abs(value: &DataValue) -> Result<DataValue, FunctionError> {
                 unscaled: x,
                 scale: v.scale,
             })),
-            None => Err(FunctionError::InvalidArgument("NUMERIC value overflow in ABS".to_string())),
+            None => Err(FunctionError::InvalidArgument(
+                "NUMERIC value overflow in ABS".to_string(),
+            )),
         },
         _ => Err(FunctionError::TypeMismatch {
             expected: "numeric type".to_string(),
@@ -340,11 +350,7 @@ fn round_int(val: i64, places: i32) -> i128 {
     let v = val as i128;
     let q = v / div;
     let r = (v % div).abs();
-    let rounded = if r * 2 >= div {
-        q + v.signum()
-    } else {
-        q
-    };
+    let rounded = if r * 2 >= div { q + v.signum() } else { q };
     rounded * div
 }
 
@@ -359,7 +365,9 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
         DataValue::SmallInt(v) => {
             let r = round_int(*v as i64, places);
             if r < i16::MIN as i128 || r > i16::MAX as i128 {
-                Err(FunctionError::InvalidArgument("SMALLINT value overflow in ROUND".to_string()))
+                Err(FunctionError::InvalidArgument(
+                    "SMALLINT value overflow in ROUND".to_string(),
+                ))
             } else {
                 Ok(DataValue::SmallInt(r as i16))
             }
@@ -367,7 +375,9 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
         DataValue::Int(v) => {
             let r = round_int(*v as i64, places);
             if r < i32::MIN as i128 || r > i32::MAX as i128 {
-                Err(FunctionError::InvalidArgument("INT value overflow in ROUND".to_string()))
+                Err(FunctionError::InvalidArgument(
+                    "INT value overflow in ROUND".to_string(),
+                ))
             } else {
                 Ok(DataValue::Int(r as i32))
             }
@@ -375,7 +385,9 @@ pub fn round(value: &DataValue, places: i32) -> Result<DataValue, FunctionError>
         DataValue::BigInt(v) => {
             let r = round_int(*v, places);
             if r < i64::MIN as i128 || r > i64::MAX as i128 {
-                Err(FunctionError::InvalidArgument("BIGINT value overflow in ROUND".to_string()))
+                Err(FunctionError::InvalidArgument(
+                    "BIGINT value overflow in ROUND".to_string(),
+                ))
             } else {
                 Ok(DataValue::BigInt(r as i64))
             }
@@ -466,10 +478,12 @@ pub fn date_trunc_floor(value: &DataValue, part: DatePart) -> Result<DataValue, 
                 DatePart::Year => chrono::NaiveDate::from_ymd_opt(y, 1, 1),
                 DatePart::Month => chrono::NaiveDate::from_ymd_opt(y, m, 1),
                 DatePart::Day => chrono::NaiveDate::from_ymd_opt(y, m, d_part),
-                _ => return Err(FunctionError::TypeMismatch {
-                    expected: "DATE with year/month/day".to_string(),
-                    found: format!("DATE with {:?}", part),
-                }),
+                _ => {
+                    return Err(FunctionError::TypeMismatch {
+                        expected: "DATE with year/month/day".to_string(),
+                        found: format!("DATE with {:?}", part),
+                    });
+                }
             };
             Ok(DataValue::Date(truncated.ok_or_else(|| {
                 FunctionError::InvalidArgument("Invalid date after truncation".to_string())
@@ -477,34 +491,33 @@ pub fn date_trunc_floor(value: &DataValue, part: DatePart) -> Result<DataValue, 
         }
         DataValue::Timestamp(ts) => {
             let (y, m, d_part, h, min, s) = (
-                ts.year(), ts.month(), ts.day(),
-                ts.hour(), ts.minute(), ts.second(),
+                ts.year(),
+                ts.month(),
+                ts.day(),
+                ts.hour(),
+                ts.minute(),
+                ts.second(),
             );
-            let naivedate = chrono::NaiveDate::from_ymd_opt(y, m, d_part)
-                .ok_or_else(|| FunctionError::InvalidArgument("Invalid date in timestamp".to_string()))?;
+            let naivedate = chrono::NaiveDate::from_ymd_opt(y, m, d_part).ok_or_else(|| {
+                FunctionError::InvalidArgument("Invalid date in timestamp".to_string())
+            })?;
             let truncated = match part {
                 DatePart::Year => {
-                    let d = chrono::NaiveDate::from_ymd_opt(y, 1, 1)
-                        .ok_or_else(|| FunctionError::InvalidArgument("Invalid year".to_string()))?;
+                    let d = chrono::NaiveDate::from_ymd_opt(y, 1, 1).ok_or_else(|| {
+                        FunctionError::InvalidArgument("Invalid year".to_string())
+                    })?;
                     d.and_hms_opt(0, 0, 0)
                 }
                 DatePart::Month => {
-                    let d = chrono::NaiveDate::from_ymd_opt(y, m, 1)
-                        .ok_or_else(|| FunctionError::InvalidArgument("Invalid month".to_string()))?;
+                    let d = chrono::NaiveDate::from_ymd_opt(y, m, 1).ok_or_else(|| {
+                        FunctionError::InvalidArgument("Invalid month".to_string())
+                    })?;
                     d.and_hms_opt(0, 0, 0)
                 }
-                DatePart::Day => {
-                    naivedate.and_hms_opt(0, 0, 0)
-                }
-                DatePart::Hour => {
-                    naivedate.and_hms_opt(h, 0, 0)
-                }
-                DatePart::Minute => {
-                    naivedate.and_hms_opt(h, min, 0)
-                }
-                DatePart::Second => {
-                    naivedate.and_hms_opt(h, min, s)
-                }
+                DatePart::Day => naivedate.and_hms_opt(0, 0, 0),
+                DatePart::Hour => naivedate.and_hms_opt(h, 0, 0),
+                DatePart::Minute => naivedate.and_hms_opt(h, min, 0),
+                DatePart::Second => naivedate.and_hms_opt(h, min, s),
             };
             Ok(DataValue::Timestamp(truncated.ok_or_else(|| {
                 FunctionError::InvalidArgument("Invalid timestamp after truncation".to_string())
@@ -530,10 +543,12 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
                 DatePart::Year => d.month() == 1 && d.day() == 1,
                 DatePart::Month => d.day() == 1,
                 DatePart::Day => true,
-                _ => return Err(FunctionError::TypeMismatch {
-                    expected: "DATE with year/month/day".to_string(),
-                    found: format!("DATE with {:?}", part),
-                }),
+                _ => {
+                    return Err(FunctionError::TypeMismatch {
+                        expected: "DATE with year/month/day".to_string(),
+                        found: format!("DATE with {:?}", part),
+                    });
+                }
             };
             if is_already {
                 return Ok(DataValue::Date(*d));
@@ -541,15 +556,15 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
             // Truncate to floor first, then advance
             let floored = match date_trunc_floor(value, part) {
                 Ok(DataValue::Date(df)) => df,
-                _ => return Err(FunctionError::InvalidArgument(
-                    "Cannot compute CEILING for date".to_string()
-                )),
+                _ => {
+                    return Err(FunctionError::InvalidArgument(
+                        "Cannot compute CEILING for date".to_string(),
+                    ));
+                }
             };
             // Add the duration of one unit
             let advanced = match part {
-                DatePart::Year => {
-                    chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
-                }
+                DatePart::Year => chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1),
                 DatePart::Month => {
                     if floored.month() == 12 {
                         chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
@@ -567,9 +582,24 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
         DataValue::Timestamp(ts) => {
             // Check if already truncated
             let is_already = match part {
-                DatePart::Year => ts.month() == 1 && ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
-                DatePart::Month => ts.day() == 1 && ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
-                DatePart::Day => ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
+                DatePart::Year => {
+                    ts.month() == 1
+                        && ts.day() == 1
+                        && ts.hour() == 0
+                        && ts.minute() == 0
+                        && ts.second() == 0
+                        && ts.nanosecond() == 0
+                }
+                DatePart::Month => {
+                    ts.day() == 1
+                        && ts.hour() == 0
+                        && ts.minute() == 0
+                        && ts.second() == 0
+                        && ts.nanosecond() == 0
+                }
+                DatePart::Day => {
+                    ts.hour() == 0 && ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0
+                }
                 DatePart::Hour => ts.minute() == 0 && ts.second() == 0 && ts.nanosecond() == 0,
                 DatePart::Minute => ts.second() == 0 && ts.nanosecond() == 0,
                 DatePart::Second => ts.nanosecond() == 0,
@@ -581,31 +611,40 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
             match date_trunc_floor(value, part) {
                 Ok(DataValue::Timestamp(floored)) => {
                     let advanced = match part {
-                        DatePart::Year => {
-                            chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
-                                .and_then(|d| d.and_hms_opt(0, 0, 0))
-                        }
+                        DatePart::Year => chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
+                            .and_then(|d| d.and_hms_opt(0, 0, 0)),
                         DatePart::Month => {
                             let next_date = if floored.month() == 12 {
                                 chrono::NaiveDate::from_ymd_opt(floored.year() + 1, 1, 1)
                             } else {
-                                chrono::NaiveDate::from_ymd_opt(floored.year(), floored.month() + 1, 1)
+                                chrono::NaiveDate::from_ymd_opt(
+                                    floored.year(),
+                                    floored.month() + 1,
+                                    1,
+                                )
                             };
                             next_date.and_then(|d| d.and_hms_opt(0, 0, 0))
                         }
-                        DatePart::Day => {
-                            floored.date().succ_opt().and_then(|d| d.and_hms_opt(0, 0, 0))
-                        }
+                        DatePart::Day => floored
+                            .date()
+                            .succ_opt()
+                            .and_then(|d| d.and_hms_opt(0, 0, 0)),
                         DatePart::Hour => floored.checked_add_signed(chrono::Duration::hours(1)),
-                        DatePart::Minute => floored.checked_add_signed(chrono::Duration::minutes(1)),
-                        DatePart::Second => floored.checked_add_signed(chrono::Duration::seconds(1)),
+                        DatePart::Minute => {
+                            floored.checked_add_signed(chrono::Duration::minutes(1))
+                        }
+                        DatePart::Second => {
+                            floored.checked_add_signed(chrono::Duration::seconds(1))
+                        }
                     };
                     Ok(DataValue::Timestamp(advanced.ok_or_else(|| {
-                        FunctionError::InvalidArgument("Invalid timestamp after ceiling".to_string())
+                        FunctionError::InvalidArgument(
+                            "Invalid timestamp after ceiling".to_string(),
+                        )
                     })?))
                 }
                 _ => Err(FunctionError::InvalidArgument(
-                    "Cannot compute CEILING for timestamp".to_string()
+                    "Cannot compute CEILING for timestamp".to_string(),
                 )),
             }
         }
@@ -623,7 +662,9 @@ pub fn date_trunc_ceil(value: &DataValue, part: DatePart) -> Result<DataValue, F
 pub fn floor(value: &DataValue) -> Result<DataValue, FunctionError> {
     match value {
         DataValue::SmallInt(_) | DataValue::Int(_) | DataValue::BigInt(_) => Ok(value.clone()),
-        DataValue::Real(v) => Ok(DataValue::Real(crate::types::value::OrderedF32(v.0.floor()))),
+        DataValue::Real(v) => Ok(DataValue::Real(crate::types::value::OrderedF32(
+            v.0.floor(),
+        ))),
         DataValue::DoublePrecision(v) => Ok(DataValue::DoublePrecision(
             crate::types::value::OrderedF64(v.0.floor()),
         )),
@@ -725,13 +766,16 @@ pub fn cast(value: &DataValue, target: &DataType) -> Result<DataValue, FunctionE
     }
 
     let literal = value_to_literal(value);
-    let encoded = DataValue::parse_and_encode(target, &literal)
-        .map_err(FunctionError::InvalidArgument)?;
+    let encoded =
+        DataValue::parse_and_encode(target, &literal).map_err(FunctionError::InvalidArgument)?;
     DataValue::from_bytes(target, &encoded).map_err(FunctionError::InvalidArgument)
 }
 
 /// Truncate numeric types toward zero when casting to exact integer types (SQL:1999 standard).
-fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Result<DataValue, FunctionError>> {
+fn cast_numeric_to_integer(
+    value: &DataValue,
+    target: &DataType,
+) -> Option<Result<DataValue, FunctionError>> {
     match target {
         DataType::Int => match value {
             DataValue::DoublePrecision(v) => {
@@ -739,7 +783,10 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i32::MIN as f64 && trunc <= i32::MAX as f64 {
                     Some(Ok(DataValue::Int(trunc as i32)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("DOUBLE value '{}' is out of range for INT", v.0))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "DOUBLE value '{}' is out of range for INT",
+                        v.0
+                    ))))
                 }
             }
             DataValue::Real(v) => {
@@ -747,7 +794,10 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i32::MIN as f32 && trunc <= i32::MAX as f32 {
                     Some(Ok(DataValue::Int(trunc as i32)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("REAL value '{}' is out of range for INT", v.0))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "REAL value '{}' is out of range for INT",
+                        v.0
+                    ))))
                 }
             }
             DataValue::Numeric(v) => {
@@ -760,7 +810,9 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i32::MIN as i128 && trunc <= i32::MAX as i128 {
                     Some(Ok(DataValue::Int(trunc as i32)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument("NUMERIC value is out of range for INT".to_string())))
+                    Some(Err(FunctionError::InvalidArgument(
+                        "NUMERIC value is out of range for INT".to_string(),
+                    )))
                 }
             }
             DataValue::SmallInt(v) => Some(Ok(DataValue::Int(*v as i32))),
@@ -769,7 +821,10 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
                     Some(Ok(DataValue::Int(*v as i32)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("BIGINT value '{}' is out of range for INT", v))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "BIGINT value '{}' is out of range for INT",
+                        v
+                    ))))
                 }
             }
             _ => None,
@@ -780,7 +835,10 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i16::MIN as f64 && trunc <= i16::MAX as f64 {
                     Some(Ok(DataValue::SmallInt(trunc as i16)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("DOUBLE value '{}' is out of range for SMALLINT", v.0))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "DOUBLE value '{}' is out of range for SMALLINT",
+                        v.0
+                    ))))
                 }
             }
             DataValue::Real(v) => {
@@ -788,7 +846,10 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i16::MIN as f32 && trunc <= i16::MAX as f32 {
                     Some(Ok(DataValue::SmallInt(trunc as i16)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("REAL value '{}' is out of range for SMALLINT", v.0))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "REAL value '{}' is out of range for SMALLINT",
+                        v.0
+                    ))))
                 }
             }
             DataValue::Numeric(v) => {
@@ -801,7 +862,9 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i16::MIN as i128 && trunc <= i16::MAX as i128 {
                     Some(Ok(DataValue::SmallInt(trunc as i16)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument("NUMERIC value is out of range for SMALLINT".to_string())))
+                    Some(Err(FunctionError::InvalidArgument(
+                        "NUMERIC value is out of range for SMALLINT".to_string(),
+                    )))
                 }
             }
             DataValue::SmallInt(v) => Some(Ok(DataValue::SmallInt(*v))),
@@ -809,14 +872,20 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if *v >= i16::MIN as i32 && *v <= i16::MAX as i32 {
                     Some(Ok(DataValue::SmallInt(*v as i16)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("INT value '{}' is out of range for SMALLINT", v))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "INT value '{}' is out of range for SMALLINT",
+                        v
+                    ))))
                 }
             }
             DataValue::BigInt(v) => {
                 if *v >= i16::MIN as i64 && *v <= i16::MAX as i64 {
                     Some(Ok(DataValue::SmallInt(*v as i16)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("BIGINT value '{}' is out of range for SMALLINT", v))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "BIGINT value '{}' is out of range for SMALLINT",
+                        v
+                    ))))
                 }
             }
             _ => None,
@@ -827,7 +896,10 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i64::MIN as f64 && trunc <= i64::MAX as f64 {
                     Some(Ok(DataValue::BigInt(trunc as i64)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("DOUBLE value '{}' is out of range for BIGINT", v.0))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "DOUBLE value '{}' is out of range for BIGINT",
+                        v.0
+                    ))))
                 }
             }
             DataValue::Real(v) => {
@@ -835,7 +907,10 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i64::MIN as f32 && trunc <= i64::MAX as f32 {
                     Some(Ok(DataValue::BigInt(trunc as i64)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument(format!("REAL value '{}' is out of range for BIGINT", v.0))))
+                    Some(Err(FunctionError::InvalidArgument(format!(
+                        "REAL value '{}' is out of range for BIGINT",
+                        v.0
+                    ))))
                 }
             }
             DataValue::Numeric(v) => {
@@ -848,7 +923,9 @@ fn cast_numeric_to_integer(value: &DataValue, target: &DataType) -> Option<Resul
                 if trunc >= i64::MIN as i128 && trunc <= i64::MAX as i128 {
                     Some(Ok(DataValue::BigInt(trunc as i64)))
                 } else {
-                    Some(Err(FunctionError::InvalidArgument("NUMERIC value is out of range for BIGINT".to_string())))
+                    Some(Err(FunctionError::InvalidArgument(
+                        "NUMERIC value is out of range for BIGINT".to_string(),
+                    )))
                 }
             }
             DataValue::SmallInt(v) => Some(Ok(DataValue::BigInt(*v as i64))),
@@ -886,25 +963,40 @@ fn cast_to_bit(value: &DataValue, n: u16) -> Result<DataValue, FunctionError> {
                 .map_err(FunctionError::InvalidArgument)?;
             let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
                 .map_err(FunctionError::InvalidArgument)?;
-            if let DataValue::Bit(bits) = dv { bits } else { unreachable!() }
+            if let DataValue::Bit(bits) = dv {
+                bits
+            } else {
+                unreachable!()
+            }
         }
         DataValue::Char(s) => {
             let encoded = DataValue::parse_and_encode(&DataType::Bit(n), s.trim_end_matches(' '))
                 .map_err(FunctionError::InvalidArgument)?;
             let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
                 .map_err(FunctionError::InvalidArgument)?;
-            if let DataValue::Bit(bits) = dv { bits } else { unreachable!() }
+            if let DataValue::Bit(bits) = dv {
+                bits
+            } else {
+                unreachable!()
+            }
         }
         // Fallback for temporal/other types
         _ => {
             let literal = value_to_literal(value);
-            let encoded = DataValue::parse_and_encode(&DataType::Bit(n), &literal)
-                .map_err(|e| FunctionError::InvalidArgument(
-                    format!("Cannot cast {:?} to BIT({}): {}", value, n, e)
-                ))?;
+            let encoded =
+                DataValue::parse_and_encode(&DataType::Bit(n), &literal).map_err(|e| {
+                    FunctionError::InvalidArgument(format!(
+                        "Cannot cast {:?} to BIT({}): {}",
+                        value, n, e
+                    ))
+                })?;
             let dv = DataValue::from_bytes(&DataType::Bit(n), &encoded)
                 .map_err(FunctionError::InvalidArgument)?;
-            if let DataValue::Bit(bits) = dv { bits } else { unreachable!() }
+            if let DataValue::Bit(bits) = dv {
+                bits
+            } else {
+                unreachable!()
+            }
         }
     };
 
@@ -919,11 +1011,7 @@ fn to_binary_string(val: i64, n: u16) -> String {
         return String::new();
     }
     // Use only the lowest n bits
-    let mask = if n >= 64 {
-        !0i64
-    } else {
-        (1i64 << n) - 1
-    };
+    let mask = if n >= 64 { !0i64 } else { (1i64 << n) - 1 };
     let masked = val & mask;
     // Format as binary, padded to n bits
     format!("{:0>width$b}", masked as u64, width = n as usize)

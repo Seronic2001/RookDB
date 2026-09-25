@@ -143,7 +143,11 @@ fn try_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect())
@@ -162,7 +166,12 @@ fn setup_emp(db: &str) {
             col("sal", DataType::Int, true),
         ],
     );
-    for row in [["1", "10", "100"], ["2", "10", "200"], ["3", "20", "300"], ["4", "20", "400"]] {
+    for row in [
+        ["1", "10", "100"],
+        ["2", "10", "200"],
+        ["3", "20", "300"],
+        ["4", "20", "400"],
+    ] {
         insert(db, "emp", &row);
     }
 }
@@ -185,7 +194,11 @@ fn aa_scalar_subquery_in_where_comparison_works() {
     .expect("control: scalar subquery in SELECT list works");
     assert_eq!(control, vec![vec!["1".to_string(), "400".to_string()]]);
 
-    let result = try_select(&catalog, "db15aa", "SELECT id FROM emp WHERE sal = (SELECT MAX(sal) FROM emp)");
+    let result = try_select(
+        &catalog,
+        "db15aa",
+        "SELECT id FROM emp WHERE sal = (SELECT MAX(sal) FROM emp)",
+    );
     assert_eq!(
         result,
         Ok(vec![vec!["4".to_string()]]),
@@ -205,14 +218,30 @@ fn aa2_scalar_subquery_positions_both_sides_and_between() {
     let catalog = load_catalog();
 
     // Subquery on the left-hand side of the comparison.
-    let lhs = try_select(&catalog, "db15aa2", "SELECT id FROM emp WHERE (SELECT MAX(sal) FROM emp) = sal");
-    assert_eq!(lhs, Ok(vec![vec!["4".to_string()]]),
-        "BUG AA2 CONFIRMED (lhs): reversed comparison also fails — {:?}", lhs);
+    let lhs = try_select(
+        &catalog,
+        "db15aa2",
+        "SELECT id FROM emp WHERE (SELECT MAX(sal) FROM emp) = sal",
+    );
+    assert_eq!(
+        lhs,
+        Ok(vec![vec!["4".to_string()]]),
+        "BUG AA2 CONFIRMED (lhs): reversed comparison also fails — {:?}",
+        lhs
+    );
 
     // Subquery inside arithmetic on the predicate.
-    let arith = try_select(&catalog, "db15aa2", "SELECT id FROM emp WHERE sal = (SELECT MAX(sal) FROM emp) + 0");
-    assert_eq!(arith, Ok(vec![vec!["4".to_string()]]),
-        "BUG AA2 CONFIRMED (arith): subquery inside arithmetic also fails — {:?}", arith);
+    let arith = try_select(
+        &catalog,
+        "db15aa2",
+        "SELECT id FROM emp WHERE sal = (SELECT MAX(sal) FROM emp) + 0",
+    );
+    assert_eq!(
+        arith,
+        Ok(vec![vec!["4".to_string()]]),
+        "BUG AA2 CONFIRMED (arith): subquery inside arithmetic also fails — {:?}",
+        arith
+    );
 
     // Subqueries as BETWEEN bounds.
     let between = try_select(
@@ -220,8 +249,12 @@ fn aa2_scalar_subquery_positions_both_sides_and_between() {
         "db15aa2",
         "SELECT COUNT(*) FROM emp WHERE sal BETWEEN (SELECT MIN(sal) FROM emp) AND (SELECT MAX(sal) FROM emp)",
     );
-    assert_eq!(between, Ok(vec![vec!["4".to_string()]]),
-        "BUG AA2 CONFIRMED (between): scalar subqueries as BETWEEN bounds also fail — {:?}", between);
+    assert_eq!(
+        between,
+        Ok(vec![vec!["4".to_string()]]),
+        "BUG AA2 CONFIRMED (between): scalar subqueries as BETWEEN bounds also fail — {:?}",
+        between
+    );
 
     // Scalar subquery inside HAVING.
     let having = try_select(
@@ -229,8 +262,12 @@ fn aa2_scalar_subquery_positions_both_sides_and_between() {
         "db15aa2",
         "SELECT dept FROM emp GROUP BY dept HAVING MAX(sal) > (SELECT AVG(sal) FROM emp) ORDER BY dept",
     );
-    assert_eq!(having, Ok(vec![vec!["20".to_string()]]),
-        "BUG AA2 CONFIRMED (having): scalar subquery inside HAVING also fails — {:?}", having);
+    assert_eq!(
+        having,
+        Ok(vec![vec!["20".to_string()]]),
+        "BUG AA2 CONFIRMED (having): scalar subquery inside HAVING also fails — {:?}",
+        having
+    );
 }
 
 // ── Finding AB: set operations accept mismatched arity ───────────────────────
@@ -249,9 +286,16 @@ fn ab_set_operation_mismatched_arity_is_rejected() {
         "SELECT dept FROM emp UNION SELECT dept FROM emp ORDER BY dept",
     )
     .expect("control: matching-arity UNION works");
-    assert_eq!(control, vec![vec!["10".to_string()], vec!["20".to_string()]]);
+    assert_eq!(
+        control,
+        vec![vec!["10".to_string()], vec!["20".to_string()]]
+    );
 
-    let result = try_select(&catalog, "db15ab", "SELECT id, sal FROM emp UNION SELECT dept FROM emp");
+    let result = try_select(
+        &catalog,
+        "db15ab",
+        "SELECT id, sal FROM emp UNION SELECT dept FROM emp",
+    );
     assert!(
         result.is_err(),
         "BUG AB CONFIRMED: mismatched-arity UNION returned {:?} — SQL requires \
@@ -277,7 +321,13 @@ fn ac_positional_group_by_resolves_output_ordinal() {
         "SELECT dept, COUNT(*) FROM emp GROUP BY dept ORDER BY dept",
     )
     .expect("control: GROUP BY dept works");
-    assert_eq!(control, vec![vec!["10".to_string(), "2".to_string()], vec!["20".to_string(), "2".to_string()]]);
+    assert_eq!(
+        control,
+        vec![
+            vec!["10".to_string(), "2".to_string()],
+            vec!["20".to_string(), "2".to_string()]
+        ]
+    );
 
     let result = try_select(
         &catalog,
@@ -286,7 +336,10 @@ fn ac_positional_group_by_resolves_output_ordinal() {
     );
     assert_eq!(
         result,
-        Ok(vec![vec!["10".to_string(), "2".to_string()], vec!["20".to_string(), "2".to_string()]]),
+        Ok(vec![
+            vec!["10".to_string(), "2".to_string()],
+            vec!["20".to_string(), "2".to_string()]
+        ]),
         "BUG AC CONFIRMED: `GROUP BY 1` returned {:?} — an unsigned integer \
          must be resolved to the corresponding output-column ordinal \
          (dept); today it fails with the misleading error \"Column 'dept' \
@@ -356,11 +409,21 @@ fn x1_predicate_three_valued_logic_stays_correct() {
     assert_eq!(eq, vec![vec!["1".to_string()]]);
 
     // NOT (UNKNOWN) is UNKNOWN → NULL row excluded.
-    let not = try_select(&catalog, "db15x1", "SELECT COUNT(*) FROM t WHERE NOT (n > 5)").unwrap();
+    let not = try_select(
+        &catalog,
+        "db15x1",
+        "SELECT COUNT(*) FROM t WHERE NOT (n > 5)",
+    )
+    .unwrap();
     assert_eq!(not, vec![vec!["0".to_string()]]);
 
     // UNKNOWN AND FALSE is FALSE… but here: NULL > 5 AND z < 0 → row 2 excluded.
-    let and = try_select(&catalog, "db15x1", "SELECT COUNT(*) FROM t WHERE n > 5 AND z < 0").unwrap();
+    let and = try_select(
+        &catalog,
+        "db15x1",
+        "SELECT COUNT(*) FROM t WHERE n > 5 AND z < 0",
+    )
+    .unwrap();
     assert_eq!(and, vec![vec!["0".to_string()]]);
 
     // NULL arithmetic propagates.
@@ -397,7 +460,10 @@ fn x2_intersect_except_matching_arity_stay_correct() {
         "SELECT dept FROM emp WHERE id <= 3 INTERSECT ALL SELECT dept FROM emp WHERE id >= 2",
     )
     .unwrap();
-    assert_eq!(inter_all, vec![vec!["10".to_string()], vec!["20".to_string()]]);
+    assert_eq!(
+        inter_all,
+        vec![vec!["10".to_string()], vec!["20".to_string()]]
+    );
 
     let except = try_select(&catalog, "db15x2", "SELECT dept FROM emp EXCEPT SELECT 20").unwrap();
     assert_eq!(except, vec![vec!["10".to_string()]]);

@@ -1,8 +1,8 @@
-use super::super::tuple::{Tuple, ColumnInfo};
+use super::super::tuple::{ColumnInfo, Tuple};
 use super::trait_::PhysicalOperator;
 use crate::backend::error::RookResult;
-use crate::types::value::DataValue;
 use crate::types::datatype::DataType;
+use crate::types::value::DataValue;
 
 // ── SubqueryType ─────────────────────────────────────────────────────────────
 
@@ -46,7 +46,9 @@ impl SubqueryExecOperator {
             SubqueryType::Exists => {
                 vec![ColumnInfo {
                     name: "exists".to_string(),
-                    data_type: DataType::Bool, table: None }]
+                    data_type: DataType::Bool,
+                    table: None,
+                }]
             }
         };
 
@@ -72,7 +74,8 @@ impl SubqueryExecOperator {
                     return Err(format!(
                         "Scalar subquery returned more than one row (got {})",
                         tuples.len()
-                    ).into());
+                    )
+                    .into());
                 }
 
                 if let Some(tuple) = tuples.into_iter().next() {
@@ -83,9 +86,7 @@ impl SubqueryExecOperator {
                 let exists = self.child.next()?.is_some();
 
                 let bool_val = DataValue::Bool(exists);
-                self.result = Some(Tuple::new(
-                    vec![Some(bool_val)],
-                ));
+                self.result = Some(Tuple::new(vec![Some(bool_val)]));
             }
         }
 

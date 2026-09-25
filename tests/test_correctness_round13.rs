@@ -144,7 +144,11 @@ fn try_select(
         .map(|t| {
             t.values
                 .iter()
-                .map(|v| v.as_ref().map(|d| format!("{}", d)).unwrap_or_else(|| "NULL".into()))
+                .map(|v| {
+                    v.as_ref()
+                        .map(|d| format!("{}", d))
+                        .unwrap_or_else(|| "NULL".into())
+                })
                 .collect()
         })
         .collect())
@@ -156,9 +160,18 @@ fn try_select(
 fn t1_cross_scale_numeric_compare_must_not_panic() {
     // Minimal reproducer: the exact sentinel/value pair the index-scan
     // range path produces for NUMERIC(p, s>0).
-    let sentinel_max = DataValue::Numeric(NumericValue { unscaled: i128::MAX, scale: 0 });
-    let sentinel_min = DataValue::Numeric(NumericValue { unscaled: i128::MIN, scale: 0 });
-    let stored = DataValue::Numeric(NumericValue { unscaled: 10050, scale: 2 });
+    let sentinel_max = DataValue::Numeric(NumericValue {
+        unscaled: i128::MAX,
+        scale: 0,
+    });
+    let sentinel_min = DataValue::Numeric(NumericValue {
+        unscaled: i128::MIN,
+        scale: 0,
+    });
+    let stored = DataValue::Numeric(NumericValue {
+        unscaled: 10050,
+        scale: 2,
+    });
 
     use storage_manager::types::Comparable;
     let r = std::panic::catch_unwind(|| stored.compare(&sentinel_max));
@@ -196,9 +209,20 @@ fn t2_range_predicate_on_indexed_numeric_must_not_crash() {
     make_table(
         "db13t2",
         "acc",
-        vec![col("n", DataType::Numeric { precision: 10, scale: 2 }, true)],
+        vec![col(
+            "n",
+            DataType::Numeric {
+                precision: 10,
+                scale: 2,
+            },
+            true,
+        )],
     );
-    bulk_insert("db13t2", "acc", &["100.50".to_string(), "200.00".to_string()]);
+    bulk_insert(
+        "db13t2",
+        "acc",
+        &["100.50".to_string(), "200.00".to_string()],
+    );
     let catalog = load_catalog();
     create_index(&catalog, "db13t2", "acc", "ix_n", &["n".to_string()]).expect("create index");
     let catalog = load_catalog();
@@ -214,10 +238,7 @@ fn t2_range_predicate_on_indexed_numeric_must_not_crash() {
     });
 
     match indexed {
-        Ok(Ok(rows)) => assert_eq!(
-            rows, unindexed,
-            "indexed and unindexed range must agree"
-        ),
+        Ok(Ok(rows)) => assert_eq!(rows, unindexed, "indexed and unindexed range must agree"),
         Ok(Err(e)) => panic!(
             "BUG T CONFIRMED (graceful-error variant): indexed range predicate \
              returned a hard error instead of executing like the unindexed \
@@ -245,7 +266,14 @@ fn u_indexed_numeric_point_lookup_with_numeric_literals() {
     make_table(
         "db13u",
         "acc",
-        vec![col("n", DataType::Numeric { precision: 10, scale: 2 }, true)],
+        vec![col(
+            "n",
+            DataType::Numeric {
+                precision: 10,
+                scale: 2,
+            },
+            true,
+        )],
     );
 
     // Enough rows to span multiple B+ Tree leaves — single-leaf trees never
@@ -256,18 +284,34 @@ fn u_indexed_numeric_point_lookup_with_numeric_literals() {
     let catalog = load_catalog();
 
     // Control: unindexed point lookups with BOTH literal forms work.
-    let unindexed_float = try_select(&catalog, "db13u", "SELECT COUNT(*) FROM acc WHERE n = 1250.50")
-        .expect("control: unindexed float-literal lookup");
-    assert_eq!(unindexed_float, vec![vec!["1".to_string()]], "control: unindexed float literal matches");
+    let unindexed_float = try_select(
+        &catalog,
+        "db13u",
+        "SELECT COUNT(*) FROM acc WHERE n = 1250.50",
+    )
+    .expect("control: unindexed float-literal lookup");
+    assert_eq!(
+        unindexed_float,
+        vec![vec!["1".to_string()]],
+        "control: unindexed float literal matches"
+    );
     let unindexed_int = try_select(&catalog, "db13u", "SELECT COUNT(*) FROM acc WHERE n = 1250")
         .expect("control: unindexed int-literal lookup");
-    assert_eq!(unindexed_int, vec![vec!["0".to_string()]], "control: unindexed int literal (1250) matches no 1250.50 row");
+    assert_eq!(
+        unindexed_int,
+        vec![vec!["0".to_string()]],
+        "control: unindexed int literal (1250) matches no 1250.50 row"
+    );
 
     // Build the index and repeat the same lookups.
     create_index(&catalog, "db13u", "acc", "ix_n", &["n".to_string()]).expect("create index");
     let catalog = load_catalog();
 
-    let float_hit = try_select(&catalog, "db13u", "SELECT COUNT(*) FROM acc WHERE n = 1250.50");
+    let float_hit = try_select(
+        &catalog,
+        "db13u",
+        "SELECT COUNT(*) FROM acc WHERE n = 1250.50",
+    );
     assert_eq!(
         float_hit,
         Ok(vec![vec!["1".to_string()]]),
@@ -300,11 +344,19 @@ fn v_string_literal_vs_date_column() {
     make_table("db13v", "ev", vec![col("d", DataType::Date, true)]);
 
     // The engine's WRITE path accepts the string literal for a DATE column...
-    bulk_insert("db13v", "ev", &["2024-01-05".to_string(), "2024-02-10".to_string()]);
+    bulk_insert(
+        "db13v",
+        "ev",
+        &["2024-01-05".to_string(), "2024-02-10".to_string()],
+    );
     let catalog = load_catalog();
 
     // ...but the READ path rejects the identical literal in a predicate.
-    let eq = try_select(&catalog, "db13v", "SELECT COUNT(*) FROM ev WHERE d = '2024-01-05'");
+    let eq = try_select(
+        &catalog,
+        "db13v",
+        "SELECT COUNT(*) FROM ev WHERE d = '2024-01-05'",
+    );
     assert_eq!(
         eq,
         Ok(vec![vec!["1".to_string()]]),
@@ -316,7 +368,11 @@ fn v_string_literal_vs_date_column() {
         eq
     );
 
-    let gt = try_select(&catalog, "db13v", "SELECT COUNT(*) FROM ev WHERE d > '2024-01-31'");
+    let gt = try_select(
+        &catalog,
+        "db13v",
+        "SELECT COUNT(*) FROM ev WHERE d > '2024-01-31'",
+    );
     assert_eq!(
         gt,
         Ok(vec![vec!["1".to_string()]]),
@@ -338,7 +394,11 @@ fn v2_string_literal_vs_timestamp_column() {
     bulk_insert("db13v2", "ev", &["2024-01-05 10:00:00".to_string()]);
     let catalog = load_catalog();
 
-    let eq = try_select(&catalog, "db13v2", "SELECT COUNT(*) FROM ev WHERE t = '2024-01-05 10:00:00'");
+    let eq = try_select(
+        &catalog,
+        "db13v2",
+        "SELECT COUNT(*) FROM ev WHERE t = '2024-01-05 10:00:00'",
+    );
     assert_eq!(
         eq,
         Ok(vec![vec!["1".to_string()]]),
@@ -364,7 +424,14 @@ fn u2_indexed_numeric_scale0_int_literal_probe_fails_too() {
     make_table(
         "db13u2",
         "t",
-        vec![col("n", DataType::Numeric { precision: 10, scale: 0 }, true)],
+        vec![col(
+            "n",
+            DataType::Numeric {
+                precision: 10,
+                scale: 0,
+            },
+            true,
+        )],
     );
 
     let rows: Vec<String> = (0..600).map(|i| format!("{}", 1000 + i)).collect();
@@ -412,7 +479,11 @@ fn x1_indexed_int_point_lookup_still_works() {
 
     let hit = try_select(&catalog, "db13x1", "SELECT COUNT(*) FROM t WHERE n = 1250")
         .expect("indexed INT lookup must work");
-    assert_eq!(hit, vec![vec!["1"]], "guard: typed index probe still matches");
+    assert_eq!(
+        hit,
+        vec![vec!["1"]],
+        "guard: typed index probe still matches"
+    );
 }
 
 #[test]
@@ -426,13 +497,28 @@ fn x3_unindexed_cross_type_numeric_predicates_still_work() {
     make_table(
         "db13x3",
         "acc",
-        vec![col("n", DataType::Numeric { precision: 10, scale: 2 }, true)],
+        vec![col(
+            "n",
+            DataType::Numeric {
+                precision: 10,
+                scale: 2,
+            },
+            true,
+        )],
     );
-    bulk_insert("db13x3", "acc", &["100.50".to_string(), "200.00".to_string()]);
+    bulk_insert(
+        "db13x3",
+        "acc",
+        &["100.50".to_string(), "200.00".to_string()],
+    );
     let catalog = load_catalog();
 
-    let a = try_select(&catalog, "db13x3", "SELECT COUNT(*) FROM acc WHERE n = 100.50")
-        .expect("float literal on unindexed NUMERIC");
+    let a = try_select(
+        &catalog,
+        "db13x3",
+        "SELECT COUNT(*) FROM acc WHERE n = 100.50",
+    )
+    .expect("float literal on unindexed NUMERIC");
     assert_eq!(a, vec![vec!["1".to_string()]]);
     let b = try_select(&catalog, "db13x3", "SELECT COUNT(*) FROM acc WHERE n > 100")
         .expect("int literal range on unindexed NUMERIC");

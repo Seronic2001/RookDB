@@ -219,9 +219,8 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
 
     // Selection runs on the Volcano engine via a wildcard scan.
     let catalog = load_catalog();
-    let selection =
-        storage_manager::backend::executor::row_select::parse_where_text(&where_input)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let selection = storage_manager::backend::executor::row_select::parse_where_text(&where_input)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let pointers = storage_manager::backend::executor::row_select::select_matching_pointers(
         &catalog, &db, table, selection,
     )
@@ -229,10 +228,8 @@ pub fn show_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
 
     // Fetch and display each matching row through the heap manager.
     let heap_path = format!("database/base/{}/{}.dat", db, table);
-    let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(
-        &heap_path,
-    ))
-    .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+    let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(&heap_path))
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
 
     let columns: Vec<Column> = catalog
         .databases
@@ -315,9 +312,8 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let mut where_input = String::new();
     io::stdin().read_line(&mut where_input)?;
 
-    let selection =
-        storage_manager::backend::executor::row_select::parse_where_text(&where_input)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let selection = storage_manager::backend::executor::row_select::parse_where_text(&where_input)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     if selection.is_none() {
         println!(
@@ -349,9 +345,10 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
 
     if returning && !pointers.is_empty() {
         // Snapshot the rows before deletion so they can be printed.
-        let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(
-            format!("database/base/{}/{}.dat", db, table),
-        ))
+        let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(format!(
+            "database/base/{}/{}.dat",
+            db, table
+        )))
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
         let columns: Vec<Column> = catalog.databases[&db].tables[&table].columns.clone();
         let schema_types: Vec<storage_manager::types::DataType> =
@@ -361,17 +358,17 @@ pub fn delete_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
             if let Ok(raw) = heap.get_tuple(page_id, slot_id)
                 && let Ok(values) =
                     storage_manager::types::deserialize_nullable_row(&schema_types, &raw)
-                {
-                    let cells: Vec<String> = columns
-                        .iter()
-                        .zip(values.iter())
-                        .map(|(c, v)| match v {
-                            Some(val) => format!("{}={}", c.name, val),
-                            None => format!("{}=NULL", c.name),
-                        })
-                        .collect();
-                    println!("  {}", cells.join("  |  "));
-                }
+            {
+                let cells: Vec<String> = columns
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(c, v)| match v {
+                        Some(val) => format!("{}={}", c.name, val),
+                        None => format!("{}=NULL", c.name),
+                    })
+                    .collect();
+                println!("  {}", cells.join("  |  "));
+            }
         }
         println!("===================");
     }
@@ -450,9 +447,8 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
     let mut where_input = String::new();
     io::stdin().read_line(&mut where_input)?;
 
-    let selection =
-        storage_manager::backend::executor::row_select::parse_where_text(&where_input)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let selection = storage_manager::backend::executor::row_select::parse_where_text(&where_input)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     if selection.is_none() {
         println!(
@@ -494,33 +490,29 @@ pub fn update_tuples_cmd(current_db: &Option<String>) -> io::Result<()> {
 
             if returning && !pointers.is_empty() {
                 // Show post-update contents of exactly the touched rows.
-                let mut heap =
-                    storage_manager::heap::HeapManager::open(std::path::PathBuf::from(format!(
-                        "database/base/{}/{}.dat",
-                        db, table
-                    )))
-                    .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
-                let columns: Vec<Column> =
-                    catalog.databases[&db].tables[&table].columns.clone();
+                let mut heap = storage_manager::heap::HeapManager::open(std::path::PathBuf::from(
+                    format!("database/base/{}/{}.dat", db, table),
+                ))
+                .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+                let columns: Vec<Column> = catalog.databases[&db].tables[&table].columns.clone();
                 let schema_types: Vec<storage_manager::types::DataType> =
                     columns.iter().map(|c| c.data_type.clone()).collect();
                 println!("\n=== Updated rows (after) ===");
                 for &(page_id, slot_id) in &pointers {
                     if let Ok(raw) = heap.get_tuple(page_id, slot_id)
-                        && let Ok(values) = storage_manager::types::deserialize_nullable_row(
-                            &schema_types,
-                            &raw,
-                        ) {
-                            let cells: Vec<String> = columns
-                                .iter()
-                                .zip(values.iter())
-                                .map(|(c, v)| match v {
-                                    Some(val) => format!("{}={}", c.name, val),
-                                    None => format!("{}=NULL", c.name),
-                                })
-                                .collect();
-                            println!("  {}", cells.join("  |  "));
-                        }
+                        && let Ok(values) =
+                            storage_manager::types::deserialize_nullable_row(&schema_types, &raw)
+                    {
+                        let cells: Vec<String> = columns
+                            .iter()
+                            .zip(values.iter())
+                            .map(|(c, v)| match v {
+                                Some(val) => format!("{}={}", c.name, val),
+                                None => format!("{}=NULL", c.name),
+                            })
+                            .collect();
+                        println!("  {}", cells.join("  |  "));
+                    }
                 }
                 println!("========================");
             }

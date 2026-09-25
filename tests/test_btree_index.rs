@@ -8,19 +8,17 @@
 use std::path::Path;
 mod common;
 
-
 use rook_ast::logical::{LogicalPlan, LogicalTableScan};
 use rook_ast::{QueryPlan, SelectPlan};
 use rook_parser::parse_sql;
 use storage_manager::backend::executor::physical::engine::execute_plan_collect;
 use storage_manager::backend::executor::physical::planner::PhysicalPlanner;
 use storage_manager::catalog::{
-    create_database, create_table, load_catalog, save_catalog, Catalog, Column,
+    Catalog, Column, create_database, create_table, load_catalog, save_catalog,
 };
 use storage_manager::executor::create_index::create_index;
 use storage_manager::insert_single_tuple;
 use storage_manager::types::DataType;
-
 
 fn column(name: &str, data_type: DataType) -> Column {
     Column {
@@ -88,8 +86,14 @@ fn create_index_builds_persistent_files() {
     let _ws = common::TestWorkspace::new("btree", "files");
     let catalog = setup_table("idx_db");
 
-    let entries =
-        create_index(&catalog, "idx_db", "staff", "by_salary", &[String::from("salary")]).expect("create_index");
+    let entries = create_index(
+        &catalog,
+        "idx_db",
+        "staff",
+        "by_salary",
+        &[String::from("salary")],
+    )
+    .expect("create_index");
     assert_eq!(entries, 6, "one index entry per row");
 
     assert!(
@@ -123,8 +127,18 @@ fn planner_prefers_existing_index_for_scans() {
     assert_eq!(planner.plan(&scan_plan()).unwrap().name(), "SeqScan");
 
     // With an index present it drives the scan.
-    create_index(&catalog, "idx_db", "staff", "by_salary", &[String::from("salary")]).unwrap();
-    assert_eq!(planner.plan(&scan_plan()).unwrap().name(), "IndexScan(Full)");
+    create_index(
+        &catalog,
+        "idx_db",
+        "staff",
+        "by_salary",
+        &[String::from("salary")],
+    )
+    .unwrap();
+    assert_eq!(
+        planner.plan(&scan_plan()).unwrap().name(),
+        "IndexScan(Full)"
+    );
 }
 
 #[test]
@@ -134,7 +148,14 @@ fn index_scan_returns_identical_rows_to_seq_scan() {
 
     let before = run_select(&catalog, "eq_db", "SELECT name FROM staff ORDER BY id");
 
-    create_index(&catalog, "eq_db", "staff", "by_salary", &[String::from("salary")]).unwrap();
+    create_index(
+        &catalog,
+        "eq_db",
+        "staff",
+        "by_salary",
+        &[String::from("salary")],
+    )
+    .unwrap();
     let after = run_select(&catalog, "eq_db", "SELECT name FROM staff ORDER BY id");
 
     assert_eq!(before, after, "index-driven scan must not change results");
@@ -146,7 +167,14 @@ fn index_is_maintained_on_insert() {
     let _ws = common::TestWorkspace::new("btree", "maint");
     let catalog = setup_table("mnt_db");
 
-    create_index(&catalog, "mnt_db", "staff", "by_salary", &[String::from("salary")]).unwrap();
+    create_index(
+        &catalog,
+        "mnt_db",
+        "staff",
+        "by_salary",
+        &[String::from("salary")],
+    )
+    .unwrap();
 
     // Insert a new row after index creation, the way the DML handlers do:
     // raw tuple insert gives us the heap location, then the index is told
@@ -155,7 +183,9 @@ fn index_is_maintained_on_insert() {
         &[DataType::Int, DataType::Varchar(50), DataType::Int],
         &[
             Some(storage_manager::types::DataValue::Int(7)),
-            Some(storage_manager::types::DataValue::Varchar("Gus".to_string())),
+            Some(storage_manager::types::DataValue::Varchar(
+                "Gus".to_string(),
+            )),
             Some(storage_manager::types::DataValue::Int(55000)),
         ],
     )
@@ -171,7 +201,11 @@ fn index_is_maintained_on_insert() {
     )
     .unwrap();
 
-    let out = run_select(&catalog, "mnt_db", "SELECT name FROM staff WHERE salary = 55000");
+    let out = run_select(
+        &catalog,
+        "mnt_db",
+        "SELECT name FROM staff WHERE salary = 55000",
+    );
     assert_eq!(out.len(), 1);
     assert_eq!(out[0][0], "'Gus'");
 }
@@ -184,7 +218,14 @@ fn index_scan_walks_keys_in_ascending_order() {
     let _ws = common::TestWorkspace::new("btree", "keyorder");
     let catalog = setup_table("ko_db");
 
-    create_index(&catalog, "ko_db", "staff", "by_salary", &[String::from("salary")]).unwrap();
+    create_index(
+        &catalog,
+        "ko_db",
+        "staff",
+        "by_salary",
+        &[String::from("salary")],
+    )
+    .unwrap();
 
     let out = run_select(&catalog, "ko_db", "SELECT salary FROM staff");
     let salaries: Vec<String> = out.iter().map(|r| r[0].clone()).collect();

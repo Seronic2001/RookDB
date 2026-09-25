@@ -16,7 +16,8 @@ pub fn catalog_columns_to_schema(columns: &[Column]) -> ColumnSchema {
         .map(|col| ColumnInfo {
             name: col.name.clone(),
             data_type: col.data_type.to_string(),
-            nullable: col.nullable })
+            nullable: col.nullable,
+        })
         .collect();
     ColumnSchema { columns: infos }
 }
@@ -83,11 +84,7 @@ fn resolve_predicate_columns_recursive(
     }
 }
 
-fn resolve_expr_columns(
-    expr: &ExprNode,
-    schema: &ColumnSchema,
-    errors: &mut Vec<String>,
-) {
+fn resolve_expr_columns(expr: &ExprNode, schema: &ColumnSchema, errors: &mut Vec<String>) {
     match expr {
         ExprNode::Column(name) => {
             if !schema.contains(name) {
@@ -97,13 +94,14 @@ fn resolve_expr_columns(
         ExprNode::Compound(parts) => {
             // For `table.column`, extract the column part (last element)
             if let Some(col_name) = parts.last()
-                && !schema.contains(col_name) {
-                    errors.push(format!(
-                        "Column '{}' not found (resolved from '{}')",
-                        col_name,
-                        parts.join(".")
-                    ));
-                }
+                && !schema.contains(col_name)
+            {
+                errors.push(format!(
+                    "Column '{}' not found (resolved from '{}')",
+                    col_name,
+                    parts.join(".")
+                ));
+            }
         }
         ExprNode::Constant(_) => {} // constants always valid
         ExprNode::Binary { left, right, .. } => {
@@ -123,7 +121,10 @@ fn resolve_expr_columns(
                 }
             }
         }
-        ExprNode::Case { when_then_pairs, else_result } => {
+        ExprNode::Case {
+            when_then_pairs,
+            else_result,
+        } => {
             for (when, then) in when_then_pairs {
                 resolve_expr_columns(when, schema, errors);
                 resolve_expr_columns(then, schema, errors);
@@ -132,14 +133,11 @@ fn resolve_expr_columns(
                 resolve_expr_columns(else_node, schema, errors);
             }
         }
-        ExprNode::Compare { left, right, .. }
-        | ExprNode::Logical { left, right, .. } => {
+        ExprNode::Compare { left, right, .. } | ExprNode::Logical { left, right, .. } => {
             resolve_expr_columns(left, schema, errors);
             resolve_expr_columns(right, schema, errors);
         }
-        ExprNode::Not(inner)
-        | ExprNode::IsNull(inner)
-        | ExprNode::IsNotNull(inner) => {
+        ExprNode::Not(inner) | ExprNode::IsNull(inner) | ExprNode::IsNotNull(inner) => {
             resolve_expr_columns(inner, schema, errors);
         }
     }
