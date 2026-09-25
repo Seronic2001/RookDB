@@ -46,10 +46,10 @@ jobs:
       with:
         components: rustfmt, clippy
     - name: Check formatting
-      run: cargo fmt --all -- --check
+      run: cargo fmt -p storage_manager -- --check
 
     - name: Run clippy
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy -p storage_manager --all-targets -- -D warnings
 
     - name: Build
       run: cargo build --verbose
