@@ -270,12 +270,7 @@ impl BTreeNode {
                 let needed = CHILD_SIZE + encoded_key_size; // one more child + one key
                 used + needed <= BTREE_PAGE_SIZE
             }
-            BTreeNode::Leaf {
-                num_keys,
-                keys,
-                values: _,
-                ..
-            } => {
+            BTreeNode::Leaf { num_keys, keys, .. } => {
                 let nk = *num_keys as usize;
                 let used = LEAF_HEADER
                     + nk * VALUE_SIZE  // values

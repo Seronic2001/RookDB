@@ -74,7 +74,7 @@ impl SetOpOperator {
 
         match (self.op_type, self.all) {
             (SetOpType::Union, true) => {
-                self.output_buffer = self.left_tuples.drain(..).collect();
+                self.output_buffer = std::mem::take(&mut self.left_tuples);
                 self.output_buffer.append(&mut self.right_tuples);
             }
 

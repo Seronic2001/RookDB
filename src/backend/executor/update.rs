@@ -437,23 +437,23 @@ fn apply_assignments_typed(
 
         if let Some(ref dv) = new_val {
             match (target_type, dv) {
-                (DataType::Varchar(max_len), DataValue::Varchar(s)) => {
-                    if s.len() > *max_len as usize {
-                        return Err(format!(
-                            "VARCHAR payload length {} exceeds declared limit {}",
-                            s.len(),
-                            max_len
-                        ));
-                    }
+                (DataType::Varchar(max_len), DataValue::Varchar(s))
+                    if s.len() > *max_len as usize =>
+                {
+                    return Err(format!(
+                        "VARCHAR payload length {} exceeds declared limit {}",
+                        s.len(),
+                        max_len
+                    ));
                 }
-                (DataType::Char(n) | DataType::Character(n), DataValue::Char(s)) => {
-                    if s.len() > *n as usize {
-                        return Err(format!(
-                            "CHAR payload length {} exceeds declared limit {}",
-                            s.len(),
-                            n
-                        ));
-                    }
+                (DataType::Char(n) | DataType::Character(n), DataValue::Char(s))
+                    if s.len() > *n as usize =>
+                {
+                    return Err(format!(
+                        "CHAR payload length {} exceeds declared limit {}",
+                        s.len(),
+                        n
+                    ));
                 }
                 _ => {}
             }
@@ -667,31 +667,31 @@ pub fn update_by_pointers(
             });
         }
         match &asgn.expr {
-            SetExpr::Column(src_col) => {
-                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) {
-                    log::warn!(
-                        "[UpdateByPointers] Source column '{}' not found in table '{}'",
-                        src_col,
-                        table_name
-                    );
-                    return Ok(UpdateResult {
-                        updated_count: 0,
-                        returning_rows: Vec::new(),
-                    });
-                }
+            SetExpr::Column(src_col)
+                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) =>
+            {
+                log::warn!(
+                    "[UpdateByPointers] Source column '{}' not found in table '{}'",
+                    src_col,
+                    table_name
+                );
+                return Ok(UpdateResult {
+                    updated_count: 0,
+                    returning_rows: Vec::new(),
+                });
             }
-            SetExpr::Expr { src_col, .. } => {
-                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) {
-                    log::warn!(
-                        "[UpdateByPointers] Source column '{}' not found in table '{}'",
-                        src_col,
-                        table_name
-                    );
-                    return Ok(UpdateResult {
-                        updated_count: 0,
-                        returning_rows: Vec::new(),
-                    });
-                }
+            SetExpr::Expr { src_col, .. }
+                if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(src_col)) =>
+            {
+                log::warn!(
+                    "[UpdateByPointers] Source column '{}' not found in table '{}'",
+                    src_col,
+                    table_name
+                );
+                return Ok(UpdateResult {
+                    updated_count: 0,
+                    returning_rows: Vec::new(),
+                });
             }
             _ => {}
         }

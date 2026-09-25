@@ -249,7 +249,7 @@ pub fn checkpoint() {
     }
     {
         let mut cache = lock(btree_cache());
-        for (_, (tree, ops)) in cache.iter_mut() {
+        for (tree, ops) in cache.values_mut() {
             if *ops > 0 {
                 if let Err(e) = tree.sync() {
                     log::warn!("[cache] btree checkpoint sync failed: {}", e);

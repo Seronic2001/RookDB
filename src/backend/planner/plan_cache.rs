@@ -454,11 +454,9 @@ impl CachedInsert {
             let row_values = &values[offset..offset + row_len];
             offset += row_len;
 
-            let row_strings: Vec<String>;
-            let final_refs: Vec<&str>;
-
-            if self.columns.is_empty() {
-                final_refs = row_values.to_vec();
+            // The strings backing `final_refs` must outlive it, so bind them here.
+            let row_strings: Vec<String> = if self.columns.is_empty() {
+                Vec::new()
             } else {
                 let mut buf: Vec<String> = table
                     .columns
@@ -480,9 +478,13 @@ impl CachedInsert {
                     buf[pos] = row_values[i].to_string();
                 }
 
-                row_strings = buf;
-                final_refs = row_strings.iter().map(|s| s.as_str()).collect();
-            }
+                buf
+            };
+            let final_refs: Vec<&str> = if self.columns.is_empty() {
+                row_values.to_vec()
+            } else {
+                row_strings.iter().map(|s| s.as_str()).collect()
+            };
 
             match insert_single_tuple(catalog, db_name, &self.table, &final_refs) {
                 Ok(true) => inserted_count += 1,
